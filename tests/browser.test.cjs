@@ -129,6 +129,64 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
   test('unrecognized operation cannot call backend jobs',async()=>{
     assert.equal((await execute(command('runIncrement'))).ok,false);
   });
+  const completeWithNote = async note => {
+    const read = await execute(command('search'));
+    assert.equal(read.ok,true,JSON.stringify(read));
+    return execute(command('complete',{expected:read.data.row,expected_comparison:read.data.comparison,reviewed:true,note}));
+  };
+  test('exact short claimed note is accepted after readback',async()=>{
+    await page.evaluate(()=>testConfig.claim='已认领');
+    const result=await completeWithNote('已认领');
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.row.remark,'已认领');
+  });
+  test('unclaimed record cannot use claimed note',async()=>{
+    const result=await completeWithNote('已认领');
+    assert.equal(result.ok,false);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('both SA identifiers blank use exact requested note',async()=>{
+    const result=await completeWithNote('DOI和WOSID SA未提交');
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.row.remark,'DOI和WOSID SA未提交');
+  });
+  test('only one missing identifier cannot use combined note',async()=>{
+    await page.evaluate(()=>testConfig.saDoi='10.example/present');
+    const result=await completeWithNote('DOI和WOSID SA未提交');
+    assert.equal(result.ok,false);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('missing detail field is not a blank identifier',async()=>{
+    await page.evaluate(()=>testConfig.omitWos=true);
+    const result=await completeWithNote('DOI和WOSID SA未提交');
+    assert.equal(result.ok,false);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('remark-related detail change stops despite unchanged list row',async()=>{
+    const read=await execute(command('search'));
+    await page.evaluate(()=>testConfig.libraryWos='WOS:CHANGED');
+    const result=await execute(command('complete',{expected:read.data.row,expected_comparison:read.data.comparison,reviewed:true,note:'DOI和WOSID SA未提交'}));
+    assert.match(result.error,/详情在确认后发生变化/);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('confirmed correspondent correction uses exact remark',async()=>{
+    const result=await completeWithNote('通讯作者修正');
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.row.remark,'通讯作者修正');
+  });
+  test('unknown correspondent flag blocks correction remark',async()=>{
+    await page.evaluate(()=>testConfig.authorInfo='是否通讯作者：未知');
+    const result=await completeWithNote('通讯作者修正');
+    assert.equal(result.ok,false);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('combined remarks preserve wording',async()=>{
+    await page.evaluate(()=>testConfig.claim='已认领');
+    const note='已认领；DOI和WOSID SA未提交；通讯作者修正';
+    const result=await completeWithNote(note);
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.row.remark,note);
+  });
   try {
     for (const [name, fn] of cases) { await reset(); await fn(); console.log('PASS',name); }
     console.log(`Browser adapter: ${cases.length} offline cases passed. No production requests.`);

@@ -13,6 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from bridge import Bridge
 from core import Journal, SafetyStop, guide, latest_roster, read_roster
+from remarks import CLAIMED, CORRESPONDENT_FIXED, PRESETS, append_remark, validate_note
 
 BASE = Path(__file__).resolve().parent
 
@@ -93,7 +94,7 @@ class App:
         right = ttk.Frame(panes)
         panes.add(left, weight=2)
         panes.add(right, weight=5)
-        self.tree = ttk.Treeview(left, columns=("id", "matches", "state"), show="headings", selectmode="browse", height=8)
+        self.tree = ttk.Treeview(left, columns=("id", "matches", "state"), show="headings", selectmode="browse", height=7)
         for key, title, width in [("id", "名单 ID", 190), ("matches", "匹配", 45), ("state", "本地进度", 110)]:
             self.tree.heading(key, text=title)
             self.tree.column(key, width=width, minwidth=40)
@@ -104,7 +105,7 @@ class App:
         self.tree.bind("<<TreeviewSelect>>", self.select_record)
         self.tree.bind("<Button-1>", lambda _e: "break" if self.busy else None)
         self.tree.bind("<KeyPress>", lambda _e: "break" if self.busy else None)
-        self.details = tk.Text(right, wrap="word", height=12, font=("Microsoft YaHei UI", 10), relief="flat", padx=14, pady=12, bg="white")
+        self.details = tk.Text(right, wrap="word", height=10, font=("Microsoft YaHei UI", 10), relief="flat", padx=14, pady=12, bg="white")
         detail_scroll = ttk.Scrollbar(right, orient="vertical", command=self.details.yview)
         self.details.configure(yscrollcommand=detail_scroll.set)
         detail_scroll.pack(side="right", fill="y")
@@ -126,7 +127,12 @@ class App:
         self.item_entry.pack(side="left", padx=6)
         self.button(id_row, "写入平台号并回读", self.link)
         ttk.Label(id_row, text="仅单个完整编号；不会自动合并").pack(side="left")
-        ttk.Label(edit, text="核验依据与处理备注（必填；请写清原文/数据库出处、判断及已完成的修改）：").pack(anchor="w", pady=(6, 3))
+        presets = ttk.Frame(edit)
+        presets.pack(fill="x", pady=(4, 0))
+        ttk.Label(presets, text="标准备注：").pack(side="left")
+        for rule in PRESETS:
+            self.button(presets, rule, lambda value=rule: self.use_remark(value))
+        ttk.Label(edit, text="处理备注（可用上方标准备注；多项用分号合并，可补充依据）：").pack(anchor="w", pady=(6, 3))
         self.note = tk.Text(edit, height=3, wrap="word", font=("Microsoft YaHei UI", 10), relief="solid", borderwidth=1)
         self.note.pack(fill="x")
         last = ttk.Frame(edit)
@@ -342,13 +348,31 @@ class App:
             self.status.set("已交给你在原网页操作。保存并关闭所有编辑窗口后，点击“搜索 / 人工处理后重查”。")
         self.run(lambda: self.bridge.call(action, payload), opened, "正在核验目标并打开原网页操作窗口…")
 
+    def use_remark(self, rule):
+        try:
+            self.require_record(snapshot=True)
+            reason = self.current.reason + "；" + str(self.snapshot.get("reason", ""))
+            validate_note(rule, self.comparison, reason, self.snapshot.get("matchCount"))
+            if rule in (CLAIMED, CORRESPONDENT_FIXED):
+                question = ("已核对工号与作者身份，完成认领并保存、重新查询确认了吗？" if rule == CLAIMED else
+                            "已按原文修正通讯作者标记，保存后重新查询并确认正确了吗？")
+                if not messagebox.askyesno("确认处理已完成", question, parent=self.root):
+                    return
+            value = append_remark(self.note.get("1.0", "end"), rule)
+            self.note.delete("1.0", "end")
+            self.note.insert("1.0", value)
+            self.reviewed.set(False)
+            self.status.set("已填入标准备注，尚未提交。请勾选已核验，再设置已处理。")
+        except Exception as exc:
+            messagebox.showwarning("暂不能使用该备注", str(exc), parent=self.root)
+
     def reviewed_note(self):
         self.require_record(snapshot=True)
         note = self.note.get("1.0", "end").strip()
-        if not self.reviewed.get() or len(note) < 6:
-            raise SafetyStop("请填写核验依据和结论（至少 6 字），并勾选已核验。")
-        if len(note) > 2000:
-            raise SafetyStop("备注请控制在 2000 字以内；如后台另有更小限制，请精简。")
+        if not self.reviewed.get():
+            raise SafetyStop("请确认当前记录的处理已完成，并勾选已核验。")
+        reason = self.current.reason + "；" + str(self.snapshot.get("reason", ""))
+        validate_note(note, self.comparison, reason, self.snapshot.get("matchCount"))
         return note
 
     def write(self, action):
@@ -365,7 +389,8 @@ class App:
             if not messagebox.askyesno("确认已核验的单条修改", question, parent=self.root):
                 return
             self.require_record(snapshot=True)
-            payload = {"sa_id": self.current.sa_id, "expected": self.snapshot, "reviewed": True, "note": note, "item_id": target}
+            payload = {"sa_id": self.current.sa_id, "expected": self.snapshot, "reviewed": True, "note": note,
+                       "item_id": target, "expected_comparison": self.comparison}
             self.journal.save(self.current, "写入结果待核验", note, {"action": action, "before": self.snapshot, "target": target, "note": note})
             self.update_tree()
         except Exception as exc:
@@ -402,10 +427,13 @@ class App:
             return
         def verified(result):
             self.snapshot = result["row"]
+            self.comparison = result.get("comparison", [])
             if self.snapshot.get("markStatus") != "已处理":
                 self.reviewed.set(False)
                 self.status.set("网页状态已变化，不能记录完成。请重新核验。")
                 return
+            reason = self.current.reason + "；" + str(self.snapshot.get("reason", ""))
+            validate_note(note, self.comparison, reason, self.snapshot.get("matchCount"))
             self.journal.save(self.current, "已完成", note, result)
             self.update_tree()
             self.reviewed.set(False)

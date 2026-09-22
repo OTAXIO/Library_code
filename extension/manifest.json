@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SA 比对半自动助手",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "连接本机弹窗，仅在已登录的机构知识库比对页执行经人工确认的操作。",
   "permissions": ["storage", "scripting", "activeTab"],
   "host_permissions": [

@@ -2,11 +2,13 @@
 import tempfile
 import tkinter as tk
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from app import App
 from bridge import Bridge
 from core import Journal, Record, Roster
+from remarks import CLAIMED
 
 
 class UITests(unittest.TestCase):
@@ -34,6 +36,17 @@ class UITests(unittest.TestCase):
                 app.set_busy(False)
                 self.assertEqual(str(app.owner_box['state']), "readonly")
                 self.assertLessEqual(root.winfo_reqheight(), 900)
+                claimed_record = Record(2, "测试员", "demo-001", "Synthetic", "", "", "00001", 1, "123", "待处理", "作者不一致", "1")
+                app.current = claimed_record
+                app.snapshot = {"matchCount": 1, "reason": "作者不一致"}
+                app.comparison = [{"label": "认领状态", "sa": "测试员", "library": "已认领"}]
+                with patch.object(app, "require_record", return_value=claimed_record), patch("app.messagebox.askyesno", return_value=True):
+                    app.use_remark(CLAIMED)
+                    app.use_remark(CLAIMED)
+                    self.assertEqual(app.note.get("1.0", "end").strip(), "已认领")
+                    self.assertFalse(app.reviewed.get())
+                    app.reviewed.set(True)
+                    self.assertEqual(app.reviewed_note(), "已认领")
             finally:
                 app.bridge.close()
                 app.journal.close()

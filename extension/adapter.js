@@ -124,9 +124,46 @@ async function runSACommand(command) {
       else drawer.handleClaim();
       return {ok: true, data: {row: before, manual: true}};
     }
-    if (!command.reviewed || typeof command.note !== "string" || command.note.trim().length < 6 || command.note.length > 2000)
+    const presetNotes = ["已认领", "DOI和WOSID SA未提交", "通讯作者修正"];
+    const note = typeof command.note === "string" ? command.note.trim() : "";
+    const noteParts = note.split(/[；;]/).map(part => part.trim()).filter(Boolean);
+    const knownShortNote = noteParts.length > 0 && noteParts.every(part => presetNotes.includes(part));
+    if (!command.reviewed || !note || (note.length < 6 && !knownShortNote) || note.length > 2000)
       stop("缺少人工核验及处理备注");
     if (row.markStatus !== "待处理") stop("记录已经处理，禁止再次切换状态");
+    const selected = presetNotes.filter(preset => note.includes(preset));
+    if (selected.length) {
+      const comparison = await showDetail();
+      const field = (rows, label, side) => {
+        if (!Array.isArray(rows)) stop("缺少上次核验的详情，请重新查询");
+        const matches = rows.filter(item => item.label === label);
+        if (matches.length !== 1 || typeof matches[0][side] !== "string") stop("备注所需详情字段不完整：" + label);
+        return matches[0][side].trim();
+      };
+      const needed = new Set();
+      if (selected.includes("已认领")) {
+        needed.add("认领状态"); needed.add("作者信息");
+        if (Number(row.matchCount) !== 1 || field(comparison, "认领状态", "library") !== "已认领")
+          stop("尚未回读到唯一条目已认领，不能提交“已认领”备注");
+      }
+      if (selected.includes("DOI和WOSID SA未提交")) {
+        needed.add("DOI"); needed.add("WOS记录号");
+        if (field(comparison, "DOI", "sa") || field(comparison, "WOS记录号", "sa"))
+          stop("SA 的 DOI 和 WOS ID 并非同时为空，不能提交双缺失备注");
+      }
+      if (selected.includes("通讯作者修正")) {
+        needed.add("作者信息");
+        if (!/是否通讯作者\s*[：:]\s*[是否](?:\s|$)/.test(field(comparison, "作者信息", "library")))
+          stop("本库通讯作者标记未知，请先修正并重新核验");
+      }
+      for (const label of needed) for (const side of ["sa", "library"]) {
+        if (field(comparison, label, side) !== field(command.expected_comparison, label, side))
+          stop("备注相关详情在确认后发生变化，请重新查询和核验");
+      }
+      drawer.dialogVisible = false;
+      await vm.$nextTick();
+      await wait(() => !visibleAll(".el-drawer").length, "关闭只读详情", 5000);
+    }
     if (command.action === "complete") {
       const modal = vm.$refs.compareStatusDialog;
       if (!modal || typeof modal.show !== "function" || typeof modal.handleConfirm !== "function") stop("状态弹窗结构不兼容");

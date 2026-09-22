@@ -159,10 +159,14 @@ def guide(record):
         lines.append("【单条匹配】打开对比详情，结合论文原文逐项核验；红色差异不等于本库错误。")
     if "作者不一致" in record.reason:
         lines.append("作者不一致：按工号核实学者身份，必要时在原网页认领；别名新增必须核对身份。")
+        lines.append("原来未认领的：完成认领、保存并重新查询确认后，备注“已认领”，不能在认领前写已完成。")
     if "第一作者" in record.reason or "通讯作者" in record.reason:
         lines.append("作者/第一单位标记：核对原文署名和单位；SA 正确则在本库编辑，本库正确则说明依据，不反向修改本库。")
     if "DOI" in record.reason or "WOS" in record.reason:
         lines.append("DOI/WOS 差异：先证明是同一篇论文，再核对正确标识；不能仅凭题名相似直接关闭。")
+        lines.append("若 SA 的 DOI 和 WOS ID 都未提交，备注“DOI和WOSID SA未提交”；仅缺一个时不要使用此双缺失备注。")
+    if "通讯作者" in record.reason:
+        lines.append("通讯作者错误：按原文修正、保存并重新查询确认完成后，备注“通讯作者修正”。")
     lines.append("完成前：保存原文/页面证据、核验修改后的页面，再填写备注并设置已处理。遇到登录、报错或不认识的控件，暂停人工处理。")
     return "\n\n".join(lines)
 

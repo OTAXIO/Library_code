@@ -18,7 +18,11 @@ const bindVisibility = (component, id) => {
 const detail = {currentSaLzkId:"",dialogLoading:false,compareData:[],saLzkCompareData:[],
   show(row){this.currentSaLzkId=row.saLzkId; this.dialogVisible=true; this.dialogLoading=true;
     this.compareData = [{label:"题名",compareLeftValue:"Synthetic paper",compareRightValue:"Synthetic paper"},
-      {label:"作者信息",compareLeftValue:"姓名：测试员<br/>是否通讯作者：是",compareRightValue:"署名：Demo<br/>是否通讯作者：否"}];
+      {label:"作者信息",compareLeftValue:"姓名：测试员<br/>是否通讯作者：是",compareRightValue:testConfig.authorInfo??"署名：Demo<br/>是否通讯作者：否"},
+      {label:"认领状态",compareLeftValue:"测试员",compareRightValue:testConfig.claim??"未认领"},
+      {label:"DOI",compareLeftValue:testConfig.saDoi??"",compareRightValue:"10.example/demo"},
+      {label:"WOS记录号",compareLeftValue:testConfig.saWos??"",compareRightValue:testConfig.libraryWos??"WOS:DEMO"}];
+    if(testConfig.omitWos)this.compareData=this.compareData.filter(item=>item.label!=="WOS记录号");
     this.saLzkCompareData=copy(this.compareData); this.dialogLoading=false;},
   editItem(id){ window.openedEditor=id; }, handleClaim(){window.openedClaim=true;}
 };
