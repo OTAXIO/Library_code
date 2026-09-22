@@ -21,6 +21,7 @@ HEADERS = {
     "mark": "标记状态", "reason": "标记为待处理原因",
 }
 QUERY_HEADER = "查询方式（DOI和WOS_ID：1   题名： 2）"
+ROSTER_FILENAME = "list.xlsx"
 
 
 def text(value):
@@ -72,13 +73,13 @@ class Roster:
             raise SafetyStop("名单文件已改变。请重新读取名单，再核验当前记录。")
 
 
-def latest_roster(folder):
-    candidates = [p for p in Path(folder).glob("数据比对结果*.xlsx")
-                  if p.is_file() and not p.name.startswith("~$")]
-    if not candidates:
-        raise SafetyStop("未找到「数据比对结果*.xlsx」，请用“选择名单”指定文件。")
-    # Latest means most recently modified, not largest filename/date range.
-    return max(candidates, key=lambda p: (p.stat().st_mtime_ns, p.name))
+def fixed_roster_path(folder=None):
+    # Resolve from the code location, never the launch directory or modification time.
+    directory = Path(folder).resolve() if folder is not None else Path(__file__).resolve().parent
+    path = directory / ROSTER_FILENAME
+    if not path.is_file():
+        raise SafetyStop(f"未找到固定名单：{path}\n请将名单保存为 code 文件夹内的 list.xlsx，再点击“重新读取 list.xlsx”。\n不读取其他名称、父目录或 .xls 文件；不要将文件命名为 list.xlsx.xlsx。")
+    return path
 
 
 def read_roster(path):

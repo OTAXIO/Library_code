@@ -9,10 +9,10 @@ import tkinter as tk
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, ttk
 
 from bridge import Bridge
-from core import Journal, SafetyStop, guide, latest_roster, read_roster
+from core import Journal, ROSTER_FILENAME, SafetyStop, fixed_roster_path, guide, read_roster
 from remarks import CLAIMED, CORRESPONDENT_FIXED, PRESETS, append_remark, validate_note
 
 BASE = Path(__file__).resolve().parent
@@ -33,7 +33,7 @@ class App:
         self.owner = tk.StringVar()
         self.status = tk.StringVar(value="先打开并登录网页，再连接浏览器。")
         self.connection = tk.StringVar(value="浏览器未连接")
-        self.file_info = tk.StringVar(value="尚未读取名单")
+        self.file_info = tk.StringVar(value=f"固定名单：{BASE / ROSTER_FILENAME}（尚未读取）")
         self.progress = tk.StringVar(value="请选择负责人")
         self.item_id = tk.StringVar()
         self.reviewed = tk.BooleanVar(value=False)
@@ -43,7 +43,7 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(150, self.pump)
         if auto_load:
-            self.root.after(350, self.load_latest)
+            self.root.after(350, self.reload_roster)
 
     def button(self, parent, label, command, **pack):
         button = ttk.Button(parent, text=label, command=command)
@@ -72,8 +72,7 @@ class App:
         top = ttk.Frame(frame)
         top.grid(row=2, column=0, sticky="ew")
         self.button(top, "连接浏览器 / 配对码", self.pair)
-        self.button(top, "读取最新名单", self.load_latest)
-        self.button(top, "选择名单…", self.choose_roster)
+        self.button(top, "重新读取 list.xlsx", self.reload_roster)
         self.button(top, "使用说明", self.help)
         ttk.Label(top, textvariable=self.connection, style="State.TLabel").pack(side="right")
         ttk.Label(frame, textvariable=self.file_info, wraplength=1000).grid(row=3, column=0, sticky="w", pady=(2, 8))
@@ -192,24 +191,25 @@ class App:
                 self.events.put((False, callback, exc))
         threading.Thread(target=work, daemon=True).start()
 
-    def load_latest(self):
+    def reload_roster(self):
         if self.busy:
             return
-        try:
-            path = latest_roster(BASE.parent)
-        except Exception as exc:
-            messagebox.showwarning("读取名单", str(exc), parent=self.root)
-            return
-        self.load(path)
-
-    def choose_roster(self):
-        path = filedialog.askopenfilename(title="选择待处理名单", initialdir=BASE.parent, filetypes=[("Excel 名单", "*.xlsx")])
-        if path:
-            self.load(path)
-
-    def load(self, path):
+        # Clear the previous queue even if the replacement file is missing/invalid.
+        self.roster = None
+        self.records = []
         self.current = self.snapshot = None
-        self.run(lambda: read_roster(path), self.loaded, "正在检查表头、编号精度及重复 ID…")
+        self.comparison = []
+        self.owner.set("")
+        self.owner_box["values"] = []
+        self.tree.delete(*self.tree.get_children())
+        self.reviewed.set(False)
+        self.item_id.set("")
+        self.note.delete("1.0", "end")
+        self.file_info.set(f"固定名单：{BASE / ROSTER_FILENAME}（等待读取）")
+        self.progress.set("名单未加载")
+        self.show_text("正在读取 code/list.xlsx。读取成功后，请重新选择负责人。")
+        self.run(lambda: read_roster(fixed_roster_path(BASE)), self.loaded,
+                 "正在读取 code/list.xlsx 并检查表头、编号精度及重复 ID…")
 
     def loaded(self, roster):
         self.roster = roster

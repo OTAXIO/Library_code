@@ -5,9 +5,9 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from app import App
+from app import App, BASE
 from bridge import Bridge
-from core import Journal, Record, Roster
+from core import Journal, Record, Roster, SafetyStop
 from remarks import CLAIMED
 
 
@@ -47,6 +47,31 @@ class UITests(unittest.TestCase):
                     self.assertFalse(app.reviewed.get())
                     app.reviewed.set(True)
                     self.assertEqual(app.reviewed_note(), "已认领")
+                with patch("app.fixed_roster_path", return_value=Path(tmp) / "list.xlsx") as fixed, patch("app.read_roster") as read:
+                    with patch.object(app, "run", side_effect=lambda job, callback, status: job()):
+                        app.reload_roster()
+                    fixed.assert_called_once_with(BASE)
+                    read.assert_called_once_with(Path(tmp) / "list.xlsx")
+                self.assertIsNone(app.roster)
+                self.assertIsNone(app.current)
+                self.assertIsNone(app.snapshot)
+                self.assertEqual(app.records, [])
+                self.assertEqual(app.tree.get_children(), ())
+                self.assertFalse(app.reviewed.get())
+                self.assertEqual(app.note.get("1.0", "end").strip(), "")
+                app.current = claimed_record
+                app.snapshot = {"matchCount": 1}
+                app.records = [claimed_record]
+                app.roster = object()
+                with patch("app.fixed_roster_path", side_effect=SafetyStop("Missing list.xlsx")), patch("app.read_roster") as read:
+                    with patch.object(app, "run", side_effect=lambda job, callback, status: job()):
+                        with self.assertRaises(SafetyStop):
+                            app.reload_roster()
+                    read.assert_not_called()
+                self.assertIsNone(app.roster)
+                self.assertIsNone(app.current)
+                self.assertIsNone(app.snapshot)
+                self.assertEqual(app.records, [])
             finally:
                 app.bridge.close()
                 app.journal.close()

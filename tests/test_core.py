@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import time
@@ -6,10 +7,11 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import Workbook
 from bridge import Bridge
-from core import HEADERS, QUERY_HEADER, Journal, SafetyStop, guide, latest_roster, read_roster
+from core import HEADERS, QUERY_HEADER, Journal, SafetyStop, fixed_roster_path, guide, read_roster
 
 
 class CoreTests(unittest.TestCase):
@@ -31,7 +33,7 @@ class CoreTests(unittest.TestCase):
         book.active.append(row)
         if duplicate:
             book.active.append(row)
-        path = self.root / "数据比对结果-test.xlsx"
+        path = self.root / "list.xlsx"
         book.save(path)
         return path
 
@@ -65,10 +67,41 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(SafetyStop):
             roster.assert_unchanged()
 
-    def test_latest_ignores_lockfile(self):
+    def test_fixed_path_ignores_newer_other_names(self):
         path = self.roster()
-        (self.root / "~$数据比对结果-test.xlsx").touch()
-        self.assertEqual(latest_roster(self.root), path)
+        for name in ("~$list.xlsx", "list-2026.xlsx", "数据比对结果-new.xlsx"):
+            (self.root / name).touch()
+        self.assertEqual(fixed_roster_path(self.root), path)
+
+    def test_fixed_path_missing_has_no_parent_fallback(self):
+        self.roster()
+        code_dir = self.root / "code"
+        code_dir.mkdir()
+        with self.assertRaisesRegex(SafetyStop, "list.xlsx"):
+            fixed_roster_path(code_dir)
+
+    def test_fixed_path_rejects_other_extensions(self):
+        for name in ("list.xls", "list.xlsm", "list.xlsx.xlsx", "~$list.xlsx"):
+            (self.root / name).touch()
+        with self.assertRaises(SafetyStop):
+            fixed_roster_path(self.root)
+
+    def test_fixed_path_does_not_depend_on_launch_directory(self):
+        path = self.roster()
+        launch_dir = self.root / "other"
+        launch_dir.mkdir()
+        previous_dir = Path.cwd()
+        try:
+            os.chdir(launch_dir)
+            with patch("core.__file__", str(self.root / "core.py")):
+                self.assertEqual(fixed_roster_path(), path)
+        finally:
+            os.chdir(previous_dir)
+
+    def test_fixed_path_rejects_directory_named_list(self):
+        (self.root / "list.xlsx").mkdir()
+        with self.assertRaises(SafetyStop):
+            fixed_roster_path(self.root)
 
     def test_checkpoint_survives_restart(self):
         record = read_roster(self.roster()).records[0]
