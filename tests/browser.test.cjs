@@ -76,6 +76,13 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.match(result.error,/数据在核验后已变化/);
     assert.equal(await page.evaluate(()=>writeCount),0);
   });
+  test('snapshot key ordering does not trigger false conflicts',async()=>{
+    const read=await execute(command('search'));
+    const expected=Object.fromEntries(Object.entries(read.data.row).reverse());
+    const result=await execute(command('open_metadata',{expected}));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
   test('complete writes once and verifies status plus remark',async()=>{
     const read=await execute(command('search'));
     const result=await execute(command('complete',{expected:read.data.row,note:'已核验原文，本库正确。',reviewed:true}));

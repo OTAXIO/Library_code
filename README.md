@@ -69,11 +69,13 @@
 
 ## 6. 版本与后续更新
 
-代码独立 Git 仓库位于 `code/.git`，远程为 [OTAXIO/Library_code](https://github.com/OTAXIO/Library_code)。上一级原有仓库包含原始资料，**不要用上一级仓库向此远程推送**。
+代码独立 Git 仓库位于 `code/.git`，远程为 [OTAXIO/Library_code](https://github.com/OTAXIO/Library_code)。开发开始时发现上一级原有历史包含原始资料，因此另建代码仓库；**不要把包含原始名单的历史推送到此远程**。
 
 关键更新前在 `code` 仓库提交、上传上一阶段，再修改；不要执行强制推送。首次代码生成前已经提交并上传初始化及设计边界。原始 PPT、Excel、浏览器配对信息、数据库、运行日志均不在代码仓库中。
 
 维护者可运行：`python -m unittest discover -s tests -v`；浏览器适配器离线测试：安装开发依赖后 `npm test`，需要本机 Edge 或 Playwright Chromium。测试文件为合成数据；所有浏览器网络请求被测试页拦截，不修改真实网站。
+
+真实扩展的离线全链路测试：`npm run test:extension`。它用隔离浏览器、合成网页及本机 8765 端口验证配对→搜索→写入→回读，运行前请退出桌面助手避免占用端口。共 **38 项检查通过**，具体见 `TEST_REPORT.md`。
 
 ## 7. 首条生产验收（请逐项完成）
 

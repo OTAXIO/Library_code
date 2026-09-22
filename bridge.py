@@ -63,7 +63,7 @@ class Bridge:
                         bridge.last_seen = time.monotonic()
                         pending = bridge.pending
                         command = None
-                        if pending and not pending["delivered"] and time.monotonic() < pending["deadline"]:
+                        if pending and not payload.get("claimOnly") and not pending["delivered"] and time.monotonic() < pending["deadline"]:
                             pending["delivered"] = True
                             command = pending["command"]
                     return self.reply(200, {"command": command})

@@ -145,13 +145,19 @@ class App:
                 success, callback, value = self.events.get_nowait()
                 self.set_busy(False)
                 if success:
-                    callback(value)
-                else:
+                    try:
+                        callback(value)
+                    except Exception as exc:
+                        success, value = False, SafetyStop(f"返回结果或本地记录异常：{exc}。请先核验网页，不要直接重试写入。")
+                if not success:
                     self.snapshot = None
                     self.reviewed.set(False)
                     if self.current:
-                        self.journal.save(self.current, "暂停待核验", str(value))
-                        self.update_tree()
+                        try:
+                            self.journal.save(self.current, "暂停待核验", str(value))
+                            self.update_tree()
+                        except Exception:
+                            self.status.set("本地留痕失败，请停止写入并检查磁盘。")
                     self.status.set("已暂停。请处理网页上的情况，再点击“搜索 / 人工处理后重查”。")
                     messagebox.showwarning("已暂停，等待你操作", str(value), parent=self.root)
         except queue.Empty:
@@ -330,7 +336,9 @@ class App:
             return
         def opened(_result):
             self.snapshot = None
+            self.comparison = []
             self.reviewed.set(False)
+            self.render()
             self.status.set("已交给你在原网页操作。保存并关闭所有编辑窗口后，点击“搜索 / 人工处理后重查”。")
         self.run(lambda: self.bridge.call(action, payload), opened, "正在核验目标并打开原网页操作窗口…")
 
@@ -356,6 +364,7 @@ class App:
             question += f"\n\n备注：{note}\n\n确认只对当前这一条执行？"
             if not messagebox.askyesno("确认已核验的单条修改", question, parent=self.root):
                 return
+            self.require_record(snapshot=True)
             payload = {"sa_id": self.current.sa_id, "expected": self.snapshot, "reviewed": True, "note": note, "item_id": target}
             self.journal.save(self.current, "写入结果待核验", note, {"action": action, "before": self.snapshot, "target": target, "note": note})
             self.update_tree()
@@ -364,13 +373,14 @@ class App:
             return
         def saved(result):
             self.snapshot = result["row"]
+            self.comparison = []
             self.reviewed.set(False)
             self.journal.save(self.current, "已完成" if action == "complete" else "平台号已核验", note, result)
             self.update_tree()
             self.render()
             self.status.set("状态及备注已回读确认，已留底。" if action == "complete" else "平台号已回读确认。请重新搜索详情，核验其他差异后再标记完成。")
             if action == "complete" and self.auto_next.get():
-                self.root.after(500, self.next_record)
+                self.root.after(500, lambda: self.next_record() if self.auto_next.get() else None)
             elif action == "link":
                 self.snapshot = None
         self.run(lambda: self.bridge.call(action, payload), saved, "正在执行单条修改并回读。请勿同时操作该网页；请求发出后无法撤回。")
@@ -401,7 +411,7 @@ class App:
             self.reviewed.set(False)
             self.status.set("已再次回读网页的已处理状态，并记录人工完成。")
             if self.auto_next.get():
-                self.root.after(500, self.next_record)
+                self.root.after(500, lambda: self.next_record() if self.auto_next.get() else None)
         self.run(lambda: self.bridge.call("search", payload), verified, "正在再次回读网页完成状态，仅更新本地记录…")
 
     def skip(self):

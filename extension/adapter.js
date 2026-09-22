@@ -37,7 +37,11 @@ async function runSACommand(command) {
     if (!["待处理", "已处理"].includes(row.markStatus)) stop("未知标记状态，需人工处理");
     if (!Number.isInteger(Number(row.matchCount)) || Number(row.matchCount) < 0) stop("匹配数量格式异常");
     const result = {};
-    for (const key of keys) result[key] = row[key] ?? "";
+    for (const key of keys) {
+      const value = row[key] ?? "";
+      if (!["string", "boolean", "number"].includes(typeof value)) stop("网页字段类型发生变化，停止操作");
+      result[key] = value;
+    }
     return result;
   };
   try {
@@ -92,7 +96,8 @@ async function runSACommand(command) {
     let row = await fresh();
     const before = snap(row);
     if (command.action !== "search") {
-      if (!command.expected || JSON.stringify(before) !== JSON.stringify(command.expected))
+      if (!command.expected || Object.keys(command.expected).sort().join() !== [...keys].sort().join() ||
+          !keys.every(key => before[key] === command.expected[key]))
         stop("网页数据在核验后已变化。请只读重查并再次核验，不能覆盖新数据");
     }
     const showDetail = async () => {

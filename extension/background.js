@@ -1,6 +1,7 @@
 importScripts("adapter.js");
 let polling = false;
 let busy = false;
+const trustedPopup = sender => sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL("popup.html");
 const validPage = url => {
   try { const u = new URL(url); return ["http:", "https:"].includes(u.protocol) &&
     u.hostname === "admin.ir.lib.sjtu.edu.cn" && u.hash.split("?")[0] === "#/dataCompare/list"; }
@@ -18,18 +19,18 @@ async function request(route, body, token) {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     if (message.type === "pair") {
-      if (sender.tab || sender.id !== chrome.runtime.id) throw new Error("只能由扩展弹窗配对");
+      if (!trustedPopup(sender)) throw new Error("只能由扩展弹窗配对");
       if (busy) throw new Error("正在执行命令，请完成后再配对");
       if (!/^[A-Za-z0-9_-]{43}$/.test(message.token || "")) throw new Error("配对码格式不正确");
       const tab = await chrome.tabs.get(message.tabId);
       if (!validPage(tab.url)) throw new Error("请先切换到 SA数据比对 → 比对结果 页面");
-      await request("/poll", {client: String(tab.id)}, message.token);
+      await request("/poll", {client: String(tab.id), claimOnly: true}, message.token);
       await chrome.storage.session.set({token: message.token, tabId: tab.id});
       await chrome.scripting.executeScript({target: {tabId: tab.id}, files: ["content.js"]});
       return {ok: true};
     }
     if (message.type === "disconnect") {
-      if (sender.tab || sender.id !== chrome.runtime.id) throw new Error("只能由扩展弹窗断开");
+      if (!trustedPopup(sender)) throw new Error("只能由扩展弹窗断开");
       if (busy) throw new Error("命令执行中，请先在桌面等待结果；不能撤回已发出的请求");
       await chrome.storage.session.clear();
       return {ok: true};
