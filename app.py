@@ -64,18 +64,20 @@ class App:
         style.configure("Treeview", rowheight=28, font=("Microsoft YaHei UI", 9))
         frame = ttk.Frame(self.root, padding=18)
         frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="SA 数据比对工作台", style="Header.TLabel").pack(anchor="w")
-        ttk.Label(frame, text="1 打开并登录网页    →    2 配对与读取名单    →    3 核验并执行    →    4 回读留痕").pack(anchor="w", pady=(5, 10))
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(5, weight=1)
+        ttk.Label(frame, text="SA 数据比对工作台", style="Header.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(frame, text="1 打开并登录网页    →    2 配对与读取名单    →    3 核验并执行    →    4 回读留痕").grid(row=1, column=0, sticky="w", pady=(5, 10))
         top = ttk.Frame(frame)
-        top.pack(fill="x")
+        top.grid(row=2, column=0, sticky="ew")
         self.button(top, "连接浏览器 / 配对码", self.pair)
         self.button(top, "读取最新名单", self.load_latest)
         self.button(top, "选择名单…", self.choose_roster)
         self.button(top, "使用说明", self.help)
         ttk.Label(top, textvariable=self.connection, style="State.TLabel").pack(side="right")
-        ttk.Label(frame, textvariable=self.file_info, wraplength=1150).pack(anchor="w", pady=(2, 8))
+        ttk.Label(frame, textvariable=self.file_info, wraplength=1000).grid(row=3, column=0, sticky="w", pady=(2, 8))
         owner_bar = ttk.Frame(frame)
-        owner_bar.pack(fill="x")
+        owner_bar.grid(row=4, column=0, sticky="ew")
         ttk.Label(owner_bar, text="本次负责人：").pack(side="left")
         self.owner_box = ttk.Combobox(owner_bar, textvariable=self.owner, state="readonly", width=18)
         self.owner_box.pack(side="left", padx=(0, 12))
@@ -86,12 +88,12 @@ class App:
         ttk.Label(owner_bar, textvariable=self.progress).pack(side="right")
 
         panes = ttk.Panedwindow(frame, orient="horizontal")
-        panes.pack(fill="both", expand=True, pady=10)
+        panes.grid(row=5, column=0, sticky="nsew", pady=10)
         left = ttk.Frame(panes)
         right = ttk.Frame(panes)
         panes.add(left, weight=2)
         panes.add(right, weight=5)
-        self.tree = ttk.Treeview(left, columns=("id", "matches", "state"), show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(left, columns=("id", "matches", "state"), show="headings", selectmode="browse", height=8)
         for key, title, width in [("id", "名单 ID", 190), ("matches", "匹配", 45), ("state", "本地进度", 110)]:
             self.tree.heading(key, text=title)
             self.tree.column(key, width=width, minwidth=40)
@@ -100,7 +102,9 @@ class App:
         tree_scroll.pack(side="right", fill="y")
         self.tree.pack(fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", self.select_record)
-        self.details = tk.Text(right, wrap="word", font=("Microsoft YaHei UI", 10), relief="flat", padx=14, pady=12, bg="white")
+        self.tree.bind("<Button-1>", lambda _e: "break" if self.busy else None)
+        self.tree.bind("<KeyPress>", lambda _e: "break" if self.busy else None)
+        self.details = tk.Text(right, wrap="word", height=12, font=("Microsoft YaHei UI", 10), relief="flat", padx=14, pady=12, bg="white")
         detail_scroll = ttk.Scrollbar(right, orient="vertical", command=self.details.yview)
         self.details.configure(yscrollcommand=detail_scroll.set)
         detail_scroll.pack(side="right", fill="y")
@@ -108,13 +112,13 @@ class App:
         self.details.configure(state="disabled")
 
         actions = ttk.Frame(frame)
-        actions.pack(fill="x")
+        actions.grid(row=6, column=0, sticky="ew")
         self.button(actions, "搜索 / 人工处理后重查", self.search)
         self.button(actions, "打开元数据编辑", lambda: self.manual("open_metadata"))
         self.button(actions, "打开认领窗口", lambda: self.manual("open_claim"))
         self.button(actions, "跳过并记录", self.skip)
         edit = ttk.LabelFrame(frame, text="人工核验后，执行当前记录的修改", padding=10)
-        edit.pack(fill="x", pady=(6, 8))
+        edit.grid(row=7, column=0, sticky="ew", pady=(6, 8))
         id_row = ttk.Frame(edit)
         id_row.pack(fill="x")
         ttk.Label(id_row, text="正确平台唯一号：").pack(side="left")
@@ -131,8 +135,8 @@ class App:
         self.check.pack(side="left")
         self.button(last, "设置已处理并核验", self.complete)
         self.button(last, "记录网页已完成", self.confirm_manual_done)
-        ttk.Label(frame, textvariable=self.status, style="State.TLabel", wraplength=1160).pack(anchor="w")
-        ttk.Label(frame, text="源 Excel 只读 · 每次写入前后核验 · 未知情况暂停 · 本地记录不上传 Git", foreground="#647782").pack(anchor="w", pady=(5, 0))
+        ttk.Label(frame, textvariable=self.status, style="State.TLabel", wraplength=1000).grid(row=8, column=0, sticky="w")
+        ttk.Label(frame, text="源 Excel 只读 · 每次写入前后核验 · 未知情况暂停 · 本地记录不上传 Git", foreground="#647782").grid(row=9, column=0, sticky="w", pady=(5, 0))
 
     def pump(self):
         self.connection.set("● 浏览器已连接" if self.bridge.online else "○ 浏览器未连接 / 等待页面响应")
@@ -429,7 +433,7 @@ class App:
                 "每次重启助手都需重新配对；只连接一个标签页。配对码不是登录密码。")
         ttk.Label(frame, text=text, wraplength=600).pack(anchor="w", pady=(0, 12))
         token = tk.StringVar(value=self.bridge.token)
-        ttk.Entry(frame, textvariable=token, state="readonly", width= sixty()).pack(fill="x", pady=5)
+        ttk.Entry(frame, textvariable=token, state="readonly", width=60).pack(fill="x", pady=5)
         def copy():
             popup.clipboard_clear()
             popup.clipboard_append(token.get())
@@ -455,10 +459,6 @@ class App:
         self.bridge.close()
         self.journal.close()
         self.root.destroy()
-
-
-def sixty():
-    return 60
 
 
 def main():

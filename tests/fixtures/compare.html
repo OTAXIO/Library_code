@@ -1,0 +1,51 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Offline synthetic SA fixture</title></head><body>
+<main id="app"><h1>OFFLINE TEST — no production data</h1></main>
+<div class="el-drawer" id="drawer" style="display:none">Synthetic comparison</div>
+<div class="el-dialog" id="status" style="display:none">备注 / 确认</div>
+<script>
+window.writeCount = 0;
+window.testConfig = {};
+window.synthetic = {id:"test-row-001", saLzkId:"demo-001", itemId:"1234567890123456789",matchCount:1,
+  markStatus:"待处理",reason:"作者不一致",title:true,titleValue:"Synthetic paper",doi:true,wos:true,claimStatus:false,
+  gh:"00001",qr:"77",updateTime:"test-version-1",remark:""};
+const copy = value => JSON.parse(JSON.stringify(value));
+const bindVisibility = (component, id) => {
+  let shown = false;
+  Object.defineProperty(component,"dialogVisible", {get:()=>shown,set:value=>{
+    shown=value; document.getElementById(id).style.display=value?"block":"none";
+  }});
+};
+const detail = {currentSaLzkId:"",dialogLoading:false,compareData:[],saLzkCompareData:[],
+  show(row){this.currentSaLzkId=row.saLzkId; this.dialogVisible=true; this.dialogLoading=true;
+    this.compareData = [{label:"题名",compareLeftValue:"Synthetic paper",compareRightValue:"Synthetic paper"},
+      {label:"作者信息",compareLeftValue:"姓名：测试员<br/>是否通讯作者：是",compareRightValue:"署名：Demo<br/>是否通讯作者：否"}];
+    this.saLzkCompareData=copy(this.compareData); this.dialogLoading=false;},
+  editItem(id){ window.openedEditor=id; }, handleClaim(){window.openedClaim=true;}
+};
+bindVisibility(detail,"drawer");
+const statusModal={currentRow:null,editForm:{remark:""},show(row){this.currentRow=copy(row);this.dialogVisible=true;},
+  handleConfirm(){writeCount++;synthetic.markStatus=this.currentRow.markStatus==="待处理"?"已处理":"待处理";
+    synthetic.remark=testConfig.badRemark?"":this.editForm.remark;this.dialogVisible=false;vm.getData();}
+};
+bindVisibility(statusModal,"status");
+const vm = {$options:{name:"dataCompare"},$children:[],
+  searchForm:{saLzkId:"",matchCount:null,claimStatus:"",markStatus:"",titleValue:"",doiValue:"",wosValue:"",qr:"",gh:"",reason:"",markType:null,updateUsername:"",createTimeRange:[],updateTimeRange:[]},
+  tableData:[],loading:false,page:{currentPage:1,pageSize:10,total:0},
+  $refs:{compareDetailDrawer:detail,compareStatusDialog:statusModal}, $nextTick:()=>Promise.resolve(),
+  async getData(){this.loading=true;await new Promise(r=>setTimeout(r,5));
+    if (!testConfig.stale){this.tableData=testConfig.noRows?[]:[copy(synthetic)];this.page.total=testConfig.total??this.tableData.length;}
+    this.loading=false;},
+  showItemId(row){detail.show(row);},handleEdit(row){statusModal.show(row);},
+  handleEditItem(row){
+    const modal=document.createElement("div");modal.className="el-message-box";
+    modal.innerHTML='<p>请输入匹配条目的平台唯一号</p><input><button>确定</button>';
+    document.body.append(modal);
+    modal.querySelector("input").value=row.itemId;
+    modal.querySelector("button").onclick=async()=>{
+      writeCount++;synthetic.itemId=modal.querySelector("input").value;synthetic.matchCount=1;modal.remove();await this.getData();
+    };
+  }
+};
+document.getElementById("app").__vue__=vm;
+window.vm=vm;
+</script></body></html>

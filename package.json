@@ -1,0 +1,6 @@
+{
+  "name": "sa-library-assistant-tests",
+  "private": true,
+  "scripts": {"test": "node tests/browser.test.cjs"},
+  "devDependencies": {"playwright": "^1.51.0"}
+}
