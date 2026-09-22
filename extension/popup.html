@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>连接 SA 比对助手</title>
+<link rel="stylesheet" href="popup.css"></head><body>
+<h1>连接当前比对页</h1>
+<p>先打开并登录「SA数据比对 → 比对结果」，再将桌面工具的配对码粘贴到这里。</p>
+<label for="token">本次配对码（不是账号密码）</label>
+<input id="token" type="password" autocomplete="off" spellcheck="false">
+<button id="pair">连接当前标签页</button><button id="disconnect">断开</button>
+<p id="status" role="status">只操作当前配对标签页，不读取密码或登录令牌。</p>
+<script src="popup.js"></script></body></html>
