@@ -4,7 +4,7 @@ import tkinter as tk
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from app import App, BASE, GREEN, YELLOW
 from core import Journal, SafetyStop, file_hash, read_roster
@@ -27,6 +27,8 @@ class UITests(unittest.TestCase):
 
     def tearDown(self):
         self.app.set_busy(False)
+        # Drain queued ttk theme notifications before destroying this test root.
+        self.root.update_idletasks()
         self.app.close()
         self.tmp.cleanup()
 
@@ -70,17 +72,106 @@ class UITests(unittest.TestCase):
         self.root.update()
         self.assertTrue(self.root.attributes('-topmost'))
         self.assertEqual([self.app.tabs.tab(tab, 'text') for tab in self.app.tabs.tabs()], ['人工处理', '自动化'])
-        self.assertFalse(hasattr(self.app, 'bridge'))
+        self.assertIsNone(self.app.bridge)
         for size in ('560x700', '520x600'):
             self.root.geometry(size)
             self.root.update()
-            for widget in (self.app.tree, self.app.details, self.app.complete_button, self.app.status_label, self.app.check):
+            for widget in (self.app.tree, self.app.details, self.app.complete_button, self.app.status_label, self.app.check,
+                           *self.app.buttons, *self.app.view_buttons):
                 self.assertGreater(widget.winfo_height(), 10)
                 self.assertGreaterEqual(widget.winfo_rootx(), self.root.winfo_rootx())
                 self.assertLessEqual(widget.winfo_rootx() + widget.winfo_width(), self.root.winfo_rootx() + self.root.winfo_width())
                 self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(), self.root.winfo_rooty() + self.root.winfo_height())
+            for button in self.app.buttons:
+                self.assertGreaterEqual(button.winfo_width(), button.winfo_reqwidth())
         self.app.tabs.select(self.app.automation_page)
-        self.assertFalse(hasattr(self.app, 'bridge'))
+        self.assertIsNone(self.app.bridge)
+
+    def test_pairing_is_lazy_and_dialog_controls_fit(self):
+        self.root.deiconify()
+        self.root.update()
+        browser = Mock(online=False, token='a' * 43)
+        with patch('app.Bridge', return_value=browser) as create:
+            self.assertIsNone(self.app.bridge)
+            self.app.pair()
+            create.assert_called_once_with()
+        self.assertIs(self.app.bridge, browser)
+        self.root.update()
+        popup = next(w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel))
+        buttons = [w for frame in popup.winfo_children() for w in frame.winfo_children() if w.winfo_class() == 'TButton']
+        self.assertEqual(len(buttons), 3)
+        for button in buttons:
+            self.assertGreater(button.winfo_height(), 10)
+            self.assertLessEqual(button.winfo_rooty() + button.winfo_height(), popup.winfo_rooty() + popup.winfo_height())
+        popup.destroy()
+
+    def test_completed_record_can_locate_but_cannot_open_editor(self):
+        self.app.task_view.set('done')
+        self.app.switch_view()
+        self.select_first()
+        browser = Mock(online=True)
+        browser.call.return_value = {'row': {'saLzkId': 'demo-002'}}
+        self.app.bridge = browser
+        with patch.object(self.app, 'run', side_effect=self.sync_run):
+            self.app.locate()
+        browser.call.assert_called_once_with('search', {'sa_id': 'demo-002'})
+        with patch('app.messagebox.showwarning'):
+            self.app.open_browser_panel('open_metadata')
+        self.assertEqual(browser.call.call_count, 1)
+
+    def test_wrong_browser_id_rejected(self):
+        self.select_first()
+        self.app.bridge = Mock(online=True)
+        self.app.bridge.call.return_value = {'row': {'saLzkId': 'wrong'}}
+        with patch.object(self.app, 'run', side_effect=self.sync_run):
+            with self.assertRaisesRegex(SafetyStop, 'ID 不一致'):
+                self.app.locate()
+        self.assertIsNone(self.app.snapshot)
+
+    def test_completed_view_is_green_and_cannot_approve_again(self):
+        self.app.task_view.set('done')
+        self.app.switch_view()
+        self.assertEqual(self.app.tree.get_children(), ('demo-002',))
+        self.select_first()
+        self.assertEqual(self.app.badge.cget('background'), GREEN)
+        self.assertEqual(str(self.app.complete_button['state']), 'disabled')
+        with patch('app.messagebox.showwarning'), patch('app.mark_complete') as write:
+            self.app.confirm_manual_done()
+            write.assert_not_called()
+        self.app.task_view.set('pending')
+        self.app.switch_view()
+        self.assertNotIn('demo-002', self.app.tree.get_children())
+
+    def test_manual_browser_navigation_uses_selected_id_and_snapshot(self):
+        self.select_first()
+        browser = Mock(online=True)
+        browser.call.return_value = {'row': {'saLzkId': self.app.current.sa_id, 'itemId': '123'}}
+        self.app.bridge = browser
+        with patch.object(self.app, 'run', side_effect=self.sync_run):
+            self.app.locate()
+            browser.call.assert_called_with('search', {'sa_id': 'demo-001'})
+            self.app.open_browser_panel('open_metadata')
+            browser.call.assert_called_with('open_metadata', {'sa_id': 'demo-001', 'expected': {'saLzkId': 'demo-001', 'itemId': '123'}})
+        self.assertIsNone(self.app.snapshot)
+        before = browser.call.call_count
+        with patch('app.messagebox.showwarning'):
+            self.app.open_browser_panel('complete')
+        self.assertEqual(browser.call.call_count, before)
+
+    def test_browser_navigation_requires_connection(self):
+        self.select_first()
+        with patch('app.messagebox.showwarning') as warning, patch.object(self.app, 'run') as run:
+            self.app.locate()
+            warning.assert_called_once()
+            run.assert_not_called()
+
+    def test_approval_button_enabled_only_after_review(self):
+        self.select_first()
+        self.assertEqual(str(self.app.complete_button['state']), 'disabled')
+        self.app.reviewed.set(True)
+        self.assertEqual(str(self.app.complete_button['state']), 'normal')
+        self.app.set_busy(True)
+        self.assertEqual(str(self.app.complete_button['state']), 'disabled')
 
     def test_explicit_approval_and_confirmation_required(self):
         self.select_first()

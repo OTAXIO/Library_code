@@ -52,6 +52,18 @@ const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
     assert.equal(read.ok,true,JSON.stringify(read));
     assert.equal(read.data.row.saLzkId,'demo-001');
     console.log('PASS desktop bridge -> extension -> page -> result round trip');
+    const editor=await invoke('open_metadata',{sa_id:'demo-001',expected:read.data.row});
+    assert.equal(editor.ok,true,JSON.stringify(editor));
+    assert.equal(await site.evaluate(()=>openedEditor),'1234567890123456789');
+    assert.equal(await site.evaluate(()=>writeCount),0);
+    console.log('PASS manual editor opens the exact item without saving');
+    read=await invoke('search',{sa_id:'demo-001'});
+    assert.equal(read.ok,true,JSON.stringify(read));
+    const claim=await invoke('open_claim',{sa_id:'demo-001',expected:read.data.row});
+    assert.equal(claim.ok,true,JSON.stringify(claim));
+    assert.equal(await site.evaluate(()=>openedClaim),true);
+    assert.equal(await site.evaluate(()=>writeCount),0);
+    console.log('PASS manual claim window opens without submitting');
     const changed=await invoke('link',{sa_id:'demo-001',expected:read.data.row,reviewed:true,
       note:'已核验测试文献与平台唯一号',item_id:'9876543210987654321'});
     assert.equal(changed.ok,true,JSON.stringify(changed));
@@ -69,7 +81,7 @@ const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
     assert.equal(duplicate.ok,false);
     assert.equal(await site.evaluate(()=>writeCount),2);
     console.log('PASS duplicate completion is refused across bridge');
-    console.log('Extension integration: 5 cases passed. Only synthetic data; no production requests.');
+    console.log('Extension integration: 7 cases passed. Only synthetic data; no production requests.');
   } finally {
     if(context)await context.close();
     backend.stdin.end(JSON.stringify({exit:true})+'\n');

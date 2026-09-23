@@ -1,4 +1,4 @@
-"""Compact, always-on-top manual review desk. No browser automation is started."""
+"""Manual review desk with optional, explicitly triggered browser navigation."""
 from __future__ import annotations
 
 import os
@@ -7,6 +7,7 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
+from bridge import Bridge
 
 from core import Journal, SafetyStop, fixed_roster_path, guide, read_roster
 from remarks import PRESETS, append_remark
@@ -18,13 +19,15 @@ GREEN = "#d9f2df"
 
 
 class App:
-    def __init__(self, root, journal=None, auto_load=True):
+    def __init__(self, root, journal=None, auto_load=True, bridge=None):
         self.root = root
         self.journal = journal or Journal(BASE / "runtime" / "progress.sqlite3")
         self.roster = None
         self.records = []
         self.by_id = {}
         self.current = None
+        self.bridge = bridge
+        self.snapshot = None
         self.busy = False
         self.events = queue.Queue()
         self.buttons = []
@@ -36,12 +39,18 @@ class App:
         self.approval = tk.StringVar(value="未完成")
         self.reviewed = tk.BooleanVar(value=False)
         self.preset = tk.StringVar(value="选择备注模板")
+        self.task_view = tk.StringVar(value="pending")
+        self.connection = tk.StringVar(value="连接浏览器")
         self.build()
+        self.reviewed.trace_add("write", lambda *_: self.refresh_approval())
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.pump_id = self.root.after(120, self.pump)
         self.load_id = self.root.after(200, self.reload_roster) if auto_load else None
 
     def button(self, parent, text, command, **kwargs):
+        # Use text-sized buttons; ttk's default nine-character minimum clips the
+        # six compact navigation actions at the smallest supported window size.
+        kwargs.setdefault("width", 0)
         widget = ttk.Button(parent, text=text, command=command, **kwargs)
         self.buttons.append(widget)
         return widget
@@ -64,7 +73,10 @@ class App:
         style.configure("Treeview", rowheight=27, font=("Microsoft YaHei UI", 9))
         style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9))
         style.map("Treeview", background=[("selected", "#f5d366")], foreground=[("selected", "#262626")])
-        style.configure("Complete.TButton", background="#d9f2df", foreground="#19522c", font=("Microsoft YaHei UI", 10, "bold"))
+        style.configure("Complete.TButton", background="#16845b", foreground="white", borderwidth=0,
+                        padding=(14, 9), font=("Microsoft YaHei UI", 11, "bold"))
+        style.map("Complete.TButton", background=[("disabled", "#dce6e0"), ("pressed", "#0e5b3c"), ("active", "#106e49")],
+                  foreground=[("disabled", "#69786f"), ("!disabled", "white")])
         self.tabs = ttk.Notebook(self.root)
         self.tabs.pack(fill="both", expand=True, padx=8, pady=8)
         self.manual_page = ttk.Frame(self.tabs, padding=10)
@@ -72,7 +84,7 @@ class App:
         self.tabs.add(self.manual_page, text="人工处理")
         self.tabs.add(self.automation_page, text="自动化")
         ttk.Label(self.automation_page, text="自动化暂未启用", font=("Microsoft YaHei UI", 14, "bold")).pack(anchor="w", pady=(12, 8))
-        ttk.Label(self.automation_page, text="后续将在此页面单独开发。\n当前不会搜索、修改网页或连接浏览器。", wraplength=430).pack(anchor="w")
+        ttk.Label(self.automation_page, text="后续将在此页面单独开发。\n人工页仅响应你点击的定位、编辑和认领按钮。", wraplength=430).pack(anchor="w")
         page = self.manual_page
         page.columnconfigure(0, weight=1)
         page.rowconfigure(2, weight=3)
@@ -84,12 +96,18 @@ class App:
         self.owner_box.pack(side="left", padx=(6, 8))
         self.owner_box.bind("<<ComboboxSelected>>", self.select_owner)
         self.button(toolbar, "重读 list.xlsx", self.reload_roster).pack(side="left")
+        self.button(toolbar, "连接浏览器", self.pair, textvariable=self.connection).pack(side="left", padx=4)
         self.button(toolbar, "说明", self.help, width=4).pack(side="right")
         counts = ttk.Frame(page)
         counts.grid(row=1, column=0, sticky="ew", pady=(0, 7))
-        tk.Label(counts, textvariable=self.pending_count, bg=YELLOW, fg="#735000", padx=8, pady=3).pack(side="left")
-        tk.Label(counts, textvariable=self.done_count, bg=GREEN, fg="#19522c", padx=8, pady=3).pack(side="left", padx=6)
-        ttk.Label(counts, text="已完成项不列出").pack(side="right")
+        self.view_buttons = []
+        for value, caption, color in (("pending", self.pending_count, YELLOW), ("done", self.done_count, GREEN)):
+            tab = tk.Radiobutton(counts, textvariable=caption, variable=self.task_view, value=value, indicatoron=False,
+                                 bg="#f5f6f8", selectcolor=color, activebackground=color, relief="flat", borderwidth=1,
+                                 padx=12, pady=5, command=self.switch_view, font=("Microsoft YaHei UI", 10))
+            tab.pack(side="left", padx=(0, 5))
+            self.view_buttons.append(tab)
+        ttk.Label(counts, text="点击切换").pack(side="right")
         listing = ttk.Frame(page)
         listing.grid(row=2, column=0, sticky="nsew")
         self.tree = ttk.Treeview(listing, columns=("id", "title", "state"), show="headings", height=5, selectmode="browse")
@@ -97,6 +115,7 @@ class App:
             self.tree.heading(name, text=caption)
             self.tree.column(name, width=size, minwidth=50, stretch=name == "title")
         self.tree.tag_configure("pending", background=YELLOW, foreground="#4b3d17")
+        self.tree.tag_configure("done", background=GREEN, foreground="#19522c")
         scroll = ttk.Scrollbar(listing, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
@@ -119,8 +138,11 @@ class App:
         self.details.pack(fill="both", expand=True)
         tools = ttk.Frame(page)
         tools.grid(row=5, column=0, sticky="ew", pady=5)
-        self.button(tools, "复制名单 ID", self.copy_id).pack(side="left")
-        self.button(tools, "处理指引", self.show_guide).pack(side="left", padx=5)
+        self.button(tools, "定位网页", self.locate).pack(side="left")
+        self.button(tools, "编辑", lambda: self.open_browser_panel("open_metadata")).pack(side="left", padx=3)
+        self.button(tools, "认领", lambda: self.open_browser_panel("open_claim")).pack(side="left")
+        self.button(tools, "复制 ID", self.copy_id).pack(side="left", padx=3)
+        self.button(tools, "指引", self.show_guide).pack(side="left")
         self.button(tools, "下一条", self.next_record).pack(side="right")
         templates = ttk.Frame(page)
         templates.grid(row=6, column=0, sticky="ew", pady=(2, 4))
@@ -133,11 +155,17 @@ class App:
         self.note.bind("<<Modified>>", self.note_changed)
         self.check = ttk.Checkbutton(page, variable=self.reviewed, text="我已核对当前记录，并完成网页处理")
         self.check.grid(row=8, column=0, sticky="w", pady=(7, 3))
-        self.complete_button = self.button(page, "确认完成 · 写入 1", self.confirm_manual_done, style="Complete.TButton")
+        self.complete_button = self.button(page, "批准完成", self.confirm_manual_done, style="Complete.TButton")
         self.complete_button.grid(row=9, column=0, sticky="ew", pady=(0, 6))
         self.status_label = ttk.Label(page, textvariable=self.status, wraplength=485, foreground="#5b6572")
         self.status_label.grid(row=10, column=0, sticky="ew")
         page.bind("<Configure>", lambda event: self.status_label.configure(wraplength=max(250, event.width - 20)))
+        self.refresh_approval()
+
+    def refresh_approval(self):
+        done = bool(self.current and self.current.done)
+        enabled = bool(self.current and not done and self.reviewed.get() and not self.busy)
+        self.complete_button.configure(state="normal" if enabled else "disabled", text="已批准完成" if done else "✓ 批准完成")
 
     def set_busy(self, busy):
         self.busy = busy
@@ -147,6 +175,9 @@ class App:
             widget.configure(state="disabled" if busy else "readonly")
         self.check.configure(state="disabled" if busy else "normal")
         self.note.configure(state="disabled" if busy else "normal")
+        for tab in self.view_buttons:
+            tab.configure(state="disabled" if busy else "normal")
+        self.refresh_approval()
 
     def run(self, job, callback, status):
         if self.busy:
@@ -161,6 +192,7 @@ class App:
         threading.Thread(target=worker, daemon=True).start()
 
     def pump(self):
+        self.connection.set("浏览器已连接" if self.bridge and self.bridge.online else "连接浏览器")
         try:
             while True:
                 success, callback, value = self.events.get_nowait()
@@ -170,6 +202,7 @@ class App:
                         raise value
                     callback(value)
                 except Exception as exc:
+                    self.snapshot = None
                     self.reviewed.set(False)
                     self.status.set("已暂停，请处理提示后重读名单；不自动重试。")
                     messagebox.showwarning("等待人工处理", str(exc), parent=self.root)
@@ -185,6 +218,7 @@ class App:
 
     def clear_selection(self):
         self.current = None
+        self.snapshot = None
         self.current_id.set("请选择一条记录")
         self.set_approval(False)
         self.note.delete("1.0", "end")
@@ -225,19 +259,31 @@ class App:
     def populate(self):
         scope = [r for r in self.roster.records if r.owner == self.owner.get()]
         # Excel is authoritative. Legacy journal states must not hide pending rows.
-        self.records = [r for r in scope if not r.done]
+        self.records = [r for r in scope if r.done == (self.task_view.get() == "done")]
         self.by_id = {r.sa_id: r for r in self.records}
         self.tree.delete(*self.tree.get_children())
         for record in self.records:
-            self.tree.insert("", "end", iid=record.sa_id, values=(record.sa_id, record.title, "未完成"), tags=("pending",))
+            self.tree.insert("", "end", iid=record.sa_id, values=(record.sa_id, record.title, "已完成" if record.done else "未完成"),
+                             tags=("done" if record.done else "pending",))
         self.update_counts(scope)
+        style = ttk.Style(self.root)
+        style.map("Treeview", background=[("selected", "#a7dcbc" if self.task_view.get() == "done" else "#f5d366")],
+                  foreground=[("selected", "#163d29" if self.task_view.get() == "done" else "#262626")])
+
+    def switch_view(self):
+        if self.busy:
+            return
+        self.clear_selection()
+        if self.roster:
+            self.populate()
+        self.status.set("已完成记录可查看和定位网页，不可重复批准。" if self.task_view.get() == "done" else "选择待办进行处理。")
 
     def select_owner(self, _event=None):
         if self.busy or not self.roster:
             return
         self.clear_selection()
         self.populate()
-        self.status.set("选中待办，复制 ID 到网页手动搜索。" if self.records else "该负责人没有未完成项。")
+        self.status.set("选择记录后可定位网页。" if self.records else "当前分类没有记录。")
 
     def select_record(self, _event=None):
         if self.busy or not self.tree.selection():
@@ -247,9 +293,74 @@ class App:
             return
         self.clear_selection()
         self.current = record
+        self.set_approval(record.done)
         self.current_id.set(f"ID：{record.sa_id}")
         self.show_text(f"{record.title}\n\n工号 {record.staff_id or '—'}    匹配 {record.matches}\n{record.reason or '未提供差异原因'}")
-        self.status.set("网页操作由你完成；确认后仅回写本地名单。")
+        self.status.set("已完成记录，仅供查看。" if record.done else "可定位网页；处理完成后由你批准。")
+
+    def pair(self):
+        if self.busy:
+            return
+        try:
+            if self.bridge is None:
+                self.bridge = Bridge()
+        except OSError as exc:
+            messagebox.showwarning("连接服务未启动", f"请关闭旧助手后重试。\n{exc}", parent=self.root)
+            return
+        popup = tk.Toplevel(self.root)
+        popup.title("连接浏览器")
+        popup.transient(self.root)
+        popup.attributes("-topmost", True)
+        popup.geometry("510x290")
+        frame = ttk.Frame(popup, padding=16)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="在 Chrome / Edge 加载 code/extension 扩展。\n登录后台并进入 SA 数据比对页，点击扩展图标，\n粘贴下方配对码并连接当前标签页。", wraplength=465).pack(anchor="w", pady=(0, 10))
+        token = tk.StringVar(value=self.bridge.token)
+        ttk.Entry(frame, textvariable=token, state="readonly").pack(fill="x")
+        ttk.Button(frame, text="复制配对码", command=lambda: self.copy(token.get(), "配对码已复制。请在扩展中连接。")).pack(anchor="w", pady=8)
+        import webbrowser
+        ttk.Button(frame, text="打开后台入口", command=lambda: webbrowser.open("http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list")).pack(anchor="w")
+        def reset():
+            try:
+                self.bridge.re_pair()
+                token.set(self.bridge.token)
+                self.snapshot = None
+                self.reviewed.set(False)
+            except SafetyStop as exc:
+                messagebox.showwarning("等待当前操作结束", str(exc), parent=popup)
+        ttk.Button(frame, text="更换标签页 / 新配对码", command=reset).pack(anchor="w", pady=8)
+
+    def locate(self):
+        self.open_browser_panel("search")
+
+    def open_browser_panel(self, action):
+        if self.busy:
+            return
+        try:
+            if action not in {"search", "open_metadata", "open_claim"}:
+                raise SafetyStop("人工模式不支持网页自动写入。")
+            if not self.current or not self.roster:
+                raise SafetyStop("请先选择记录。")
+            self.roster.assert_unchanged()
+            if not self.bridge or not self.bridge.online:
+                raise SafetyStop("请先点击“连接浏览器”完成配对。")
+            if action != "search" and (self.current.done or not self.snapshot):
+                raise SafetyStop("请先定位未完成记录，再打开编辑或认领窗口。")
+            record = self.current
+            payload = {"sa_id": record.sa_id}
+            if action != "search":
+                payload["expected"] = self.snapshot
+            self.reviewed.set(False)
+        except Exception as exc:
+            messagebox.showwarning("暂未定位", str(exc), parent=self.root)
+            return
+        def opened(result):
+            row = result.get("row", {})
+            if row.get("saLzkId") != record.sa_id:
+                raise SafetyStop("网页返回 ID 不一致，请人工检查。")
+            self.snapshot = row if action == "search" else None
+            self.status.set("已定位对应详情，请在浏览器核验。" if action == "search" else "已打开窗口，请手动修改并保存。")
+        self.run(lambda: self.bridge.call(action, payload), opened, "正在定位当前记录，请勿同时操作该网页…")
 
     def next_record(self):
         if self.busy or not self.records:
@@ -353,6 +464,8 @@ class App:
         for timer in (self.pump_id, self.load_id):
             if timer:
                 self.root.after_cancel(timer)
+        if self.bridge:
+            self.bridge.close()
         self.journal.close()
         self.root.destroy()
 
