@@ -13,6 +13,9 @@ node_modules/
 *.zip
 *.bundle
 .env
+.env.*
+*.dpapi
+*.dpapi.tmp
 *.pem
 *.key
 test-results/

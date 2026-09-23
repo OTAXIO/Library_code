@@ -9,6 +9,8 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 from bridge import Bridge
 from claim import sa_claim_source
+from model_review import KeyStore, ModelClient
+from model_panel import ModelPanel
 
 from core import Journal, SafetyStop, fixed_roster_path, guide, read_roster
 from remarks import PRESETS, append_remark
@@ -20,7 +22,7 @@ GREEN = "#d9f2df"
 
 
 class App:
-    def __init__(self, root, journal=None, auto_load=True, bridge=None):
+    def __init__(self, root, journal=None, auto_load=True, bridge=None, model_client=None):
         self.root = root
         self.journal = journal or Journal(BASE / "runtime" / "progress.sqlite3")
         self.roster = None
@@ -28,6 +30,7 @@ class App:
         self.by_id = {}
         self.current = None
         self.bridge = bridge
+        self.model_client = model_client or ModelClient(KeyStore(BASE / "runtime"))
         self.snapshot = None
         self.comparison = None
         self.prepared_claim = None
@@ -84,12 +87,18 @@ class App:
                         padding=(14, 9), font=("Microsoft YaHei UI", 11, "bold"))
         style.map("Complete.TButton", background=[("disabled", "#dce6e0"), ("pressed", "#0e5b3c"), ("active", "#106e49")],
                   foreground=[("disabled", "#69786f"), ("!disabled", "white")])
+        style.configure("Model.TButton", background="#315b9c", foreground="white", padding=(12, 7))
+        style.map("Model.TButton", background=[("disabled", "#dce2ec"), ("active", "#234a86")],
+                  foreground=[("disabled", "#69786f"), ("!disabled", "white")])
         self.tabs = ttk.Notebook(self.root)
         self.tabs.pack(fill="both", expand=True, padx=8, pady=8)
         self.manual_page = ttk.Frame(self.tabs, padding=10)
         self.automation_page = ttk.Frame(self.tabs, padding=20)
         self.tabs.add(self.manual_page, text="人工处理")
         self.tabs.add(self.automation_page, text="自动化")
+        self.model_page = ttk.Frame(self.tabs, padding=12)
+        self.tabs.add(self.model_page, text="模型辅助")
+        self.model_panel = ModelPanel(self, self.model_page, self.model_client)
         auto = self.automation_page
         ttk.Label(auto, text="单条作者认领", font=("Microsoft YaHei UI", 14, "bold")).pack(anchor="w", pady=(6, 8))
         ttk.Label(auto, textvariable=self.current_id, wraplength=440).pack(anchor="w", pady=(0, 12))
@@ -194,6 +203,7 @@ class App:
         self.complete_button.configure(state="normal" if enabled else "disabled", text="已批准完成" if done else "✓ 批准完成")
         can_claim = bool(self.current and not done and self.prepared_claim and not self.busy and self.claim_author_box.current() >= 0)
         self.claim_button.configure(state="normal" if can_claim else "disabled")
+        self.model_panel.refresh()
 
     def set_busy(self, busy):
         self.busy = busy
@@ -205,6 +215,7 @@ class App:
         self.note.configure(state="disabled" if busy else "normal")
         for tab in self.view_buttons:
             tab.configure(state="disabled" if busy else "normal")
+        self.model_panel.set_busy(busy)
         self.refresh_approval()
 
     def run(self, job, callback, status):
@@ -232,7 +243,7 @@ class App:
                 except Exception as exc:
                     self.clear_browser_state()
                     self.reviewed.set(False)
-                    self.status.set("已暂停，请处理提示后重读名单；不自动重试。")
+                    self.status.set("已暂停，请按提示处理；不自动重试。")
                     messagebox.showwarning("等待人工处理", str(exc), parent=self.root)
         except queue.Empty:
             pass
@@ -252,6 +263,7 @@ class App:
         self.note.delete("1.0", "end")
         self.preset.set("选择备注模板")
         self.show_text("")
+        self.model_panel.clear(reset_evidence=True)
 
     def clear_claim_preview(self):
         self.prepared_claim = None
@@ -266,6 +278,7 @@ class App:
         self.comparison = None
         self.sa_number.set("先定位网页")
         self.clear_claim_preview()
+        self.model_panel.clear()
 
     def set_approval(self, completed):
         self.approval.set("已完成" if completed else "未完成")
@@ -565,6 +578,7 @@ class App:
             self.current = next(r for r in self.roster.records if r.row == record.row and r.sa_id == record.sa_id)
             self.populate()
             self.set_approval(True)
+            self.model_panel.clear()
             self.status.set("已完成：备注已写为数字 1，已从待办移除。")
             try:
                 self.journal.save(record, "已完成", note, {"cell": result.cell, "backup": str(result.backup),
@@ -598,7 +612,7 @@ class App:
 
     def close(self):
         if self.busy:
-            messagebox.showwarning("正在保存", "请等待本条保存结束再关闭。", parent=self.root)
+            messagebox.showwarning("正在处理", "请等待当前操作结束再关闭。模型请求可先点击“停止等待”。", parent=self.root)
             return
         for timer in (self.pump_id, self.load_id):
             if timer:

@@ -71,7 +71,7 @@ class UITests(unittest.TestCase):
         self.root.deiconify()
         self.root.update()
         self.assertTrue(self.root.attributes('-topmost'))
-        self.assertEqual([self.app.tabs.tab(tab, 'text') for tab in self.app.tabs.tabs()], ['人工处理', '自动化'])
+        self.assertEqual([self.app.tabs.tab(tab, 'text') for tab in self.app.tabs.tabs()], ['人工处理', '自动化', '模型辅助'])
         self.assertIsNone(self.app.bridge)
         for size in ('560x700', '520x600'):
             self.root.geometry(size)
@@ -80,7 +80,10 @@ class UITests(unittest.TestCase):
                 self.app.tabs.select(tab)
                 self.root.update()
                 for widget in (self.app.tree, self.app.details, self.app.complete_button, self.app.status_label, self.app.check,
-                               self.app.claim_author_box, *self.app.buttons, *self.app.view_buttons):
+                               self.app.claim_author_box, self.app.model_panel.output, self.app.model_panel.allow,
+                               self.app.model_panel.evidence, self.app.model_panel.info_label,
+                               self.app.model_panel.model_box, self.app.model_panel.cancel_button,
+                               *self.app.buttons, *self.app.view_buttons):
                     if not widget.winfo_viewable():
                         continue
                     self.assertGreater(widget.winfo_height(), 10)
@@ -371,10 +374,80 @@ class UITests(unittest.TestCase):
         with patch('app.messagebox.showwarning'), patch.object(self.app, 'run') as run:
             self.app.prepare_claim()
             run.assert_not_called()
+
         self.app.current = replace(self.app.current, done=True)
         with patch('app.messagebox.showwarning'), patch.object(self.app, 'run') as run:
             self.app.submit_claim()
             run.assert_not_called()
+
+    def test_model_requires_per_record_send_consent(self):
+        self.select_first()
+        self.app.model_panel.client = Mock()
+        with patch('model_panel.messagebox.showwarning'), patch.object(self.app, 'run') as run:
+            self.app.model_panel.review()
+            run.assert_not_called()
+        self.app.model_panel.consent.set(True)
+        self.app.next_record()
+        self.assertFalse(self.app.model_panel.consent.get())
+
+    def test_model_advice_cannot_write_or_approve(self):
+        from tests.test_model_review import advice
+        self.select_first()
+        before = file_hash(self.path)
+        panel = self.app.model_panel
+        panel.client = Mock()
+        panel.client.review.return_value = {'advice': advice(), 'model': 'deepseek-reasoner', 'usage': {}}
+        panel.consent.set(True)
+        self.app.reviewed.set(True)
+        with patch.object(self.app, 'run', side_effect=self.sync_run), patch('app.mark_complete') as write:
+            panel.review()
+            write.assert_not_called()
+        self.assertIn('未经人工批准', panel.result_text)
+        self.assertFalse(self.app.reviewed.get())
+        self.assertFalse(self.app.current.done)
+        self.assertEqual(file_hash(self.path), before)
+        self.assertIsNone(self.app.bridge)
+        self.app.next_record()
+        self.assertEqual(panel.result_text, '')
+
+    def test_model_changed_evidence_invalidates_advice(self):
+        self.select_first()
+        panel = self.app.model_panel
+        panel.result_text = 'old advice'
+        panel.consent.set(True)
+        panel.evidence.insert('1.0', 'New evidence')
+        self.root.update()
+        self.assertEqual(panel.result_text, '')
+        self.assertFalse(panel.consent.get())
+        self.app.next_record()
+        self.assertEqual(panel.evidence.get('1.0', 'end').strip(), '')
+
+    def test_model_rejects_stale_result(self):
+        from tests.test_model_review import advice
+        self.select_first()
+        panel = self.app.model_panel
+        panel.client = Mock()
+        panel.client.review.return_value = {'advice': advice(), 'model': 'deepseek-reasoner', 'usage': {}}
+        panel.consent.set(True)
+        def changed(job, callback, status):
+            result = job()
+            panel.evidence.insert('1.0', 'changed')
+            callback(result)
+        with patch.object(self.app, 'run', side_effect=changed):
+            with self.assertRaisesRegex(SafetyStop, '旧模型意见'):
+                panel.review()
+        self.assertEqual(panel.result_text, '')
+
+    def test_model_busy_disables_edits_but_allows_cancel(self):
+        panel = self.app.model_panel
+        panel.client = Mock()
+        panel.running = True
+        self.app.set_busy(True)
+        self.assertEqual(str(panel.evidence['state']), 'disabled')
+        self.assertEqual(str(panel.cancel_button['state']), 'normal')
+        panel.cancel()
+        panel.client.cancel.assert_called_once()
+        self.assertTrue(panel.cancelled)
 
 
 if __name__ == '__main__':
