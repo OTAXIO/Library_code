@@ -14,7 +14,11 @@ const copy = value => JSON.parse(JSON.stringify(value));
 const bindVisibility = (component, id, property="dialogVisible") => {
   let shown = false;
   Object.defineProperty(component,property, {get:()=>shown,set:value=>{
-    shown=value; document.getElementById(id).style.display=value?"block":"none";
+    shown=value;
+    // Element UI keeps a closing dialog rendered until its transition ends.
+    if(id==="people" && !value && testConfig.peopleCloseDelay) {
+      setTimeout(()=>{if(!shown)document.getElementById(id).style.display="none";},testConfig.peopleCloseDelay);
+    } else document.getElementById(id).style.display=value?"block":"none";
   }});
 };
 const detail = {currentSaLzkId:"",dialogLoading:false,compareData:[],saLzkCompareData:[],
@@ -59,9 +63,11 @@ const people={loading:false,tableData:[],total:0,queryForm:{},page:{current:1,si
       this.total=testConfig.peopleTotal??this.tableData.length;
     }this.loading=false;},
   sureAuthor(person){this.queryForm.name=person.nameCn||person.nameEn;this.queryForm.scholarId=person.id;
-    claimWindow.handleAuthor(this.queryForm,this.authorIndex);this.dialogModalVisible=false;}
+    claimWindow.handleAuthor(this.queryForm,this.authorIndex);this.dialogModalVisible=false;
+    if(testConfig.foreignAfterSelect)document.getElementById("status").style.display="block";}
 };
 bindVisibility(people,"people","dialogModalVisible");
+people.$el=document.getElementById("people");
 claimWindow.$refs={authorModal:people};
 detail.$refs={claimDetail:claimWindow};
 window.claimWindow=claimWindow;

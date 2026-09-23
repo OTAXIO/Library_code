@@ -74,6 +74,7 @@ const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
     console.log('PASS manual claim window opens without submitting');
     // Synthetic user closes their manual drawer before starting a new command.
     await site.evaluate(()=>claimWindow.drawer=false);
+    await site.evaluate(()=>testConfig.peopleCloseDelay=220);
     const prepared=await invoke('prepare_claim',{sa_id:'demo-001',expected:read.data.row,
       sa_text:'测试员(00001)①',staff_id:'00001',roster_staff_id:'00001'});
     assert.equal(prepared.ok,true,JSON.stringify(prepared));

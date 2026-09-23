@@ -191,6 +191,21 @@ async function runSACommand(command) {
       if (!modal || !["getScholarData", "sureAuthor"].every(key => typeof modal[key] === "function") ||
           !modal.dialogModalVisible || modal.authorIndex !== target.index || !modal.queryForm)
         stop("选择学者窗口结构不兼容");
+      const pickerDialogs = visibleAll(".el-dialog").filter(element =>
+        modal.$el && (modal.$el === element || modal.$el.contains(element)));
+      if (pickerDialogs.length !== 1) stop("无法唯一识别程序打开的选择作者窗口，请人工处理");
+      const pickerDialog = pickerDialogs[0];
+      const waitForPickerClose = async () => {
+        await wait(() => {
+          guard();
+          if (modal.dialogModalVisible) stop("选择作者窗口被重新打开，请人工处理");
+          // Only our known dialog may be fading out. Never wait out or dismiss
+          // an unrelated modal, which could need the user's decision.
+          if (claim.activeName !== "author" || visibleAll(".el-dialog, .el-message-box").some(element => element !== pickerDialog))
+            stop("网页出现其他操作窗口，请人工处理");
+          return !visible(pickerDialog);
+        }, "等待选择作者窗口关闭", 5000);
+      };
       // showDialog starts an initial name search. Let it finish before changing
       // filters so its late response cannot masquerade as the ID lookup.
       await wait(() => !modal.loading, "等待初始人员查询");
@@ -225,6 +240,8 @@ async function runSACommand(command) {
         person: {id: person.id, wno: person.wno, name, names: [...new Set(names)]}, authors};
       if (!submitting) {
         modal.dialogModalVisible = false;
+        await vm.$nextTick();
+        await waitForPickerClose();
         const exact = available.filter(author => names.includes(author.fullname.trim()));
         return {ok: true, data: {row: before, comparison, prepared,
           suggested_index: exact.length === 1 ? exact[0].index : null}};
@@ -238,6 +255,7 @@ async function runSACommand(command) {
         stop("人员查询窗口被修改，请重新查找");
       modal.sureAuthor(person);
       await vm.$nextTick();
+      await waitForPickerClose();
       guard();
       const selected = claim.tableData.metadata.author[target.index];
       if (modal.dialogModalVisible || selected.data?.scholarId !== person.id || selected.data?.wno !== staffId ||

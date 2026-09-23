@@ -215,6 +215,46 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.equal(await page.evaluate(()=>writeCount),1);
     assert.equal(await page.evaluate(()=>synthetic.markStatus),'待处理');
   });
+  test('claim tolerates its own closing selection-dialog animation',async()=>{
+    await page.evaluate(()=>testConfig.peopleCloseDelay=220);
+    const prepared=await prepare();
+    assert.equal(prepared.ok,true,JSON.stringify(prepared));
+    await page.waitForFunction(()=>document.getElementById('people').style.display==='none');
+    const result=await submit(prepared);
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(await page.evaluate(()=>writeCount),1);
+  });
+  test('claim still stops for a foreign modal during its own closing animation',async()=>{
+    await page.evaluate(()=>testConfig.peopleCloseDelay=220);
+    const prepared=await prepare();
+    assert.equal(prepared.ok,true,JSON.stringify(prepared));
+    await page.evaluate(()=>testConfig.foreignAfterSelect=true);
+    const result=await submit(prepared);
+    assert.match(result.error,/网页出现其他操作窗口/);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+    assert.equal(await page.locator('#status').isVisible(),true);
+  });
+  test('lookup only returns after the owned selection dialog has closed',async()=>{
+    await page.evaluate(()=>testConfig.peopleCloseDelay=250);
+    const prepared=await prepare();
+    assert.equal(prepared.ok,true,JSON.stringify(prepared));
+    assert.equal(await page.locator('#people').isVisible(),false);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('a closing picker that never disappears times out without submitting',async()=>{
+    const prepared=await prepare();
+    assert.equal(prepared.ok,true,JSON.stringify(prepared));
+    await page.evaluate(()=>testConfig.peopleCloseDelay=20000);
+    const result=await submit(prepared,{expires:Date.now()+4200});
+    assert.match(result.error,/等待选择作者窗口关闭超时/);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('unrecognized picker DOM cannot be ignored or auto-closed',async()=>{
+    await page.evaluate(()=>people.$el=document.getElementById('status'));
+    const result=await prepare();
+    assert.match(result.error,/无法唯一识别/);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
   test('claim snapshot accepts reordered object keys from extension messaging',async()=>{
     const prepared=await prepare();
     const reorder=value=>Array.isArray(value)?value.map(reorder):value&&typeof value==='object'?
@@ -326,7 +366,9 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.equal(await page.evaluate(()=>writeCount),0);
   });
   try {
-    for (const [name, fn] of cases) { await reset(); await fn(); console.log('PASS',name); }
-    console.log(`Browser adapter: ${cases.length} offline cases passed. No production requests.`);
+    const selected=process.env.SA_TEST_CASE?cases.filter(([name])=>name.includes(process.env.SA_TEST_CASE)):cases;
+    assert.ok(selected.length,'No matching test');
+    for (const [name, fn] of selected) { await reset(); await fn(); console.log('PASS',name); }
+    console.log(`Browser adapter: ${selected.length} offline cases passed. No production requests.`);
   } finally { await browser.close(); }
 })().catch(error=>{console.error(error);process.exitCode=1;});
