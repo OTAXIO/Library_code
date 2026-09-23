@@ -33,6 +33,24 @@ def make_roster(path, flags=(None, 1, "1", 0, True)):
 
 
 class RosterWriteTests(unittest.TestCase):
+    def test_self_closing_flag_does_not_swallow_next_cell(self):
+        import copy
+        import io
+        import re
+        source = self.path.read_bytes()
+        with zipfile.ZipFile(io.BytesIO(source)) as original, zipfile.ZipFile(self.path, 'w') as target:
+            for entry in original.infolist():
+                data = original.read(entry)
+                if entry.filename == 'xl/worksheets/sheet1.xml':
+                    data = re.sub(rb'<c r="A2"[^>]*></c>', b'<c r="A2" s="1"/>', data)
+                    self.assertIn(b'<c r="A2" s="1"/>', data)
+                target.writestr(copy.copy(entry), data)
+        roster = read_roster(self.path)
+        result = mark_complete(roster, roster.records[0])
+        self.assertTrue(result.roster.records[0].done)
+        self.assertEqual(result.roster.records[0].owner, roster.records[0].owner)
+        self.assertEqual([r.key for r in result.roster.records], [r.key for r in roster.records])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / "list.xlsx"

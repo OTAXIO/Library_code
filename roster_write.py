@@ -7,6 +7,7 @@ No browser commands, credentials, formulas or automatic approvals are involved.
 from __future__ import annotations
 
 import os
+import copy
 import posixpath
 import re
 import tempfile
@@ -101,7 +102,8 @@ def patch_cell(data, reference, row_number):
         raise SafetyStop("未知工作表行格式，请人工处理。")
     match = matches[0]
     segment = match.group()
-    cell_pattern = re.compile(r'<c\b(?=[^>]*\br="' + reference + r'")[^>]*(?:/>|>.*?</c>)', re.S)
+    # A greedy opening-tag match can consume '/>' and swallow the next cell.
+    cell_pattern = re.compile(r'<c\b(?=[^>]*\br="' + reference + r'")[^>]*?(?:/>|>.*?</c>)', re.S)
     found = list(cell_pattern.finditer(segment))
     if len(found) != len(cells):
         raise SafetyStop("未知单元格格式，请人工处理。")
@@ -150,11 +152,16 @@ def mark_complete(roster, record, backup_dir=None):
                 changed = patch_cell(source.read(member), reference, record.row)
                 output.comment = source.comment
                 for entry in source.infolist():
-                    output.writestr(entry, changed if entry.filename == member else source.read(entry))
+                    output.writestr(copy.copy(entry), changed if entry.filename == member else source.read(entry))
             verified = read_roster(temporary)
             expected = [r for r in verified.records if r.row == record.row and r.sa_id == record.sa_id]
             if len(expected) != 1 or not expected[0].done or expected[0].key != record.key:
-                raise SafetyStop("临时文件完成标记回读失败，原名单未修改。")
+                fields = "目标行或 ID" if len(expected) != 1 else ("完成标记类型" if not expected[0].done else "其他任务字段")
+                raise SafetyStop(f"第 {record.row} 行回读失败（{fields}），原名单未修改。请重启最新版助手并重读名单；若仍失败，请反馈此行号。")
+            from dataclasses import replace
+            intended = [replace(r, done=True, remark="1") if r.row == record.row else r for r in roster.records]
+            if verified.records != intended:
+                raise SafetyStop("回读发现非目标行发生变化，原名单未修改。")
             # A content-addressed complete backup also preserves overwritten notes.
             backups = Path(backup_dir) if backup_dir else path.parent / "runtime" / "backups"
             backups.mkdir(parents=True, exist_ok=True)
