@@ -28,8 +28,8 @@ class CoreTests(unittest.TestCase):
                       staff_id="00001", matches=1, item_ids="1234567890123456789", mark="待处理", reason="作者不一致", query="1")
         values.update(changes or {})
         book = Workbook()
-        book.active.append(list(HEADERS.values()) + [QUERY_HEADER])
-        row = [values[k] for k in HEADERS] + [values["query"]]
+        book.active.append(["备注"] + list(HEADERS.values()) + [QUERY_HEADER])
+        row = [None] + [values[k] for k in HEADERS] + [values["query"]]
         book.active.append(row)
         if duplicate:
             book.active.append(row)

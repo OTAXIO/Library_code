@@ -16,4 +16,5 @@ node_modules/
 *.pem
 *.key
 test-results/
+*.assistant.lock
 !tests/fixtures/*.html

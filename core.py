@@ -1,4 +1,4 @@
-"""Read-only roster ingestion, review rules and durable local checkpoints."""
+"""Roster ingestion, review rules and durable local checkpoints."""
 from __future__ import annotations
 
 import hashlib
@@ -54,11 +54,16 @@ class Record:
     mark: str
     reason: str
     query: str
+    done: bool = False
+    remark: str = ""
 
     @property
     def key(self):
         # Changed task facts invalidate an old completion, even for the same ID.
-        return digest(asdict(self))
+        values = asdict(self)
+        values.pop("done")
+        values.pop("remark")
+        return digest(values)
 
 
 @dataclass
@@ -67,6 +72,8 @@ class Roster:
     sha256: str
     records: list[Record]
     mtime_ns: int
+    sheet_name: str = ""
+    completion_column: int = 0
 
     def assert_unchanged(self):
         if self.path.stat().st_mtime_ns != self.mtime_ns or file_hash(self.path) != self.sha256:
@@ -80,6 +87,16 @@ def fixed_roster_path(folder=None):
     if not path.is_file():
         raise SafetyStop(f"未找到固定名单：{path}\n请将名单保存为 code 文件夹内的 list.xlsx，再点击“重新读取 list.xlsx”。\n不读取其他名称、父目录或 .xls 文件；不要将文件命名为 list.xlsx.xlsx。")
     return path
+
+
+def completion_column(labels):
+    """The supplied export has a leading workflow remark and a website remark."""
+    columns = [i for i, label in enumerate(labels) if label == "备注"]
+    if len(columns) == 1:
+        return columns[0]
+    if len(columns) == 2 and columns[0] == 0 and labels[1] == "负责人":
+        return 0
+    raise SafetyStop("无法唯一确认完成标记列。应有一个“备注”列，或首列为备注、第二列为负责人。请人工检查，不能猜测写入位置。")
 
 
 def read_roster(path):
@@ -97,6 +114,7 @@ def read_roster(path):
         if len(choices) != 1:
             raise SafetyStop("应恰好有一个包含 sa_lzk表ID 表头的工作表。")
         sheet, labels = choices[0]
+        done_column = completion_column(labels)
         mapping = {}
         for key, label in HEADERS.items():
             if labels.count(label) != 1:
@@ -111,6 +129,11 @@ def read_roster(path):
             if all(c.value is None for c in cells):
                 continue
             values = {}
+            flag = cells[done_column]
+            if flag.data_type == "f":
+                raise SafetyStop(f"第 {number} 行完成备注是公式，不能自动判断或覆盖。")
+            # Only a numeric 1 counts. Text '1', booleans and formulas stay pending.
+            done = flag.data_type == "n" and type(flag.value) in (int, float) and flag.value == 1
             for key, index in mapping.items():
                 cell = cells[index]
                 if cell.data_type == "f":
@@ -134,12 +157,12 @@ def read_roster(path):
             if not values["owner"]:
                 values["owner"] = "（未分配）"
             values["matches"] = count
-            records.append(Record(row=number, **values))
+            records.append(Record(row=number, done=done, remark=text(flag.value), **values))
         if not records:
             raise SafetyStop("名单没有记录。")
     finally:
         book.close()
-    result = Roster(path, checksum, records, stamp)
+    result = Roster(path, checksum, records, stamp, sheet.title, done_column + 1)
     result.assert_unchanged()
     return result
 
