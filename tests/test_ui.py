@@ -67,7 +67,7 @@ class UITests(unittest.TestCase):
         self.assertIn(record.sa_id, self.app.tree.get_children())
         self.assertNotIn('demo-005', self.app.tree.get_children())
 
-    def test_layout_tabs_topmost_and_no_automation(self):
+    def test_layout_both_tabs_topmost_and_no_background_actions(self):
         self.root.deiconify()
         self.root.update()
         self.assertTrue(self.root.attributes('-topmost'))
@@ -76,14 +76,20 @@ class UITests(unittest.TestCase):
         for size in ('560x700', '520x600'):
             self.root.geometry(size)
             self.root.update()
-            for widget in (self.app.tree, self.app.details, self.app.complete_button, self.app.status_label, self.app.check,
-                           *self.app.buttons, *self.app.view_buttons):
-                self.assertGreater(widget.winfo_height(), 10)
-                self.assertGreaterEqual(widget.winfo_rootx(), self.root.winfo_rootx())
-                self.assertLessEqual(widget.winfo_rootx() + widget.winfo_width(), self.root.winfo_rootx() + self.root.winfo_width())
-                self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(), self.root.winfo_rooty() + self.root.winfo_height())
-            for button in self.app.buttons:
-                self.assertGreaterEqual(button.winfo_width(), button.winfo_reqwidth())
+            for tab in self.app.tabs.tabs():
+                self.app.tabs.select(tab)
+                self.root.update()
+                for widget in (self.app.tree, self.app.details, self.app.complete_button, self.app.status_label, self.app.check,
+                               self.app.claim_author_box, *self.app.buttons, *self.app.view_buttons):
+                    if not widget.winfo_viewable():
+                        continue
+                    self.assertGreater(widget.winfo_height(), 10)
+                    self.assertGreaterEqual(widget.winfo_rootx(), self.root.winfo_rootx())
+                    self.assertLessEqual(widget.winfo_rootx() + widget.winfo_width(), self.root.winfo_rootx() + self.root.winfo_width())
+                    self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(), self.root.winfo_rooty() + self.root.winfo_height())
+                for button in self.app.buttons:
+                    if button.winfo_viewable():
+                        self.assertGreaterEqual(button.winfo_width(), button.winfo_reqwidth(), button.cget('text'))
         self.app.tabs.select(self.app.automation_page)
         self.assertIsNone(self.app.bridge)
 
@@ -281,6 +287,94 @@ class UITests(unittest.TestCase):
         self.app.select_owner()
         self.assertEqual(self.app.records, [])
         self.assertEqual(self.app.done_count.get(), '已完成 2')
+
+    def set_claim_ready(self, suggested=0):
+        self.select_first()
+        self.app.snapshot = {'saLzkId': self.app.current.sa_id}
+        self.app.comparison = [{'label': '认领状态', 'sa': '测试员(00001)①', 'library': '未认领'}]
+        prepared = {'staff_id': '00001', 'sa_text': '测试员(00001)①', 'item_id': '1234567890123456789',
+                    'person': {'id': 'scholar-1', 'wno': '00001', 'name': '测试员'},
+                    'authors': [{'index': 0, 'order': 1, 'fullname': 'Demo', 'scholarId': '', 'eligible': True}]}
+        self.app.bridge = Mock(online=True)
+        self.app.bridge.call.return_value = {'row': self.app.snapshot, 'prepared': prepared, 'suggested_index': suggested}
+        with patch.object(self.app, 'run', side_effect=self.sync_run):
+            self.app.prepare_claim()
+        return prepared
+
+    def test_sa_copy_preserves_zeroes_not_roster_record_id(self):
+        self.set_claim_ready()
+        with patch.object(self.app, 'copy') as copy:
+            self.app.copy_sa_number()
+        self.assertEqual(copy.call_args.args[0], '00001')
+        self.app.next_record()
+        with patch.object(self.app, 'copy') as copy, patch('app.messagebox.showwarning'):
+            self.app.copy_sa_number()
+            copy.assert_not_called()
+        self.assertIsNone(self.app.prepared_claim)
+
+    def test_claim_preparation_does_not_write_or_mark_done(self):
+        before = file_hash(self.path)
+        self.set_claim_ready()
+        self.assertEqual(self.app.bridge.call.call_args.args[0], 'prepare_claim')
+        self.assertEqual(self.app.claim_author_box.current(), 0)
+        self.assertEqual(str(self.app.claim_button['state']), 'normal')
+        self.assertFalse(self.app.current.done)
+        self.assertFalse(self.app.reviewed.get())
+        self.assertEqual(file_hash(self.path), before)
+
+    def test_unknown_author_requires_explicit_selection(self):
+        self.set_claim_ready(suggested=None)
+        self.assertEqual(self.app.claim_author_box.current(), -1)
+        self.assertEqual(str(self.app.claim_button['state']), 'disabled')
+        with patch('app.messagebox.showwarning'), patch.object(self.app, 'run') as run:
+            self.app.submit_claim()
+            run.assert_not_called()
+
+    def test_cancelled_claim_never_submits(self):
+        self.set_claim_ready()
+        with patch('app.messagebox.askyesno', return_value=False), patch.object(self.app, 'run') as run:
+            self.app.submit_claim()
+            run.assert_not_called()
+        self.assertEqual(self.app.bridge.call.call_count, 1)
+
+    def test_verified_claim_adds_note_but_leaves_excel_pending(self):
+        self.set_claim_ready()
+        before = file_hash(self.path)
+        self.app.bridge.call.return_value = {'row': self.app.snapshot, 'verified': True, 'claimed': True,
+                                            'staff_id': '00001', 'scholar_id': 'scholar-1', 'author': 'Demo', 'order': 1}
+        with patch('app.messagebox.askyesno', return_value=True), patch.object(self.app, 'run', side_effect=self.sync_run):
+            self.app.submit_claim()
+        action, payload = self.app.bridge.call.call_args.args
+        self.assertEqual(action, 'submit_claim')
+        self.assertTrue(payload['confirmed'])
+        self.assertEqual(payload['author_index'], 0)
+        self.assertEqual(self.app.note.get('1.0', 'end').strip(), '已认领')
+        self.assertFalse(self.app.reviewed.get())
+        self.assertFalse(self.app.current.done)
+        self.assertEqual(file_hash(self.path), before)
+        self.assertIsNone(self.app.snapshot)
+        self.assertIsNone(self.app.prepared_claim)
+
+    def test_unverified_claim_does_not_add_success_note(self):
+        self.set_claim_ready()
+        self.app.bridge.call.return_value = {'row': self.app.snapshot, 'verified': False}
+        with patch('app.messagebox.askyesno', return_value=True), patch.object(self.app, 'run', side_effect=self.sync_run):
+            with self.assertRaisesRegex(SafetyStop, '禁止直接重试'):
+                self.app.submit_claim()
+        self.assertEqual(self.app.note.get('1.0', 'end').strip(), '')
+        self.assertFalse(self.app.current.done)
+        self.assertIsNone(self.app.prepared_claim)
+
+    def test_claim_lookup_requires_matching_staff_and_pending_record(self):
+        self.set_claim_ready()
+        self.app.comparison[0]['sa'] = '测试员(00002)'
+        with patch('app.messagebox.showwarning'), patch.object(self.app, 'run') as run:
+            self.app.prepare_claim()
+            run.assert_not_called()
+        self.app.current = replace(self.app.current, done=True)
+        with patch('app.messagebox.showwarning'), patch.object(self.app, 'run') as run:
+            self.app.submit_claim()
+            run.assert_not_called()
 
 
 if __name__ == '__main__':

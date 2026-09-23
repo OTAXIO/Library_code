@@ -132,6 +132,12 @@ class BridgeTests(unittest.TestCase):
             self.post("/poll", {"client": "1"}, "wrong")
         self.assertEqual(ctx.exception.code, 401)
 
+    def test_second_bridge_cannot_share_listener(self):
+        with self.assertRaises(OSError):
+            Bridge(self.bridge.port)
+        self.post("/poll", {"client": "1"})
+        self.assertTrue(self.bridge.online)
+
     def test_second_tab_rejected(self):
         self.post("/poll", {"client": "1"})
         with self.assertRaises(urllib.error.HTTPError) as ctx:

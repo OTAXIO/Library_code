@@ -21,10 +21,18 @@ const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
   const next=()=>lines.length?Promise.resolve(lines.shift()):stopped?Promise.reject(new Error(stderr)):
     new Promise(resolve=>waiters.push(resolve));
   const invoke=async(action,payload)=>{backend.stdin.write(JSON.stringify({action,payload})+'\n');return next();};
-  let context;
+  let context, stagedExtension;
   try {
     const pair=await next();assert.ok(pair.token,stderr||'bridge failed');
-    const extension=path.join(root,'extension');
+    const source=path.join(root,'extension');
+    stagedExtension=fs.mkdtempSync(path.join(os.tmpdir(),'sa-extension-test-'));
+    for(const name of fs.readdirSync(source))fs.copyFileSync(path.join(source,name),path.join(stagedExtension,name));
+    // Only the test copy's loopback port differs. Production files stay intact.
+    for(const name of ['background.js','manifest.json']){
+      const file=path.join(stagedExtension,name);
+      fs.writeFileSync(file,fs.readFileSync(file,'utf8').replaceAll('127.0.0.1:8765',`127.0.0.1:${pair.port}`));
+    }
+    const extension=stagedExtension;
     context=await chromium.launchPersistentContext('',{headless:true,
       ...(process.env.SA_TEST_BROWSER?{executablePath:process.env.SA_TEST_BROWSER}:fs.existsSync(edge)?{executablePath:edge}:{}),
       args:[`--disable-extensions-except=${extension}`,`--load-extension=${extension}`]});
@@ -64,6 +72,23 @@ const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
     assert.equal(await site.evaluate(()=>openedClaim),true);
     assert.equal(await site.evaluate(()=>writeCount),0);
     console.log('PASS manual claim window opens without submitting');
+    // Synthetic user closes their manual drawer before starting a new command.
+    await site.evaluate(()=>claimWindow.drawer=false);
+    const prepared=await invoke('prepare_claim',{sa_id:'demo-001',expected:read.data.row,
+      sa_text:'测试员(00001)①',staff_id:'00001',roster_staff_id:'00001'});
+    assert.equal(prepared.ok,true,JSON.stringify(prepared));
+    assert.equal(prepared.data.prepared.person.wno,'00001');
+    assert.equal(await site.evaluate(()=>writeCount),0);
+    console.log('PASS exact scholar lookup crosses the real extension without writing');
+    const claimed=await invoke('submit_claim',{sa_id:'demo-001',expected:read.data.row,
+      sa_text:'测试员(00001)①',staff_id:'00001',prepared:prepared.data.prepared,
+      author_index:prepared.data.suggested_index,confirmed:true});
+    assert.equal(claimed.ok,true,JSON.stringify(claimed));
+    assert.equal(claimed.data.verified,true);
+    assert.equal(claimed.data.scholar_id,'scholar-001');
+    assert.equal(await site.evaluate(()=>claimWrites),1);
+    console.log('PASS confirmed single-author claim submits once and verifies through bridge');
+    await site.evaluate(()=>claimWindow.drawer=false);
     const changed=await invoke('link',{sa_id:'demo-001',expected:read.data.row,reviewed:true,
       note:'已核验测试文献与平台唯一号',item_id:'9876543210987654321'});
     assert.equal(changed.ok,true,JSON.stringify(changed));
@@ -79,11 +104,13 @@ const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
     console.log('PASS completion round trip verifies status and remark');
     const duplicate=await invoke('complete',{sa_id:'demo-001',expected:completed.data.row,reviewed:true,note:'已核验测试原文，本库正确。'});
     assert.equal(duplicate.ok,false);
-    assert.equal(await site.evaluate(()=>writeCount),2);
+    assert.equal(await site.evaluate(()=>writeCount),3);
     console.log('PASS duplicate completion is refused across bridge');
-    console.log('Extension integration: 7 cases passed. Only synthetic data; no production requests.');
+    console.log('Extension integration: 9 cases passed. Only synthetic data; no production requests.');
   } finally {
     if(context)await context.close();
+    if(stagedExtension && path.dirname(path.resolve(stagedExtension))===path.resolve(os.tmpdir()) &&
+        path.basename(stagedExtension).startsWith('sa-extension-test-'))fs.rmSync(stagedExtension,{recursive:true,force:true});
     backend.stdin.end(JSON.stringify({exit:true})+'\n');
     setTimeout(()=>{if(!stopped)backend.kill();},2000).unref();
   }

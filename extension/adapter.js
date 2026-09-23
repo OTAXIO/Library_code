@@ -28,6 +28,11 @@ async function runSACommand(command) {
     el.innerHTML = String(value ?? "").replace(/<br\s*\/?\s*>/gi, "\n").replace(/<[^>]*>/g, "");
     return el.value;
   };
+  // Chrome's extension messaging may reorder object keys. Compare content, not
+  // serialization order, while preserving meaningful array order and types.
+  const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+  const equal = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
   const keys = ["id", "saLzkId", "itemId", "matchCount", "markStatus", "reason", "title", "titleValue",
     "doi", "doiValue", "wos", "wosValue", "claimStatus", "gh", "qr", "updateTime", "updateUsername", "remark"];
   const snap = row => {
@@ -46,7 +51,7 @@ async function runSACommand(command) {
   };
   try {
     check();
-    if (!["search", "open_metadata", "open_claim", "link", "complete"].includes(command.action)) stop("不支持的命令");
+    if (!["search", "open_metadata", "open_claim", "prepare_claim", "submit_claim", "link", "complete"].includes(command.action)) stop("不支持的命令");
     if (typeof command.sa_id !== "string" || !command.sa_id || command.sa_id.length > 160) stop("名单 ID 不合法");
     const roots = [...document.querySelectorAll("*")].map(el => el.__vue__).filter(Boolean);
     const found = new Set(), visited = new Set();
@@ -64,6 +69,16 @@ async function runSACommand(command) {
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");
     // Never close or overwrite a user editing form. Only our read-only drawer is closed.
     if (visibleAll(".el-dialog, .el-message-box").length) stop("网页存在未关闭的编辑/确认弹窗，请先人工处理并关闭");
+    const previousClaim = drawer.$refs?.claimDetail;
+    if (previousClaim?.drawer) {
+      if (previousClaim.__saAssistant !== command.sa_id || previousClaim.loading ||
+          previousClaim.tableData?.metadata?.author?.some(author => author.data))
+        stop("认领窗口存在人工操作或未保存选择，请先人工处理并关闭");
+      previousClaim.drawer = false;
+      await vm.$nextTick();
+      await wait(() => visibleAll(".el-drawer").length <= 1, "收起已查找的认领窗口", 5000);
+      await wait(() => !drawer.dialogLoading, "等待详情刷新", 10000);
+    }
     if (drawer.dialogVisible) {
       if (drawer.dialogLoading) stop("详情仍在加载，请等待后重查");
       drawer.dialogVisible = false;
@@ -114,6 +129,134 @@ async function runSACommand(command) {
     if (command.action === "search") {
       const comparison = await showDetail();
       return {ok: true, data: {row: before, comparison}};
+    }
+    if (["prepare_claim", "submit_claim"].includes(command.action)) {
+      const submitting = command.action === "submit_claim";
+      if (submitting && command.confirmed !== true) stop("缺少本条作者认领的人工确认");
+      if (row.markStatus !== "待处理") stop("该记录已处理，不自动认领");
+      const ids = String(row.itemId || "").replace(/^,/, "").split(",").filter(Boolean);
+      if (Number(row.matchCount) !== 1 || ids.length !== 1) stop("自动认领需要唯一匹配条目");
+      const comparison = await showDetail();
+      const fields = comparison.filter(field => field.label === "认领状态");
+      if (fields.length !== 1) stop("未找到唯一的认领状态字段");
+      const saText = fields[0].sa.trim();
+      const groups = [...saText.matchAll(/\(([^()]*)\)|（([^（）]*)）/g)];
+      if (groups.length !== 1 || (saText.match(/[()（）]/g) || []).length !== 2) stop("SA 括号编号为空或不唯一");
+      const staffId = (groups[0][1] || groups[0][2] || "").trim();
+      if (!/^[0-9]{1,40}$/.test(staffId)) stop("SA 括号编号不是完整数字文本");
+      if (command.sa_text !== saText || command.staff_id !== staffId) stop("SA 提交编号或姓名在读取后发生变化，请重新定位");
+      if ((row.gh && row.gh !== staffId) || (command.roster_staff_id && command.roster_staff_id !== staffId))
+        stop("SA 括号编号与名单/网页工号不一致，请人工核对");
+      const claim = drawer.$refs?.claimDetail;
+      if (!claim || !["getItemDetail", "handleSelect", "handleClaim", "getShows"].every(key => typeof claim[key] === "function"))
+        stop("作者认领页面结构已变化，请更新扩展");
+      const oldTable = claim.tableData;
+      drawer.handleClaim();
+      await wait(() => claim.drawer && !claim.loading && claim.tableData !== oldTable, "打开作者认领页");
+      const guard = () => {
+        check();
+        if (!claim.drawer || claim.ids !== ids[0] || claim.tableData?.id !== ids[0] || claim.auth !== true ||
+            drawer.currentSaLzkId !== command.sa_id || !Array.isArray(claim.tableData?.metadata?.author))
+          stop("认领页面目标、权限或作者数据不一致");
+      };
+      guard();
+      claim.__saAssistant = command.sa_id;
+      claim.activeName = "author";
+      await vm.$nextTick();
+      const authorsSnapshot = () => claim.tableData.metadata.author.map((author, index) => {
+        if (typeof author.fullname !== "string" || !author.fullname.trim() ||
+            !/^[1-9][0-9]*$/.test(String(author.order)) ||
+            (author.scholarId != null && typeof author.scholarId !== "string") ||
+            (author.id != null && typeof author.id !== "string")) stop("作者行编号或署名格式未知");
+        const relations = claim.tableData.itemAuthorRelationVOs?.[String(author.order)] ?? [];
+        if (!Array.isArray(relations) || relations.some(relation => typeof relation.scholarId !== "string" ||
+            !Number.isInteger(relation.status) || relation.status < 0 || relation.status > 10)) stop("作者认领关系格式未知");
+        return {index, id: author.id ?? "", order: author.order, fullname: author.fullname,
+          scholarId: author.scholarId ?? "", eligible: author.belongToCurrentInstitution !== false &&
+            claim.getShows(author.institutionOrderNums) === true,
+          relations: relations.map(r => ({scholarId: r.scholarId, status: r.status}))};
+      });
+      const authors = authorsSnapshot();
+      if (new Set(authors.map(author => String(author.order))).size !== authors.length) stop("作者序号重复，不能自动认领");
+      if (claim.tableData.metadata.author.some(author => author.data)) stop("已有未提交的学者选择，请人工核对");
+      const available = authors.filter(author => author.eligible && !author.scholarId);
+      if (!available.length) stop("没有可认领的作者行，请人工核验现有认领");
+      // Selecting a row here only opens the search dialog. No scholar is bound
+      // until the second, explicitly confirmed command revalidates everything.
+      const target = submitting ? authors.find(author => author.index === command.author_index) : available[0];
+      if (!target || !target.eligible || target.scholarId) stop("所选作者不可认领或已有认领，不能覆盖");
+      claim.handleSelect(target.index, claim.index, claim.tableData.metadata.author[target.index]);
+      await vm.$nextTick();
+      const modal = claim.$refs?.authorModal;
+      if (!modal || !["getScholarData", "sureAuthor"].every(key => typeof modal[key] === "function") ||
+          !modal.dialogModalVisible || modal.authorIndex !== target.index || !modal.queryForm)
+        stop("选择学者窗口结构不兼容");
+      // showDialog starts an initial name search. Let it finish before changing
+      // filters so its late response cannot masquerade as the ID lookup.
+      await wait(() => !modal.loading, "等待初始人员查询");
+      guard();
+      const allowedFilters = ["id", "institutionId", "wno", "typeIdentity", "name", "scholarId"];
+      if (Object.keys(modal.queryForm).some(key => !allowedFilters.includes(key))) stop("人员查询字段已变化");
+      modal.queryForm = {id: claim.tableData.metadata.author[target.index].id,
+        institutionId: "", wno: staffId, typeIdentity: "", name: ""};
+      modal.page = {current: 1, size: 10};
+      await vm.$nextTick();
+      const oldPeople = modal.tableData;
+      const request = modal.getScholarData();
+      if (!request || typeof request.then !== "function") stop("人员查询方法不兼容");
+      let finished = false, failure;
+      request.then(() => {finished = true;}, error => {failure = error; finished = true;});
+      await wait(() => finished && !modal.loading, "按工号/学号查询");
+      guard();
+      if (failure || modal.tableData === oldPeople || !Array.isArray(modal.tableData)) stop("人员查询没有返回新数据");
+      if (Number(modal.total) !== 1 || modal.tableData.length !== 1) stop("工号/学号未返回唯一人员，请人工处理");
+      const person = modal.tableData[0];
+      if (typeof person.wno !== "string" || person.wno !== staffId || typeof person.id !== "string" || !person.id)
+        stop("查询人员的工号/学号不完全一致，不能认领");
+      if (person.aliases != null && !Array.isArray(person.aliases)) stop("学者别名格式未知");
+      const names = [person.nameCn, person.nameEn, ...(person.aliases || []).map(alias => alias.nameAlias)]
+        .filter(name => typeof name === "string" && name.trim()).map(name => name.trim());
+      const name = person.nameCn || person.nameEn;
+      if (typeof name !== "string" || !name.trim()) stop("人员姓名为空");
+      if (authors.some(author => author.scholarId === person.id || author.relations.some(r => r.scholarId === person.id && r.status >= 6)))
+        stop("该人员已存在认领关系，请人工核验，不重复提交");
+      if (JSON.stringify(authorsSnapshot()) !== JSON.stringify(authors)) stop("查找期间作者数据发生变化");
+      const prepared = {item_id: ids[0], staff_id: staffId, sa_text: saText,
+        person: {id: person.id, wno: person.wno, name, names: [...new Set(names)]}, authors};
+      if (!submitting) {
+        modal.dialogModalVisible = false;
+        const exact = available.filter(author => names.includes(author.fullname.trim()));
+        return {ok: true, data: {row: before, comparison, prepared,
+          suggested_index: exact.length === 1 ? exact[0].index : null}};
+      }
+      if (!equal(prepared, command.prepared)) stop("人员或作者数据已变化，请重新查找并确认");
+      if (target.relations.some(r => r.scholarId === person.id && r.status >= 1 && r.status <= 5))
+        stop("该作者已有非本人作品记录，需人工核查，不能自动覆盖");
+      if (target.relations.some(r => r.status >= 6)) stop("该作者已有其他有效认领关系，不能自动覆盖");
+      if (!modal.dialogModalVisible || modal.authorIndex !== target.index || modal.queryForm.wno !== staffId ||
+          modal.queryForm.name !== "" || modal.queryForm.institutionId !== "" || modal.queryForm.typeIdentity !== "")
+        stop("人员查询窗口被修改，请重新查找");
+      modal.sureAuthor(person);
+      await vm.$nextTick();
+      guard();
+      const selected = claim.tableData.metadata.author[target.index];
+      if (modal.dialogModalVisible || selected.data?.scholarId !== person.id || selected.data?.wno !== staffId ||
+          selected.data?.name !== name || JSON.stringify(authorsSnapshot()) !== JSON.stringify(authors))
+        stop("选择人员后的作者行校验失败");
+      if (claim.activeName !== "author" || visibleAll(".el-dialog, .el-message-box").length)
+        stop("网页出现其他操作窗口，请人工处理");
+      const beforeWrite = claim.tableData;
+      submitted = true;
+      claim.__saAssistant = null; // Never silently close an uncertain write.
+      claim.handleClaim(selected); // Exactly one existing UI submit, never batch.
+      await wait(() => !claim.loading && claim.tableData !== beforeWrite, "认领结果回读");
+      guard();
+      const after = authorsSnapshot();
+      const confirmed = after.filter(author => author.order === target.order && author.fullname === target.fullname && author.scholarId === person.id);
+      if (confirmed.length !== 1 || after.filter(author => author.scholarId === person.id).length !== 1)
+        stop("认领结果未匹配目标作者与学者，需人工核验");
+      return {ok: true, data: {row: before, claimed: true, verified: true,
+        staff_id: staffId, scholar_id: person.id, author: target.fullname, order: target.order}};
     }
     if (["open_metadata", "open_claim"].includes(command.action)) {
       const ids = String(row.itemId || "").replace(/^,/, "").split(",").filter(Boolean);

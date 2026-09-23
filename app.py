@@ -8,6 +8,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 from bridge import Bridge
+from claim import sa_claim_source
 
 from core import Journal, SafetyStop, fixed_roster_path, guide, read_roster
 from remarks import PRESETS, append_remark
@@ -28,6 +29,9 @@ class App:
         self.current = None
         self.bridge = bridge
         self.snapshot = None
+        self.comparison = None
+        self.prepared_claim = None
+        self.claim_options = []
         self.busy = False
         self.events = queue.Queue()
         self.buttons = []
@@ -41,6 +45,9 @@ class App:
         self.preset = tk.StringVar(value="选择备注模板")
         self.task_view = tk.StringVar(value="pending")
         self.connection = tk.StringVar(value="连接浏览器")
+        self.sa_number = tk.StringVar(value="先定位网页")
+        self.claim_person = tk.StringVar(value="尚未查找人员")
+        self.claim_author = tk.StringVar()
         self.build()
         self.reviewed.trace_add("write", lambda *_: self.refresh_approval())
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -83,8 +90,26 @@ class App:
         self.automation_page = ttk.Frame(self.tabs, padding=20)
         self.tabs.add(self.manual_page, text="人工处理")
         self.tabs.add(self.automation_page, text="自动化")
-        ttk.Label(self.automation_page, text="自动化暂未启用", font=("Microsoft YaHei UI", 14, "bold")).pack(anchor="w", pady=(12, 8))
-        ttk.Label(self.automation_page, text="后续将在此页面单独开发。\n人工页仅响应你点击的定位、编辑和认领按钮。", wraplength=430).pack(anchor="w")
+        auto = self.automation_page
+        ttk.Label(auto, text="单条作者认领", font=("Microsoft YaHei UI", 14, "bold")).pack(anchor="w", pady=(6, 8))
+        ttk.Label(auto, textvariable=self.current_id, wraplength=440).pack(anchor="w", pady=(0, 12))
+        ttk.Label(auto, text="SA 提交 · 括号编号").pack(anchor="w")
+        ttk.Entry(auto, textvariable=self.sa_number, state="readonly").pack(fill="x", pady=(5, 8))
+        auto_tools = ttk.Frame(auto)
+        auto_tools.pack(fill="x", pady=(0, 16))
+        self.button(auto_tools, "定位网页", self.locate).pack(side="left")
+        self.button(auto_tools, "复制编号", self.copy_sa_number).pack(side="left", padx=6)
+        self.button(auto_tools, "查找认领人员", self.prepare_claim).pack(side="left")
+        ttk.Label(auto, textvariable=self.claim_person, wraplength=440, font=("Microsoft YaHei UI", 10)).pack(anchor="w", pady=(0, 12))
+        ttk.Label(auto, text="对应论文作者（确认署名后选择）").pack(anchor="w")
+        self.claim_author_box = ttk.Combobox(auto, textvariable=self.claim_author, state="readonly")
+        self.claim_author_box.pack(fill="x", pady=(5, 12))
+        self.claim_author_box.bind("<<ComboboxSelected>>", lambda _e: self.refresh_approval())
+        self.claim_button = self.button(auto, "确认并认领此作者", self.submit_claim, style="Complete.TButton")
+        self.claim_button.pack(fill="x", pady=(0, 14))
+        ttk.Label(auto, text="只处理当前记录，不批量认领。\n编号或人员不唯一时停止。\n认领后仍需回人工页批准完成。", wraplength=440, foreground="#5b6572").pack(anchor="w")
+        ttk.Separator(auto).pack(fill="x", pady=14)
+        ttk.Label(auto, textvariable=self.status, wraplength=440).pack(anchor="w")
         page = self.manual_page
         page.columnconfigure(0, weight=1)
         page.rowconfigure(2, weight=3)
@@ -141,7 +166,8 @@ class App:
         self.button(tools, "定位网页", self.locate).pack(side="left")
         self.button(tools, "编辑", lambda: self.open_browser_panel("open_metadata")).pack(side="left", padx=3)
         self.button(tools, "认领", lambda: self.open_browser_panel("open_claim")).pack(side="left")
-        self.button(tools, "复制 ID", self.copy_id).pack(side="left", padx=3)
+        self.button(tools, "ID", self.copy_id).pack(side="left", padx=3)
+        self.button(tools, "SA 编号", self.copy_sa_number).pack(side="left")
         self.button(tools, "指引", self.show_guide).pack(side="left")
         self.button(tools, "下一条", self.next_record).pack(side="right")
         templates = ttk.Frame(page)
@@ -166,12 +192,14 @@ class App:
         done = bool(self.current and self.current.done)
         enabled = bool(self.current and not done and self.reviewed.get() and not self.busy)
         self.complete_button.configure(state="normal" if enabled else "disabled", text="已批准完成" if done else "✓ 批准完成")
+        can_claim = bool(self.current and not done and self.prepared_claim and not self.busy and self.claim_author_box.current() >= 0)
+        self.claim_button.configure(state="normal" if can_claim else "disabled")
 
     def set_busy(self, busy):
         self.busy = busy
         for widget in self.buttons:
             widget.configure(state="disabled" if busy else "normal")
-        for widget in (self.owner_box, self.preset_box):
+        for widget in (self.owner_box, self.preset_box, self.claim_author_box):
             widget.configure(state="disabled" if busy else "readonly")
         self.check.configure(state="disabled" if busy else "normal")
         self.note.configure(state="disabled" if busy else "normal")
@@ -202,7 +230,7 @@ class App:
                         raise value
                     callback(value)
                 except Exception as exc:
-                    self.snapshot = None
+                    self.clear_browser_state()
                     self.reviewed.set(False)
                     self.status.set("已暂停，请处理提示后重读名单；不自动重试。")
                     messagebox.showwarning("等待人工处理", str(exc), parent=self.root)
@@ -218,12 +246,26 @@ class App:
 
     def clear_selection(self):
         self.current = None
-        self.snapshot = None
+        self.clear_browser_state()
         self.current_id.set("请选择一条记录")
         self.set_approval(False)
         self.note.delete("1.0", "end")
         self.preset.set("选择备注模板")
         self.show_text("")
+
+    def clear_claim_preview(self):
+        self.prepared_claim = None
+        self.claim_options = []
+        self.claim_person.set("尚未查找人员")
+        self.claim_author.set("")
+        self.claim_author_box["values"] = []
+        self.refresh_approval()
+
+    def clear_browser_state(self):
+        self.snapshot = None
+        self.comparison = None
+        self.sa_number.set("先定位网页")
+        self.clear_claim_preview()
 
     def set_approval(self, completed):
         self.approval.set("已完成" if completed else "未完成")
@@ -324,7 +366,7 @@ class App:
             try:
                 self.bridge.re_pair()
                 token.set(self.bridge.token)
-                self.snapshot = None
+                self.clear_browser_state()
                 self.reviewed.set(False)
             except SafetyStop as exc:
                 messagebox.showwarning("等待当前操作结束", str(exc), parent=popup)
@@ -350,6 +392,7 @@ class App:
             payload = {"sa_id": record.sa_id}
             if action != "search":
                 payload["expected"] = self.snapshot
+            self.clear_browser_state()
             self.reviewed.set(False)
         except Exception as exc:
             messagebox.showwarning("暂未定位", str(exc), parent=self.root)
@@ -359,6 +402,12 @@ class App:
             if row.get("saLzkId") != record.sa_id:
                 raise SafetyStop("网页返回 ID 不一致，请人工检查。")
             self.snapshot = row if action == "search" else None
+            self.comparison = result.get("comparison") if action == "search" else None
+            if action == "search":
+                try:
+                    self.sa_number.set(sa_claim_source(self.comparison)[1])
+                except SafetyStop:
+                    self.sa_number.set("未识别唯一括号编号")
             self.status.set("已定位对应详情，请在浏览器核验。" if action == "search" else "已打开窗口，请手动修改并保存。")
         self.run(lambda: self.bridge.call(action, payload), opened, "正在定位当前记录，请勿同时操作该网页…")
 
@@ -383,6 +432,96 @@ class App:
     def copy_id(self):
         if self.current:
             self.copy(self.current.sa_id, "ID 已复制，请在网页手动搜索。")
+
+    def copy_sa_number(self):
+        if self.busy:
+            return
+        try:
+            if not self.current or not self.snapshot:
+                raise SafetyStop("请先选择记录并定位网页。")
+            _, identifier = sa_claim_source(self.comparison)
+            self.copy(identifier, "SA 括号编号已复制，前导 0 已保留。")
+        except SafetyStop as exc:
+            messagebox.showwarning("暂未复制", str(exc), parent=self.root)
+
+    def claim_payload(self):
+        if not self.current or not self.roster or self.current.done or not self.snapshot:
+            raise SafetyStop("请先在人工页选择未完成记录，并定位网页。")
+        self.roster.assert_unchanged()
+        if not self.bridge or not self.bridge.online:
+            raise SafetyStop("请先连接浏览器。")
+        source, identifier = sa_claim_source(self.comparison)
+        if self.current.staff_id and self.current.staff_id != identifier:
+            raise SafetyStop("SA 括号编号与名单工号不一致，请人工核对。")
+        return {"sa_id": self.current.sa_id, "expected": self.snapshot, "sa_text": source,
+                "staff_id": identifier, "roster_staff_id": self.current.staff_id}
+
+    def prepare_claim(self):
+        if self.busy:
+            return
+        try:
+            payload = self.claim_payload()
+            record = self.current
+            self.clear_claim_preview()
+            self.reviewed.set(False)
+        except SafetyStop as exc:
+            messagebox.showwarning("暂未查找", str(exc), parent=self.root)
+            return
+        def ready(result):
+            prepared = result.get("prepared", {})
+            person = prepared.get("person", {})
+            if (result.get("row", {}).get("saLzkId") != record.sa_id or prepared.get("staff_id") != payload["staff_id"]
+                    or person.get("wno") != payload["staff_id"] or not person.get("id") or not person.get("name")):
+                raise SafetyStop("人员查找结果不一致，请重新定位。")
+            self.prepared_claim = prepared
+            self.claim_person.set(f"{person['name']} · {person['wno']}\n请核对人员与论文作者署名。")
+            self.claim_options = [a for a in prepared.get("authors", []) if a.get("eligible") and not a.get("scholarId")]
+            self.claim_author_box["values"] = [f"{a['order']}. {a['fullname']}" for a in self.claim_options]
+            suggested = result.get("suggested_index")
+            choices = [i for i, a in enumerate(self.claim_options) if a["index"] == suggested]
+            if len(choices) == 1:
+                self.claim_author_box.current(choices[0])
+            self.refresh_approval()
+            self.status.set("已找到唯一人员，尚未认领。请核对并选择对应作者。")
+        self.run(lambda: self.bridge.call("prepare_claim", payload), ready, "正在按 SA 编号查找人员，请勿操作网页…")
+
+    def submit_claim(self):
+        if self.busy:
+            return
+        try:
+            payload = self.claim_payload()
+            prepared = self.prepared_claim
+            choice = self.claim_author_box.current()
+            if not prepared or not 0 <= choice < len(self.claim_options):
+                raise SafetyStop("请先查找人员，再选择对应作者署名。")
+            author, person, record = self.claim_options[choice], prepared["person"], self.current
+            question = (f"名单：{record.sa_id}\n{record.title[:100]}\n\n人员：{person['name']}（{person['wno']}）"
+                        f"\n论文署名：第 {author['order']} 位 · {author['fullname']}\n\n确认该署名属于此人员，并向网站提交一次认领？"
+                        "\n不会自动把 Excel 标记完成。")
+            if not messagebox.askyesno("确认单条作者认领", question, parent=self.root):
+                return
+            payload.update(prepared=prepared, author_index=author["index"], confirmed=True)
+            self.journal.save(record, "认领待提交", self.note.get("1.0", "end").strip(),
+                              {"staff_id": person["wno"], "scholar_id": person["id"], "author": author["fullname"], "order": author["order"]})
+            self.clear_browser_state()
+            self.reviewed.set(False)
+        except Exception as exc:
+            messagebox.showwarning("暂未认领", str(exc), parent=self.root)
+            return
+        def claimed(result):
+            if (result.get("row", {}).get("saLzkId") != record.sa_id or result.get("verified") is not True
+                    or result.get("claimed") is not True or result.get("staff_id") != person["wno"]
+                    or result.get("scholar_id") != person["id"] or result.get("author") != author["fullname"]
+                    or result.get("order") != author["order"]):
+                raise SafetyStop("已发出认领，但回读结果不一致。请核验网页，禁止直接重试。")
+            self.use_remark("已认领")
+            self.claim_person.set(f"已认领：{person['name']} · {author['fullname']}")
+            self.status.set("认领已回读确认，备注已填“已认领”；核对后回人工页批准完成。")
+            try:
+                self.journal.save(record, "认领已核验", self.note.get("1.0", "end").strip(), result)
+            except Exception:
+                self.status.set("网页认领已成功，但本地日志失败；请人工核验，勿重复认领。")
+        self.run(lambda: self.bridge.call("submit_claim", payload), claimed, "正在复核并提交单条认领，请勿操作网页…")
 
     def copy_note(self):
         self.copy(self.note.get("1.0", "end").strip(), "备注已复制，请在网页手动粘贴并保存。")
@@ -412,7 +551,7 @@ class App:
                 raise SafetyStop("请先完成人工审批，并勾选已核对。")
             roster.assert_unchanged()
             note = self.note.get("1.0", "end").strip()
-            question = f"名单 ID：{record.sa_id}\n{record.title[:100]}\n\n确认这条记录已处理完成？\n仅将 list.xlsx 第 {record.row} 行完成备注写为数字 1。\n本工具不会替你修改网页。"
+            question = f"名单 ID：{record.sa_id}\n{record.title[:100]}\n\n确认这条记录已处理完成？\n仅将 list.xlsx 第 {record.row} 行完成备注写为数字 1。\n此批准按钮不会修改网页。"
             if record.remark:
                 question += f"\n\n原完成备注：{record.remark[:200]}\n将替换为 1，原值保存在备份中。"
             if not messagebox.askyesno("人工确认完成", question, parent=self.root):

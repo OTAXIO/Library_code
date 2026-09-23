@@ -5,12 +5,24 @@ import json
 import queue
 import re
 import secrets
+import socket
 import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from core import SafetyStop
+
+
+class LoopbackServer(ThreadingHTTPServer):
+    # Windows SO_REUSEADDR can silently share a listener with another assistant,
+    # sending pairing requests to the wrong process. Fail safely instead.
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 class Bridge:
@@ -78,7 +90,7 @@ class Bridge:
                     return self.reply(200, {"accepted": True})
                 return self.reply(404, {"error": "not found"})
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self.server = LoopbackServer(("127.0.0.1", port), Handler)
         self.server.daemon_threads = True
         self.port = self.server.server_port
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)

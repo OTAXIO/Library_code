@@ -2,6 +2,8 @@
 <main id="app"><h1>OFFLINE TEST — no production data</h1></main>
 <div class="el-drawer" id="drawer" style="display:none">Synthetic comparison</div>
 <div class="el-dialog" id="status" style="display:none">备注 / 确认</div>
+<div class="el-drawer" id="claim" style="display:none">作者认领</div>
+<div class="el-dialog" id="people" style="display:none">选择作者 · 工号/学号</div>
 <script>
 window.writeCount = 0;
 window.testConfig = {};
@@ -9,9 +11,9 @@ window.synthetic = {id:"test-row-001", saLzkId:"demo-001", itemId:"1234567890123
   markStatus:"待处理",reason:"作者不一致",title:true,titleValue:"Synthetic paper",doi:true,wos:true,claimStatus:false,
   gh:"00001",qr:"77",updateTime:"test-version-1",remark:""};
 const copy = value => JSON.parse(JSON.stringify(value));
-const bindVisibility = (component, id) => {
+const bindVisibility = (component, id, property="dialogVisible") => {
   let shown = false;
-  Object.defineProperty(component,"dialogVisible", {get:()=>shown,set:value=>{
+  Object.defineProperty(component,property, {get:()=>shown,set:value=>{
     shown=value; document.getElementById(id).style.display=value?"block":"none";
   }});
 };
@@ -19,14 +21,51 @@ const detail = {currentSaLzkId:"",dialogLoading:false,compareData:[],saLzkCompar
   show(row){this.currentSaLzkId=row.saLzkId; this.dialogVisible=true; this.dialogLoading=true;
     this.compareData = [{label:"题名",compareLeftValue:"Synthetic paper",compareRightValue:"Synthetic paper"},
       {label:"作者信息",compareLeftValue:"姓名：测试员<br/>是否通讯作者：是",compareRightValue:testConfig.authorInfo??"署名：Demo<br/>是否通讯作者：否"},
-      {label:"认领状态",compareLeftValue:"测试员",compareRightValue:testConfig.claim??"未认领"},
+      {label:"认领状态",compareLeftValue:testConfig.saClaim??"测试员(00001)①",compareRightValue:testConfig.claim??"未认领"},
       {label:"DOI",compareLeftValue:testConfig.saDoi??"",compareRightValue:"10.example/demo"},
       {label:"WOS记录号",compareLeftValue:testConfig.saWos??"",compareRightValue:testConfig.libraryWos??"WOS:DEMO"}];
     if(testConfig.omitWos)this.compareData=this.compareData.filter(item=>item.label!=="WOS记录号");
     this.saLzkCompareData=copy(this.compareData); this.dialogLoading=false;},
-  editItem(id){ window.openedEditor=id; }, handleClaim(){window.openedClaim=true;}
+  editItem(id){ window.openedEditor=id; }, handleClaim(){window.openedClaim=true;claimWindow.show(synthetic.itemId.replace(/^,/,""));}
 };
 bindVisibility(detail,"drawer");
+window.claimWrites=0;
+window.claimedUsers={};
+const defaultAuthors=[{id:"author-1",order:1,fullname:"Demo",scholarId:null,institutionOrderNums:[]},
+  {id:"author-2",order:2,fullname:"Coauthor",scholarId:null,institutionOrderNums:[]}];
+const claimWindow={ids:"",auth:true,loading:false,activeName:"authorInstitution",tableData:{metadata:{}},
+  show(id){this.ids=id;this.loading=true;this.getItemDetail();},
+  async getItemDetail(){await new Promise(resolve=>setTimeout(resolve,5));
+    const authors=copy(testConfig.authors??defaultAuthors);
+    for(const author of authors)if(claimedUsers[author.order])author.scholarId=claimedUsers[author.order];
+    this.tableData={id:testConfig.wrongClaimItem??this.ids,metadata:{author:authors,authorInstitution:[]},
+      itemAuthorRelationVOs:testConfig.relations??{}};
+    this.drawer=true;this.loading=false;},
+  getShows(){return !testConfig.nonInstitution;},
+  handleSelect(index,_unused,author){people.showDialog(index,author.id,author.fullname);},
+  handleAuthor(value,index){this.tableData.metadata.author[index].data=copy(value);},
+  handleClaim(author){writeCount++;claimWrites++;this.loading=true;
+    if(testConfig.hangClaim)return;
+    if(!testConfig.badClaimReadback)claimedUsers[author.order]=author.data.scholarId;
+    this.getItemDetail();}
+};
+bindVisibility(claimWindow,"claim","drawer");
+const people={loading:false,tableData:[],total:0,queryForm:{},page:{current:1,size:10},authorIndex:null,
+  showDialog(index,id,name){this.authorIndex=index;this.queryForm={id,institutionId:"",wno:"",typeIdentity:"",name:'"'+name+'"'};
+    this.dialogModalVisible=true;this.getScholarData();},
+  async getScholarData(){this.loading=true;await new Promise(resolve=>setTimeout(resolve,5));
+    if(!(testConfig.stalePeople&&this.queryForm.wno)){
+      this.tableData=copy(testConfig.people??[{id:"scholar-001",wno:"00001",nameCn:"测试员",nameEn:"Tester",aliases:[{nameAlias:"Demo"}]}]);
+      this.total=testConfig.peopleTotal??this.tableData.length;
+    }this.loading=false;},
+  sureAuthor(person){this.queryForm.name=person.nameCn||person.nameEn;this.queryForm.scholarId=person.id;
+    claimWindow.handleAuthor(this.queryForm,this.authorIndex);this.dialogModalVisible=false;}
+};
+bindVisibility(people,"people","dialogModalVisible");
+claimWindow.$refs={authorModal:people};
+detail.$refs={claimDetail:claimWindow};
+window.claimWindow=claimWindow;
+window.people=people;
 const statusModal={currentRow:null,editForm:{remark:""},show(row){this.currentRow=copy(row);this.dialogVisible=true;},
   handleConfirm(){writeCount++;synthetic.markStatus=this.currentRow.markStatus==="待处理"?"已处理":"待处理";
     synthetic.remark=testConfig.badRemark?"":this.editForm.remark;this.dialogVisible=false;vm.getData();}

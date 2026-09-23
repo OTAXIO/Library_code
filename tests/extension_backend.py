@@ -3,10 +3,10 @@ import json
 import sys
 from bridge import Bridge
 
-bridge = Bridge(8765)
+bridge = Bridge(0)  # Do not compete with the user's running assistant.
 try:
     # Read by the test subprocess only; never log this ephemeral pairing secret.
-    print(json.dumps({"token": bridge.token}), flush=True)
+    print(json.dumps({"token": bridge.token, "port": bridge.port}), flush=True)
     for line in sys.stdin:
         task = json.loads(line)
         if task.get("exit"):

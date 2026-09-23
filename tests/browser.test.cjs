@@ -187,6 +187,144 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.equal(result.ok,true,JSON.stringify(result));
     assert.equal(result.data.row.remark,note);
   });
+  const prepare = async (extra={}) => {
+    const read=await execute(command('search'));
+    assert.equal(read.ok,true,JSON.stringify(read));
+    return execute(command('prepare_claim',{expected:read.data.row,sa_text:'测试员(00001)①',staff_id:'00001',roster_staff_id:'00001',...extra}));
+  };
+  const submit = (read,extra={}) => execute(command('submit_claim',{
+    expected:read.data.row,sa_text:read.data.prepared.sa_text,staff_id:read.data.prepared.staff_id,
+    prepared:read.data.prepared,author_index:read.data.suggested_index,confirmed:true,...extra}));
+  test('claim lookup returns exact person and alias-matched author without writing',async()=>{
+    const result=await prepare();
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.prepared.staff_id,'00001');
+    assert.equal(result.data.suggested_index,0);
+    assert.equal(result.data.prepared.person.id,'scholar-001');
+    assert.equal(await page.evaluate(()=>writeCount),0);
+    assert.equal(await page.evaluate(()=>people.queryForm.wno),'00001');
+    assert.equal(await page.evaluate(()=>claimWindow.activeName),'author');
+  });
+  test('confirmed claim submits once and verifies exact author and scholar',async()=>{
+    const prepared=await prepare();
+    const result=await submit(prepared);
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.verified,true);
+    assert.equal(result.data.scholar_id,'scholar-001');
+    assert.equal(result.data.author,'Demo');
+    assert.equal(await page.evaluate(()=>writeCount),1);
+    assert.equal(await page.evaluate(()=>synthetic.markStatus),'待处理');
+  });
+  test('claim snapshot accepts reordered object keys from extension messaging',async()=>{
+    const prepared=await prepare();
+    const reorder=value=>Array.isArray(value)?value.map(reorder):value&&typeof value==='object'?
+      Object.fromEntries(Object.entries(value).reverse().map(([key,item])=>[key,reorder(item)])):value;
+    const result=await submit(prepared,{prepared:reorder(prepared.data.prepared)});
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(await page.evaluate(()=>writeCount),1);
+  });
+  test('ambiguous author alias is not auto-selected; human choice can resolve',async()=>{
+    await page.evaluate(()=>testConfig.people=[{id:'scholar-001',wno:'00001',nameCn:'测试员',aliases:[{nameAlias:'Demo'},{nameAlias:'Coauthor'}]}]);
+    const prepared=await prepare();
+    assert.equal(prepared.ok,true,JSON.stringify(prepared));
+    assert.equal(prepared.data.suggested_index,null);
+    const result=await submit(prepared,{author_index:1});
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.author,'Coauthor');
+  });
+  test('nonunique, missing, fuzzy and numeric person identifiers stop without writes',async()=>{
+    for(const config of [
+      {peopleTotal:2}, {people:[]}, {people:[{id:'s',wno:'100001',nameCn:'测试员'}]},
+      {people:[{id:'s',wno:1,nameCn:'测试员'}]}, {stalePeople:true}
+    ]){
+      await reset();await page.evaluate(value=>Object.assign(testConfig,value),config);
+      const result=await prepare();assert.equal(result.ok,false,JSON.stringify(result));
+      assert.equal(await page.evaluate(()=>writeCount),0);
+    }
+  });
+  test('SA ambiguity, roster conflict, changed SA source and multiple items stop',async()=>{
+    for(const config of [{saClaim:'甲(1);乙(2)'},{saClaim:'测试员(00002)'},{saClaim:'测试员(1e8)'}]){
+      await reset();await page.evaluate(value=>Object.assign(testConfig,value),config);
+      assert.equal((await prepare()).ok,false);assert.equal(await page.evaluate(()=>writeCount),0);
+    }
+    await reset();assert.equal((await prepare({roster_staff_id:'00002'})).ok,false);
+    await reset();await page.evaluate(()=>{synthetic.itemId='1,2';synthetic.matchCount=2;});
+    assert.equal((await prepare()).ok,false);
+  });
+  test('fullwidth SA parentheses preserve exact identifier',async()=>{
+    await page.evaluate(()=>testConfig.saClaim='测试员（00001）');
+    const result=await prepare({sa_text:'测试员（00001）'});
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.prepared.staff_id,'00001');
+  });
+  test('claim requires explicit confirmation and author selection',async()=>{
+    let prepared=await prepare();
+    assert.equal((await submit(prepared,{confirmed:false})).ok,false);
+    prepared=await prepare();
+    assert.equal((await submit(prepared,{author_index:null})).ok,false);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('person or author change after preparation prevents submit',async()=>{
+    for(const config of [
+      {people:[{id:'changed-scholar',wno:'00001',nameCn:'测试员',aliases:[{nameAlias:'Demo'}]}]},
+      {authors:[{id:'a',order:1,fullname:'Someone else',scholarId:null}]}
+    ]){
+      await reset();const prepared=await prepare();
+      await page.evaluate(value=>Object.assign(testConfig,value),config);
+      assert.equal((await submit(prepared)).ok,false);assert.equal(await page.evaluate(()=>writeCount),0);
+    }
+  });
+  test('existing claim and explicitly denied relationship cannot be overwritten',async()=>{
+    await page.evaluate(()=>claimedUsers[1]='scholar-001');
+    assert.equal((await prepare()).ok,false);
+    await reset();await page.evaluate(()=>testConfig.relations={'1':[{scholarId:'scholar-001',status:2}]});
+    const prepared=await prepare();
+    assert.equal(prepared.ok,true,JSON.stringify(prepared));
+    assert.match((await submit(prepared)).error,/非本人作品/);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('different existing claimant, forbidden institution and wrong item stop',async()=>{
+    let prepared=await prepare();
+    await page.evaluate(()=>claimedUsers[1]='another-scholar');
+    assert.equal((await submit(prepared)).ok,false);
+    for(const config of [{nonInstitution:true},{wrongClaimItem:'wrong'}]){
+      await reset();await page.evaluate(value=>Object.assign(testConfig,value),config);
+      assert.equal((await prepare()).ok,false);assert.equal(await page.evaluate(()=>writeCount),0);
+    }
+  });
+  test('another active relationship cannot be replaced even if author scholarId is empty',async()=>{
+    await page.evaluate(()=>testConfig.relations={'1':[{scholarId:'another-scholar',status:6}]});
+    const prepared=await prepare();
+    assert.equal(prepared.ok,true,JSON.stringify(prepared));
+    assert.match((await submit(prepared)).error,/其他有效认领/);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('bad claim readback is uncertain, no retry or completed marker',async()=>{
+    const prepared=await prepare();await page.evaluate(()=>testConfig.badClaimReadback=true);
+    const result=await submit(prepared);
+    assert.match(result.error,/已发出写入/);
+    assert.equal(await page.evaluate(()=>writeCount),1);
+    assert.equal(await page.evaluate(()=>synthetic.markStatus),'待处理');
+  });
+  test('claim timeout submits at most once and prohibits retry',async()=>{
+    const prepared=await prepare();await page.evaluate(()=>testConfig.hangClaim=true);
+    const result=await submit(prepared,{expires:Date.now()+4000});
+    assert.match(result.error,/已发出写入/);
+    assert.equal(await page.evaluate(()=>writeCount),1);
+  });
+  test('user pending selection is never discarded',async()=>{
+    const prepared=await prepare();
+    await page.evaluate(()=>claimWindow.tableData.metadata.author[0].data={name:'manual choice'});
+    const result=await submit(prepared);
+    assert.match(result.error,/人工操作或未保存/);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+    assert.equal(await page.evaluate(()=>claimWindow.tableData.metadata.author[0].data.name),'manual choice');
+  });
+  test('already processed record cannot prepare claim',async()=>{
+    await page.evaluate(()=>synthetic.markStatus='已处理');
+    assert.equal((await prepare()).ok,false);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
   try {
     for (const [name, fn] of cases) { await reset(); await fn(); console.log('PASS',name); }
     console.log(`Browser adapter: ${cases.length} offline cases passed. No production requests.`);
