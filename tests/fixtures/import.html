@@ -1,0 +1,35 @@
+<!doctype html><html><head><meta charset="utf-8"></head><body>
+<div id="app"><div id="upload" class="el-drawer" style="display:none"><input type="file" accept=".txt"></div>
+<div id="push" class="el-drawer" style="display:none"></div><div id="view" class="el-drawer" style="display:none"></div></div>
+<script>
+window.testConfig={wrongTitle:false,wrongUT:false,wrongDOI:false,foreign:false,noOption:false,failed:false};
+window.writes={upload:0,import:0,push:0};window.batches=[];
+const later=fn=>setTimeout(fn,30);
+const tree={$options:{name:'selectTree'},treeData:[{id:'sjtu-1',name:'上海交通大学'}],label:'',
+  handleNodeClick(node){this.label=node.name;drawer.form.datasetId=node.id;}};
+function shown(vm,id){let value=false;Object.defineProperty(vm,'drawer',{get:()=>value,set:x=>{value=x;document.getElementById(id).style.display=x?'block':'none';}});}
+window.drawer={$options:{},$children:[tree],$el:document.getElementById('upload'),form:{},fileList:[],
+  showDrawer(){this.fileList=[];this.form={datasetId:'',instructions:''};this.drawer=true;},
+  onSubmit(){writes.import++;const instructions=this.form.instructions;this.drawer=false;
+    later(()=>batches.push({id:'batch-001',modelId:'article-model',batchNumber:'BATCH-TEST',source:'WOS',instructions,
+      total:1,actual:0,fail:0,status:1,increase:0,duplicateSkip:0,duplicateIncreaseUpdate:0,duplicateOverallCoverage:0}));}};
+shown(drawer,'upload');
+drawer.$el.querySelector('input').addEventListener('change',e=>{writes.upload++;const file=e.target.files[0];later(()=>{
+  drawer.fileList=[{name:file.name,size:file.size,status:'success',response:{code:200,success:true,data:{name:'synthetic-object.txt'}}}];});});
+window.push={$options:{name:'BatchPushModal'},modelFieldsList:[{fieldName:'title'}],form:{},
+  duplicateQueryTypes:[{value:'ppt-composite',label:'唯一标识 + (期刊 & 发表时间 & 页码 & 卷 & 期 & 题名相似度) + 题名相似度'}],
+  showDrawer(row){this.form={batchId:row.id,modelId:row.modelId};this.drawer=true;},
+  onSubmit(){writes.push++;this.drawer=false;later(()=>{batches[0].status=2;batches[0].actual=1;});}};
+shown(push,'push');
+window.view={$options:{name:'BatchViewModal'},tableData:[],page:{total:0},loading:false,
+  showDrawer(id){this.id=id;this.tableData=[];this.drawer=true;this.loading=true;later(()=>{
+    this.tableData=[{metadata:{title:[testConfig.wrongTitle?'Another':'Synthetic paper'],
+      wosId:[testConfig.wrongUT?'WOS:999999999999999':'WOS:000123456789012'],doi:[testConfig.wrongDOI?'10.1234/other':'10.1234/test']}}];
+    this.page.total=1;this.loading=false;});}};
+shown(view,'view');
+window.vm={$options:{name:'BatchManage'},$children:[drawer,push,view],$refs:{wosDataText:drawer,batchPushModal:push,batchViewModal:view},
+  $nextTick:async()=>{},page:{currentPage:1,pageSize:100,total:0},tableData:[],loading:false,
+  getData(page,size){this.loading=true;later(()=>{this.tableData=batches.slice((page-1)*size,page*size).map(x=>({...x}));this.page.total=batches.length;this.loading=false;});},
+  importWosDataText(){drawer.showDrawer();},batchPush(row){push.showDrawer(row);}};
+document.getElementById('app').__vue__=vm;
+</script></body></html>

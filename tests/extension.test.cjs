@@ -107,7 +107,59 @@ const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
     assert.equal(duplicate.ok,false);
     assert.equal(await site.evaluate(()=>writeCount),3);
     console.log('PASS duplicate completion is refused across bridge');
-    console.log('Extension integration: 9 cases passed. Only synthetic data; no production requests.');
+    const importPage=await context.newPage();
+    const importFixture=fs.readFileSync(path.join(__dirname,'fixtures/import.html'),'utf8');
+    await importPage.route('**/*',r=>r.fulfill({status:200,contentType:'text/html',body:importFixture}));
+    await importPage.goto('http://admin.ir.lib.sjtu.edu.cn/#/collectItem/batchManage');
+    const wosPage=await context.newPage();
+    const wosFixture=fs.readFileSync(path.join(__dirname,'fixtures/wos.html'),'utf8');
+    await wosPage.route('**/*',r=>r.fulfill({status:200,contentType:'text/html',body:wosFixture}));
+    await wosPage.goto('https://www.webofscience.com/wos/woscc/basic-search');
+    // Playwright normally stores downloads under extensionless GUIDs. Give this
+    // isolated test browser a normal dedicated download directory; production
+    // extension behavior remains strict about .txt and is not relaxed for tests.
+    const downloadSession=await context.newCDPSession(wosPage);
+    const downloadDir=path.join(stagedExtension,'test-downloads');fs.mkdirSync(downloadDir);
+    await downloadSession.send('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloadDir});
+    const bind=async(role,url)=>popup.evaluate(async({role,url})=>{
+      const tabs=await chrome.tabs.query({});const tab=tabs.find(t=>t.url===url);
+      return chrome.runtime.sendMessage({type:'bind_workflow',role,tabId:tab.id});
+    },{role,url});
+    assert.equal((await bind('importTabId',importPage.url())).ok,true);
+    assert.equal((await bind('wosTabId',wosPage.url())).ok,true);
+    const c={title:'Synthetic paper',doi:'10.1234/test',wos:'WOS:000123456789012',sjtu:true,sha256:'a'.repeat(64)};
+    const checked=await invoke('import_scan',{sa_id:'demo-001',instructions:'SA补充-demo-001',candidate:c});
+    assert.equal(checked.ok,true,JSON.stringify(checked));assert.deepEqual(checked.data.batches,[]);
+    console.log('PASS import command routes only to explicitly bound batch tab');
+    const badFile=await invoke('import_upload',{sa_id:'demo-001',instructions:'SA补充-demo-001',candidate:c,content:'eA=='});
+    assert.equal(badFile.ok,false);assert.match(badFile.error,/哈希/);
+    assert.equal(await importPage.evaluate(()=>writes.upload),0);
+    console.log('PASS extension independently hashes file before any upload');
+    const wosQuery={sa_id:'demo-001',title:'Synthetic paper',doi:'10.1234/test',wos:'WOS:000123456789012'};
+    const searched=await invoke('wos_search',wosQuery);assert.equal(searched.ok,true,JSON.stringify(searched));
+    const exported=await invoke('wos_export',wosQuery);
+    if(!exported.ok)console.log('Synthetic download diagnostics',await worker.evaluate(async()=>
+      (await chrome.downloads.search({})).map(x=>({id:x.id,state:x.state,size:x.fileSize,bytes:x.bytesReceived,filename:x.filename,referrer:x.referrer,url:x.url,error:x.error}))));
+    assert.equal(exported.ok,true,JSON.stringify(exported));
+    assert.equal(exported.data.sa_id,'demo-001');assert.match(exported.data.path,/\.txt$/i);
+    console.log('PASS WOS search and correlated TXT download cross authenticated bridge');
+    const raw=fs.readFileSync(exported.data.path);
+    const importCandidate={...c,sha256:require('node:crypto').createHash('sha256').update(raw).digest('hex')};
+    const target={sa_id:'demo-001',instructions:'SA补充-demo-001',candidate:importCandidate};
+    const uploaded=await invoke('import_upload',{...target,content:raw.toString('base64')});assert.equal(uploaded.ok,true,JSON.stringify(uploaded));
+    const submitted=await invoke('import_submit',{...target,upload:uploaded.data});assert.equal(submitted.ok,true,JSON.stringify(submitted));
+    const imported=await invoke('import_check',target);assert.equal(imported.ok,true,JSON.stringify(imported));
+    const pushed=await invoke('import_push',{...target,batch:imported.data.batch});assert.equal(pushed.ok,true,JSON.stringify(pushed));
+    const verified=await invoke('import_check',{...target,batch_id:imported.data.batch.id,expect_pushed:true});
+    assert.equal(verified.ok,true,JSON.stringify(verified));assert.equal(verified.data.batch.status,2);
+    assert.deepEqual(await importPage.evaluate(()=>writes),{upload:1,import:1,push:1});
+    console.log('PASS captured TXT -> hash check -> one upload -> one import -> priority merge -> verified push');
+    assert.ok(site.url().includes('/dataCompare/list'));
+    await importPage.evaluate(()=>location.hash='#/wel/index');
+    const changedTab=await invoke('import_scan',{sa_id:'demo-001',instructions:'SA补充-demo-001',candidate:c});
+    assert.equal(changedTab.ok,false);
+    console.log('PASS changed workflow tab stops before executing commands');
+    console.log('Extension integration: 14 cases passed. Only synthetic data; no production requests.');
   } finally {
     if(context)await context.close();
     if(stagedExtension && path.dirname(path.resolve(stagedExtension))===path.resolve(os.tmpdir()) &&

@@ -1,4 +1,4 @@
-importScripts("adapter.js");
+importScripts("adapter.js", "import-adapter.js", "wos-adapter.js", "workflow-background.js");
 let polling = false;
 let busy = false;
 const trustedPopup = sender => sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL("popup.html");
@@ -25,8 +25,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const tab = await chrome.tabs.get(message.tabId);
       if (!validPage(tab.url)) throw new Error("请先切换到 SA数据比对 → 比对结果 页面");
       await request("/poll", {client: String(tab.id), claimOnly: true}, message.token);
+      await chrome.storage.session.clear();
       await chrome.storage.session.set({token: message.token, tabId: tab.id});
       await chrome.scripting.executeScript({target: {tabId: tab.id}, files: ["content.js"]});
+      return {ok: true};
+    }
+    if (message.type === "bind_workflow") {
+      if (!trustedPopup(sender)) throw new Error("只能由扩展弹窗绑定工作页");
+      if (busy) throw new Error("正在执行命令，不能更换工作页");
+      const pair = await chrome.storage.session.get(["token", "tabId"]);
+      if (!pair.token) throw new Error("请先连接 SA 比对页");
+      if (!["wosTabId", "importTabId"].includes(message.role)) throw new Error("未知工作页类型");
+      const tab = await chrome.tabs.get(message.tabId);
+      if (tab.id === pair.tabId || !validRolePage(tab.url, message.role))
+        throw new Error("请在独立标签页打开对应工作页面，再点击绑定");
+      await chrome.storage.session.set({[message.role]: tab.id});
       return {ok: true};
     }
     if (message.type === "disconnect") {
@@ -36,7 +49,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return {ok: true};
     }
     if (message.type !== "tick" || polling) return {ok: true};
-    const pair = await chrome.storage.session.get(["token", "tabId"]);
+    const pair = await chrome.storage.session.get(["token", "tabId", "wosTabId", "importTabId"]);
     if (!pair.token || sender.tab?.id !== pair.tabId || !validPage(sender.tab.url)) return {ok: true};
     polling = true;
     let data;
@@ -51,9 +64,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
         const tab = await chrome.tabs.get(pair.tabId);
         if (!validPage(tab.url)) throw new Error("页面已切换，停止执行");
-        const outcomes = await chrome.scripting.executeScript({target: {tabId: pair.tabId},
-          world: "MAIN", func: runSACommand, args: [command]});
-        result = outcomes[0]?.result || {ok: false, error: "页面没有返回执行结果"};
+        if (workflowRole(command.action)) result = await dispatchWorkflow(command, pair);
+        else {
+          const outcomes = await chrome.scripting.executeScript({target: {tabId: pair.tabId},
+            world: "MAIN", func: runSACommand, args: [command]});
+          result = outcomes[0]?.result || {ok: false, error: "页面没有返回执行结果"};
+        }
       } catch (error) { result = {ok: false, error: error.message}; }
       finally { busy = false; }
     }

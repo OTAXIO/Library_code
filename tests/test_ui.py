@@ -93,6 +93,14 @@ class UITests(unittest.TestCase):
                 for button in self.app.buttons:
                     if button.winfo_viewable():
                         self.assertGreaterEqual(button.winfo_width(), button.winfo_reqwidth(), button.cget('text'))
+            self.app.tabs.select(self.app.automation_page)
+            for child in self.app.automation_panel.subtabs.tabs():
+                self.app.automation_panel.subtabs.select(child)
+                self.root.update()
+                for widget in (*self.app.buttons, self.app.automation_panel.output):
+                    if widget.winfo_viewable():
+                        self.assertGreater(widget.winfo_height(), 10)
+                        self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(), self.root.winfo_rooty() + self.root.winfo_height())
         self.app.tabs.select(self.app.automation_page)
         self.assertIsNone(self.app.bridge)
 

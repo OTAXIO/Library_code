@@ -1,6 +1,6 @@
 {
   "name": "sa-library-assistant-tests",
   "private": true,
-  "scripts": {"test": "node tests/browser.test.cjs", "test:extension": "node tests/extension.test.cjs"},
+  "scripts": {"test": "node tests/browser.test.cjs", "test:extension": "node tests/extension.test.cjs", "test:workflow": "node tests/workflow.test.cjs"},
   "devDependencies": {"playwright": "1.62.1"}
 }

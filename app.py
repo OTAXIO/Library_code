@@ -11,6 +11,7 @@ from bridge import Bridge
 from claim import sa_claim_source
 from model_review import KeyStore, ModelClient
 from model_panel import ModelPanel
+from automation_panel import AutomationPanel
 
 from core import Journal, SafetyStop, fixed_roster_path, guide, read_roster
 from remarks import PRESETS, append_remark
@@ -66,7 +67,7 @@ class App:
         return widget
 
     def build(self):
-        self.root.title("机构知识库 · 人工处理")
+        self.root.title("机构知识库 · 比对助手")
         width, height = 560, min(700, self.root.winfo_screenheight() - 90)
         x = max(0, self.root.winfo_screenwidth() - width - 35)
         self.root.geometry(f"{width}x{height}+{x}+35")
@@ -93,19 +94,19 @@ class App:
         self.tabs = ttk.Notebook(self.root)
         self.tabs.pack(fill="both", expand=True, padx=8, pady=8)
         self.manual_page = ttk.Frame(self.tabs, padding=10)
-        self.automation_page = ttk.Frame(self.tabs, padding=20)
+        self.automation_page = ttk.Frame(self.tabs, padding=10)
         self.tabs.add(self.manual_page, text="人工处理")
         self.tabs.add(self.automation_page, text="自动化")
         self.model_page = ttk.Frame(self.tabs, padding=12)
         self.tabs.add(self.model_page, text="模型辅助")
         self.model_panel = ModelPanel(self, self.model_page, self.model_client)
-        auto = self.automation_page
-        ttk.Label(auto, text="单条作者认领", font=("Microsoft YaHei UI", 14, "bold")).pack(anchor="w", pady=(6, 8))
-        ttk.Label(auto, textvariable=self.current_id, wraplength=440).pack(anchor="w", pady=(0, 12))
+        ttk.Label(self.automation_page, textvariable=self.current_id, wraplength=440).pack(anchor="w", pady=(0, 8))
+        self.automation_panel = AutomationPanel(self, self.automation_page, BASE / "runtime" / "wos-imports")
+        auto = self.automation_panel.claim_page
         ttk.Label(auto, text="SA 提交 · 括号编号").pack(anchor="w")
         ttk.Entry(auto, textvariable=self.sa_number, state="readonly").pack(fill="x", pady=(5, 8))
         auto_tools = ttk.Frame(auto)
-        auto_tools.pack(fill="x", pady=(0, 16))
+        auto_tools.pack(fill="x", pady=(0, 8))
         self.button(auto_tools, "定位网页", self.locate).pack(side="left")
         self.button(auto_tools, "复制编号", self.copy_sa_number).pack(side="left", padx=6)
         self.button(auto_tools, "查找认领人员", self.prepare_claim).pack(side="left")
@@ -116,9 +117,8 @@ class App:
         self.claim_author_box.bind("<<ComboboxSelected>>", lambda _e: self.refresh_approval())
         self.claim_button = self.button(auto, "确认并认领此作者", self.submit_claim, style="Complete.TButton")
         self.claim_button.pack(fill="x", pady=(0, 14))
-        ttk.Label(auto, text="只处理当前记录，不批量认领。\n编号或人员不唯一时停止。\n认领后仍需回人工页批准完成。", wraplength=440, foreground="#5b6572").pack(anchor="w")
-        ttk.Separator(auto).pack(fill="x", pady=14)
-        ttk.Label(auto, textvariable=self.status, wraplength=440).pack(anchor="w")
+        ttk.Label(auto, text="编号或署名不唯一时暂停；认领后仍需人工批准。", wraplength=420, foreground="#5b6572").pack(anchor="w")
+        ttk.Label(self.automation_page, textvariable=self.status, wraplength=445).pack(anchor="w", pady=(7, 0))
         page = self.manual_page
         page.columnconfigure(0, weight=1)
         page.rowconfigure(2, weight=3)
@@ -234,6 +234,11 @@ class App:
         self.connection.set("浏览器已连接" if self.bridge and self.bridge.online else "连接浏览器")
         try:
             while True:
+                self.status.set(self.automation_panel.progress.get_nowait())
+        except queue.Empty:
+            pass
+        try:
+            while True:
                 success, callback, value = self.events.get_nowait()
                 self.set_busy(False)
                 try:
@@ -264,6 +269,7 @@ class App:
         self.preset.set("选择备注模板")
         self.show_text("")
         self.model_panel.clear(reset_evidence=True)
+        self.automation_panel.clear()
 
     def clear_claim_preview(self):
         self.prepared_claim = None
