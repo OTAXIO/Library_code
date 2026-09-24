@@ -7,11 +7,21 @@ async function runWOSCommand(command) {
   const all = (sel,root=document)=>[...root.querySelectorAll(sel)].filter(visible);
   const caption = el => norm(el.getAttribute("aria-label") || el.innerText || el.textContent);
   const selection = el => el.tagName==="SELECT" ? norm(el.selectedOptions[0]?.textContent) : norm(el.innerText || el.textContent || el.getAttribute("aria-label"));
+  const fieldText = el => selection(el).replace(/(?:arrow_drop_down|expand_more|keyboard_arrow_down)/g, "").trim().replace(/\s*\((?:TS|TI|DO|UT|ALL)\)$/, "");
+  const fieldNames = ["All Fields","所有字段","全部字段","所有欄位","Topic","主题","主題","Title","标题","题名","標題","題名",
+    "DOI","Accession Number","入藏号","入藏號","Author","作者","Publication Titles","出版物名称","出版物名稱"];
+  const fields = () => {
+    const matches=all('[role="combobox"],select,[aria-haspopup="listbox"]').filter(el=>fieldNames.includes(fieldText(el)));
+    // A nested wrapper and its combobox are one control, not two search rows.
+    return matches.filter(el=>!matches.some(other=>other!==el && el.contains(other)));
+  };
   const one = (items,label)=>{if(items.length!==1)fail(label+"未唯一识别，请人工调整网页后继续");return items[0];};
   const check=()=>{
-    if(location.hostname!=="www.webofscience.com" || location.protocol!=="https:" ||
-       !location.pathname.startsWith("/wos/woscc/"))fail("请在 WOS 核心合集的文献检索页登录，不能使用作者检索");
+    if(location.hostname!=="www.webofscience.com" || location.protocol!=="https:")fail("请在 WOS 核心合集的文献检索页登录，不能使用作者检索");
     if(!Number.isFinite(command.expires) || Date.now()>=command.expires-2500)fail("WOS 操作超时，请人工查看网页");
+    if(/Oops,?\s*something went wrong!?/i.test(document.body?.innerText||""))
+      fail("WOS 网站自身报错：Oops, something went wrong! 这不是导入管理页的问题。请先点击 WOS 网页顶部 Search 或导航菜单重新进入检索；若仍报错，请人工检查登录、校园网/机构访问。网页恢复前不继续检索或导入");
+    if(!location.pathname.startsWith("/wos/woscc/"))fail("请在 WOS 核心合集的文献检索页登录，不能使用作者检索");
     if(all('iframe[src*="captcha"],input[type="password"],#challenge-form').length)fail("登录或验证码需要人工处理");
   };
   const wait=async(fn,label,ms=30000)=>{
@@ -38,13 +48,25 @@ async function runWOSCommand(command) {
     if(!["wos_search","wos_prepare_export","wos_download"].includes(command.action))fail("未知 WOS 命令");
     if(typeof command.title!=="string" || !command.title.trim() || command.title.length>1500)fail("题名缺失或过长");
     if(command.action==="wos_search") {
-      if(!location.pathname.endsWith("/basic-search"))fail("请先进入 WOS 核心合集基本检索页");
+      if(!/\/(?:basic-search|advanced-search|fielded-search)\/?$/.test(location.pathname))fail("请先进入 WOS 核心合集的字段检索页");
       if(all('[role="dialog"],mat-dialog-container').length)fail("WOS 有弹窗，请人工处理");
-      const choices=command.wos?["Accession Number","入藏号"]:command.doi?["DOI"]:["Title","标题","题名"];
+      const choices=command.wos?["Accession Number","入藏号","入藏號"]:command.doi?["DOI"]:["Title","标题","题名","標題","題名"];
       const query=command.wos||command.doi||command.title;
-      const combos=all('[role="combobox"],select').filter(e=>
-        /Topic|主题|Title|标题|题名|DOI|Accession Number|入藏号/.test(selection(e)));
-      const field=one(combos,"检索字段选择器");
+      // New WOS defaults to Smart Search. Follow only visible, specifically
+      // labelled links to Advanced -> Fielded Search; never invent route URLs
+      // or change the account's Smart Search preference.
+      const navigation=["Fielded Search","字段检索","字段搜索","欄位檢索","Advanced Search","高级检索","高级搜索","進階檢索"];
+      for(let step=0;fields().length===0 && step<2;step++) {
+        const links=all('a,button,[role="tab"]').filter(el=>navigation.includes(caption(el)) && el.getAttribute("aria-selected")!=="true");
+        const fielded=links.filter(el=>["Fielded Search","字段检索","字段搜索","欄位檢索"].includes(caption(el)));
+        const next=fielded.length?fielded:links;
+        if(next.length!==1)break;
+        const clicked=next[0];click(clicked);
+        await wait(()=>fields().length>0 || (!clicked.isConnected && all('a,button,[role="tab"]').some(el=>navigation.includes(caption(el)))),"切换字段检索",15000);
+      }
+      const combos=fields();
+      if(combos.length!==1)fail(`检索字段选择器未唯一识别（识别到 ${combos.length} 个）。请进入 Advanced Search / 高级检索 → Fielded Search / 字段检索，只保留一行条件。可点扩展“检查工作页”复制控件诊断`);
+      let field=combos[0];
       if(field.tagName==="SELECT"){
         const option=one([...field.options].filter(o=>choices.includes(norm(o.textContent))),"检索字段");
         field.value=option.value;field.dispatchEvent(new Event("change",{bubbles:true}));
@@ -53,12 +75,15 @@ async function runWOSCommand(command) {
         await wait(()=>all('[role="option"],mat-option').some(e=>choices.includes(caption(e))),"字段菜单",5000);
         click(one(all('[role="option"],mat-option').filter(e=>choices.includes(caption(e))),"检索字段"));
       }
+      await wait(()=>fields().length===1 && choices.includes(fieldText(fields()[0])),"确认检索字段",5000);
+      field=fields()[0];
       // Only an empty single-row basic-search form can be controlled.
-      const inputs=all('input:not([type]),input[type="text"],input[type="search"],textarea').filter(e=>!e.readOnly&&!e.disabled);
+      const scope=field.closest("form") || document;
+      const inputs=all('input:not([type]),input[type="text"],input[type="search"],textarea',scope).filter(e=>!e.readOnly&&!e.disabled);
       const input=one(inputs,"单行文献检索输入框");
       set(input,query);
       const previous=location.href;
-      click(button(["Search","检索","搜索"]));
+      click(button(["Search","检索","搜索"],scope));
       await wait(()=>location.href!==previous,"WOS 检索结果");
       await wait(()=>all('a[href*="/full-record/WOS:"]').length || /No results found|未找到结果|没有检索结果/.test(document.body.innerText),"加载结果");
       if(/No results found|未找到结果|没有检索结果/.test(document.body.innerText))fail("WOS 未找到记录；这不等于未发表，也不自动标记完成");

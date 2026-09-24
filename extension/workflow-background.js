@@ -33,7 +33,7 @@ async function dispatchWorkflow(command,pair) {
   }
   if(command.action==="wos_search") {
     // User explicitly binds a disposable working WOS tab. Never navigate SA tab.
-    if(!new URL(tab.url).pathname.endsWith("/woscc/basic-search")){
+    if(!/^\/wos\/woscc\/(?:basic-search|advanced-search|fielded-search)\/?$/.test(new URL(tab.url).pathname)){
       await chrome.tabs.update(id,{url:"https://www.webofscience.com/wos/woscc/basic-search"});
       const end=Math.min(Date.now()+25000,command.expires-10000);
       while(Date.now()<end){

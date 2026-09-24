@@ -9,6 +9,7 @@ from unittest.mock import patch, Mock
 from app import App, BASE, GREEN, YELLOW
 from core import Journal, SafetyStop, file_hash, read_roster
 from remarks import CLAIMED
+from notices import messages as quiet_messages
 from tests.test_roster_write import make_roster
 
 
@@ -58,6 +59,30 @@ class UITests(unittest.TestCase):
         self.assertEqual(len(self.app.records), 4)
         self.assertEqual(self.app.done_count.get(), '已完成 1')
         self.assertEqual(self.app.tree.tag_configure('pending')['background'], YELLOW)
+
+    def test_warning_is_quiet_non_modal_and_can_be_updated(self):
+        self.root.deiconify()
+        self.root.update()
+        with patch('notices.native_messages.showwarning') as native:
+            quiet_messages.showwarning('测试暂停', '第一次', parent=self.root)
+            window = self.root._sa_notice
+            self.assertIsNone(window.grab_current())
+            quiet_messages.showwarning('测试暂停', '第二次', parent=self.root)
+            self.assertIs(self.root._sa_notice, window)
+            self.assertEqual(window.body.get('1.0', 'end-1c'), '第二次')
+            native.assert_not_called()
+        self.root.update_idletasks()
+        self.assertGreater(window.winfo_height(), 200)
+        window.destroy()
+
+    def test_warning_can_reopen_after_close_without_affecting_approval(self):
+        self.select_first()
+        quiet_messages.showwarning('暂停', '测试', parent=self.root)
+        self.root._sa_notice.destroy()
+        quiet_messages.showwarning('暂停', '再次测试', parent=self.root)
+        self.assertTrue(self.root._sa_notice.winfo_exists())
+        self.assertFalse(self.app.reviewed.get())
+        self.assertIsNone(self.root.grab_current())
 
     def test_owner_scope_and_legacy_log_not_authoritative(self):
         record = self.app.records[0]

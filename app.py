@@ -6,7 +6,8 @@ import queue
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import ttk
+from notices import messages as messagebox
 from bridge import Bridge
 from claim import sa_claim_source
 from model_review import KeyStore, ModelClient

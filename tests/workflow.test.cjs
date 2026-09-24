@@ -4,6 +4,7 @@ const path=require('node:path');
 const {chromium}=require('playwright');
 const {runImportCommand}=require('../extension/import-adapter.js');
 const {runWOSCommand}=require('../extension/wos-adapter.js');
+const {inspectWorkPage}=require('../extension/page-diagnostics.js');
 const fixture=fs.readFileSync(path.join(__dirname,'fixtures/import.html'),'utf8');
 const wosFixture=fs.readFileSync(path.join(__dirname,'fixtures/wos.html'),'utf8');
 const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
@@ -105,6 +106,44 @@ const cmd=(action,more={})=>({action,sa_id:'demo-001',instructions:'SA补充-dem
     await page.evaluate(()=>wosMany=true);
     const r=await page.evaluate(runWOSCommand,{...cmd('wos_search'),title:'Synthetic paper'});
     assert.equal(r.ok,false);assert.match(r.error,/唯一/);assert.ok(page.url().includes('/summary/'));
+  });
+  test('WOS Oops page reports site failure before field selection or any search',async()=>{
+    await page.goto('https://www.webofscience.com/wos/woscc/basic-search');
+    await page.evaluate(()=>document.getElementById('main').innerHTML="<h1>Oops, something went wrong!</h1><p>Please click on 'Search' at the top of the screen.</p>");
+    const r=await page.evaluate(runWOSCommand,{...cmd('wos_search'),title:'Synthetic paper'});
+    assert.match(r.error,/WOS 网站自身报错/);assert.doesNotMatch(r.error,/选择器未唯一/);
+    assert.equal(await page.evaluate(()=>searches),0);
+  });
+  test('WOS Smart Search follows visible Advanced and Fielded tabs, without changing preferences',async()=>{
+    await page.goto('https://www.webofscience.com/wos/woscc/basic-search');
+    await page.evaluate(()=>smartPage());
+    const r=await page.evaluate(runWOSCommand,{...cmd('wos_search'),title:'Synthetic paper'});
+    assert.equal(r.ok,true,JSON.stringify(r));assert.equal(await page.evaluate(()=>searches),1);
+  });
+  test('WOS multiple field rows are still refused',async()=>{
+    await page.goto('https://www.webofscience.com/wos/woscc/basic-search');
+    await page.evaluate(()=>document.getElementById('main').appendChild(document.querySelector('select').cloneNode(true)));
+    const r=await page.evaluate(runWOSCommand,{...cmd('wos_search'),title:'Synthetic paper'});
+    assert.match(r.error,/识别到 2 个/);assert.equal(await page.evaluate(()=>searches),0);
+  });
+  test('WOS Chinese all-fields selector is supported',async()=>{
+    await page.goto('https://www.webofscience.com/wos/woscc/basic-search');
+    await page.evaluate(()=>document.querySelector('select').options[0].textContent='所有字段');
+    const r=await page.evaluate(runWOSCommand,{...cmd('wos_search'),title:'Synthetic paper'});
+    assert.equal(r.ok,true,JSON.stringify(r));
+  });
+  test('WOS Oops arising during search is not retried',async()=>{
+    await page.goto('https://www.webofscience.com/wos/woscc/basic-search');
+    await page.evaluate(()=>document.querySelector('button').onclick=()=>{searches++;document.getElementById('main').innerHTML='Oops, something went wrong!';});
+    const r=await page.evaluate(runWOSCommand,{...cmd('wos_search'),title:'Synthetic paper'});
+    assert.match(r.error,/WOS 网站自身报错/);assert.equal(await page.evaluate(()=>searches),1);
+  });
+  test('read-only diagnosis detects error page and excludes entered input text',async()=>{
+    await page.goto('https://www.webofscience.com/wos/woscc/basic-search');
+    await page.evaluate(()=>{document.querySelector('input').value='DO_NOT_DISCLOSE_QUERY';document.querySelector('input').setAttribute('role','combobox');
+      const p=document.createElement('p');p.textContent='Oops, something went wrong!';document.body.appendChild(p);});
+    const d=await page.evaluate(inspectWorkPage);assert.equal(d.wos_error,true);
+    assert.ok(!JSON.stringify(d).includes('DO_NOT_DISCLOSE_QUERY'));assert.equal(await page.evaluate(()=>searches),0);
   });
   try{for(const [name,fn] of tests){await reset();await fn();console.log('PASS '+name);}console.log(`Workflow adapters: ${tests.length} offline cases passed.`);}
   finally{await context.close();await browser.close();}

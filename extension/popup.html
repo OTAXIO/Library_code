@@ -7,9 +7,13 @@
 <input id="token" type="password" autocomplete="off" spellcheck="false">
 <button id="pair">连接当前标签页</button><button id="disconnect">断开</button>
 <h2>WOS 单条导入工作页</h2>
-<p>保持 SA 页不动。另开两个已登录标签页，在各自页面点击对应绑定按钮。WOS 工作页会切换到文献检索。</p>
+<p>保持 SA 页不动。另开 WOS 和后台导入页，在各自页面点击绑定。导入页就是「数据管理 → 数据导入与批次管理」，能看到「WOS数据导入(Txt)」、批次号和推送。</p>
+<button id="open-import">打开后台导入页面</button>
 <button id="wos">绑定当前 WOS 页</button>
 <button id="import">绑定当前导入管理页</button>
+<button id="inspect">检查工作页（只读）</button>
+<button id="mute">WOS 静音 / 恢复</button>
+<textarea id="diagnostics" rows="6" readonly hidden aria-label="只读控件诊断"></textarea>
 <p>下载权限仅用于捕获本次 WOS TXT；不读取任意历史下载、账号或登录令牌。</p>
 <p id="status" role="status">只操作当前配对标签页，不读取密码或登录令牌。</p>
 <script src="popup.js"></script></body></html>

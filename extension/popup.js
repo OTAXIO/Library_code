@@ -22,3 +22,18 @@ for (const [id, role] of [["wos", "wosTabId"], ["import", "importTabId"]]) {
     } catch (error) { status.textContent = error.message; }
   });
 }
+for(const [id,type] of [["open-import","open_import"],["inspect","inspect_workflow"],["mute","toggle_wos_mute"]]) {
+  document.getElementById(id).addEventListener("click",async()=>{
+    const status=document.getElementById("status");
+    try{
+      const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
+      const result=await chrome.runtime.sendMessage({type,tabId:tab?.id});
+      if(!result.ok){status.textContent=result.error;return;}
+      if(result.data){
+        const box=document.getElementById("diagnostics");box.hidden=false;box.value=JSON.stringify(result.data,null,2);
+        box.style.width="100%";
+        status.textContent=result.data.wos_error?"WOS 自身错误页：请先点网页顶部 Search 恢复，再继续。下方诊断可复制反馈。":"只读检查完成。下方内容可选中复制；不含检索框输入、账号或 Cookie。";
+      }else status.textContent=result.message;
+    }catch(error){status.textContent=error.message;}
+  });
+}

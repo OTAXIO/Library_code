@@ -20,10 +20,18 @@ window.recordPage=function(){
   };
 };
 window.searchPage=function(){
-  main.innerHTML='<select aria-label="Search field"><option>Topic</option><option>DOI</option><option>Title</option><option>Accession Number</option></select><input type="text" aria-label="Search documents"><button>Search</button>';
+  main.innerHTML='<select aria-label="Search field"><option>All Fields</option><option>Topic</option><option>DOI</option><option>Title</option><option>Accession Number</option></select><input type="text" aria-label="Search documents"><button>Search</button>';
   main.querySelector('button').onclick=()=>{searches++;history.pushState({},'', '/wos/woscc/summary/synthetic');
     main.innerHTML='<h1>'+(wosMany?'2 results':'1 result')+'</h1><a href="/wos/woscc/full-record/'+ut+'">Synthetic paper</a>';
     main.querySelector('a').onclick=e=>{e.preventDefault();recordPage();};
+  };
+};
+window.smartPage=function(){
+  main.innerHTML='<h1>Smart Search</h1><input type="text"><button>Advanced Search</button>';
+  main.querySelector('button').onclick=()=>{
+    history.pushState({},'', '/wos/woscc/advanced-search');
+    main.innerHTML='<h1>Advanced Search</h1><button role="tab">Fielded Search</button>';
+    main.querySelector('button').onclick=()=>searchPage();
   };
 };
 if(location.pathname.includes('/full-record/'))recordPage();else searchPage();

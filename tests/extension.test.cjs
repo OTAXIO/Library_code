@@ -127,6 +127,25 @@ const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
     },{role,url});
     assert.equal((await bind('importTabId',importPage.url())).ok,true);
     assert.equal((await bind('wosTabId',wosPage.url())).ok,true);
+    const diagnostic=await popup.evaluate(async()=>{
+      const tabs=await chrome.tabs.query({url:'https://www.webofscience.com/*'});
+      return chrome.runtime.sendMessage({type:'inspect_workflow',tabId:tabs[0].id});
+    });
+    assert.equal(diagnostic.ok,true);assert.equal(diagnostic.data.bindings.wos,true);assert.equal(diagnostic.data.version,'0.3.1');
+    console.log('PASS popup read-only diagnostics report role and version without searching');
+    const muted=await popup.evaluate(()=>chrome.runtime.sendMessage({type:'toggle_wos_mute'}));assert.equal(muted.ok,true);
+    const muteState=await popup.evaluate(async()=>{
+      const tabs=await chrome.tabs.query({url:'https://www.webofscience.com/*'});return tabs[0].mutedInfo.muted;
+    });assert.equal(muteState,true);
+    assert.equal((await popup.evaluate(()=>chrome.runtime.sendMessage({type:'toggle_wos_mute'}))).ok,true);
+    console.log('PASS user-requested mute toggles only the explicitly bound WOS tab');
+    const newImportPage=context.waitForEvent('page');
+    const openedImport=await popup.evaluate(()=>chrome.runtime.sendMessage({type:'open_import'}));
+    assert.equal(openedImport.ok,true,JSON.stringify(openedImport));
+    const newPage=await newImportPage;await newPage.waitForURL('**/#/collectItem/batchManage');
+    assert.equal(new URL(newPage.url()).hostname,'admin.ir.lib.sjtu.edu.cn');
+    assert.ok(site.url().includes('/dataCompare/list'));await newPage.close();
+    console.log('PASS import shortcut opens a separate same-backend tab and leaves SA page untouched');
     const c={title:'Synthetic paper',doi:'10.1234/test',wos:'WOS:000123456789012',sjtu:true,sha256:'a'.repeat(64)};
     const checked=await invoke('import_scan',{sa_id:'demo-001',instructions:'SA补充-demo-001',candidate:c});
     assert.equal(checked.ok,true,JSON.stringify(checked));assert.deepEqual(checked.data.batches,[]);
@@ -159,7 +178,7 @@ const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
     const changedTab=await invoke('import_scan',{sa_id:'demo-001',instructions:'SA补充-demo-001',candidate:c});
     assert.equal(changedTab.ok,false);
     console.log('PASS changed workflow tab stops before executing commands');
-    console.log('Extension integration: 14 cases passed. Only synthetic data; no production requests.');
+    console.log('Extension integration: 17 cases passed. Only synthetic data; no production requests.');
   } finally {
     if(context)await context.close();
     if(stagedExtension && path.dirname(path.resolve(stagedExtension))===path.resolve(os.tmpdir()) &&
