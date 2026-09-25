@@ -226,6 +226,40 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.equal(result.ok,true,JSON.stringify(result));
     assert.equal(await page.evaluate(()=>closeCalls),1);
   });
+  test('production container-only drawer reads and switches records with nested drawers',async()=>{
+    await page.evaluate(()=>{
+      const ui=vm.$refs.compareDetailDrawer.$children[0],root=ui.$el,panel=ui.$refs.drawer;
+      root.className='';const container=document.createElement('div');
+      container.className='el-drawer__container';root.append(container);container.append(panel);
+      for(let i=0;i<4;i++){
+        const nested=document.createElement('div');nested.className='el-drawer__container';
+        nested.style.display='none';nested.innerHTML='<div class="el-drawer">hidden nested</div>';
+        panel.append(nested);
+      }
+      ui.rendered=true;
+    });
+    const read=await execute(command('search'));
+    assert.equal(read.ok,true,JSON.stringify(read));
+    assert.equal((await execute(command('search'))).ok,true);
+    await page.evaluate(()=>synthetic.saLzkId='demo-002');
+    const next=await execute(command('search',{sa_id:'demo-002'}));
+    assert.equal(next.ok,true,JSON.stringify(next));
+    assert.equal(await page.evaluate(()=>closeCalls),1);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('container-only drawer cannot use a ref to a nested drawer',async()=>{
+    await page.evaluate(()=>{
+      const ui=vm.$refs.compareDetailDrawer.$children[0],root=ui.$el,panel=ui.$refs.drawer;
+      root.className='';const container=document.createElement('div');
+      container.className='el-drawer__container';root.append(container);container.append(panel);
+      const nested=document.createElement('div');nested.className='el-drawer__container';
+      nested.innerHTML='<div class="el-drawer">nested editor</div>';panel.append(nested);
+      ui.$refs.drawer=nested.firstElementChild;ui.rendered=true;
+    });
+    assert.match((await execute(command('search'))).error,/窗口结构不兼容/);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+    assert.equal(await page.evaluate(()=>window.closeCalls||0),0);
+  });
   test('lazy drawer state cannot hide an open window or malformed rendered DOM',async()=>{
     for(const active of [true,false]){
       await reset();

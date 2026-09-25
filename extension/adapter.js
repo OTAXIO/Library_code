@@ -133,18 +133,35 @@ async function runSACommand(command) {
         return {owner, ui, wrapper: null, panel: null, unrendered: true};
       // Different Element UI builds place the wrapper at the component root,
       // below a root container, or above the component's root element.
-      const wrappers = root?.nodeType === 1 ?
+      let boundarySelector = ".el-drawer__wrapper";
+      let wrappers = root?.nodeType === 1 ?
         (root.matches(".el-drawer__wrapper") ? [root] :
           root.closest(".el-drawer__wrapper") ? [root.closest(".el-drawer__wrapper")] :
             [...root.querySelectorAll(".el-drawer__wrapper")]) : [];
+      // The production build uses a container without the legacy wrapper.
+      // Use this ElDrawer's own panel ref to establish ownership; nested or
+      // unrelated drawers are never selected from a global list.
+      const ownPanel = ui.$refs?.drawer;
+      if (wrappers.length === 0 && ownPanel?.matches?.(".el-drawer") && root?.contains?.(ownPanel)) {
+        const container = ownPanel.closest(".el-drawer__container");
+        const containers = root.matches(".el-drawer__container") ? [root] :
+          [...root.querySelectorAll(".el-drawer__container")].filter(element => {
+            const parent = element.parentElement?.closest(".el-drawer__container, .el-drawer");
+            return !parent || !root.contains(parent);
+          });
+        if (container && containers.length === 1 && containers[0] === container) {
+          boundarySelector = ".el-drawer__container";
+          wrappers = [container];
+        }
+      }
       const wrapper = wrappers.length === 1 ? wrappers[0] : null;
       // Ref names are private implementation details. If absent, resolve a
       // unique panel inside THIS wrapper, excluding every nested drawer.
       const panels = wrapper ? [...wrapper.querySelectorAll(".el-drawer")]
-        .filter(element => element.closest(".el-drawer__wrapper") === wrapper) : [];
+        .filter(element => element.closest(boundarySelector) === wrapper) : [];
       const panel = ui.$refs?.drawer || (panels.length === 1 ? panels[0] : null);
       if (!wrapper?.isConnected || !panel?.matches?.(".el-drawer") ||
-          panel.closest(".el-drawer__wrapper") !== wrapper || panels.length !== 1 || panels[0] !== panel)
+          panel.closest(boundarySelector) !== wrapper || panels.length !== 1 || panels[0] !== panel)
         stop(label + "窗口结构不兼容（根节点 " + (root?.nodeName || "无") +
           "，wrapper " + wrappers.length + " 个，直属面板 " + panels.length +
           " 个，rendered=" + String(ui.rendered) +
