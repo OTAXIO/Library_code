@@ -132,6 +132,35 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.equal(result.data.row.saLzkId,'demo-001');
     assert.equal(await page.evaluate(()=>writeCount),0);
   });
+  test('closed unrendered drawer-class root with stale panel ref is read-only safe',async()=>{
+    await page.evaluate(()=>{
+      const d=vm.$refs.compareDetailDrawer,u=d.$children[0],root=u.$el,panel=u.$refs.drawer;
+      const placeholder=document.createElement('div');placeholder.className='el-drawer';
+      placeholder.style.display='none';
+      const hidden=document.createElement('div');hidden.className='el-drawer';
+      hidden.style.display='none';placeholder.append(hidden);
+      root.replaceWith(placeholder);u.$el=placeholder;u.$refs.drawer=hidden;u.rendered=false;
+      const show=d.show;
+      d.show=function(row){placeholder.replaceWith(root);u.$el=root;u.$refs.drawer=panel;
+        u.rendered=true;show.call(this,row);};
+    });
+    const result=await execute(command('search'));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.row.saLzkId,'demo-001');
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('logically open unrendered drawer with stale panel ref is not reset',async()=>{
+    await page.evaluate(()=>{
+      const d=vm.$refs.compareDetailDrawer,u=d.$children[0];
+      const placeholder=document.createElement('div');placeholder.className='el-drawer';
+      placeholder.style.display='none';document.body.append(placeholder);
+      u.$el=placeholder;u.$refs.drawer=placeholder;u.rendered=false;d.dialogVisible=true;
+    });
+    const result=await execute(command('search'));
+    assert.match(result.error,/窗口结构不兼容/);
+    assert.equal(await page.evaluate(()=>vm.$refs.compareDetailDrawer.dialogVisible),true);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
   test('lazy DIV root with visible controls is not treated as empty',async()=>{
     await page.evaluate(()=>{
       const d=vm.$refs.compareDetailDrawer,u=d.$children[0];

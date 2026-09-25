@@ -119,13 +119,17 @@ async function runSACommand(command) {
       const windows = visibleAll(".el-dialog, .el-message-box, .el-drawer");
       const nestedWindows = root?.nodeType === 1 ?
         root.querySelectorAll(".el-drawer, .el-drawer__wrapper, .el-dialog, .el-message-box").length : 0;
+      const logicallyClosed = owner[property] === false && ui.visible !== true;
       const inertDiv = root?.nodeName === "DIV" &&
         command.action === "search" && label === "只读详情" && ui.rendered !== true &&
-        !root.matches(".el-drawer, .el-drawer__wrapper") &&
         root.childElementCount <= 1 &&
-        controls.length === 0 && windows.length === 0;
+        controls.length === 0 && windows.length === 0 &&
+        (logicallyClosed || (!root.matches(".el-drawer, .el-drawer__wrapper") && !ui.$refs?.drawer));
       const emptyRoot = emptyComment || inertDiv;
-      if (ui.rendered !== true && !ui.$refs?.drawer && emptyRoot)
+      // A closed, unrendered ElDrawer may retain an old panel ref or use a
+      // drawer-class root. Neither is an open window if no controls/windows
+      // are visible. Revalidate the actual panel after show() materializes it.
+      if (ui.rendered !== true && emptyRoot && (logicallyClosed || !ui.$refs?.drawer))
         return {owner, ui, wrapper: null, panel: null, unrendered: true};
       // Different Element UI builds place the wrapper at the component root,
       // below a root container, or above the component's root element.
