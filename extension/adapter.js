@@ -19,7 +19,8 @@ async function runSACommand(command) {
       if (predicate()) return;
       await sleep(120);
     }
-    stop(label + "超时。不要重复提交，先检查网页");
+    stop(label + (submitted ? "超时。不要重复提交，先检查网页" :
+      "超时。本次命令未提交写入；请检查网页窗口后重新定位"));
   };
   const visible = element => !!element && element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden";
   const visibleAll = selector => [...document.querySelectorAll(selector)].filter(visible);
@@ -67,23 +68,84 @@ async function runSACommand(command) {
     if (!vm.searchForm || !Array.isArray(vm.tableData) || !vm.page || typeof vm.getData !== "function") stop("页面结构不兼容");
     const drawer = vm.$refs?.compareDetailDrawer;
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");
-    // Never close or overwrite a user editing form. Only our read-only drawer is closed.
-    if (visibleAll(".el-dialog, .el-message-box").length) stop("网页存在未关闭的编辑/确认弹窗，请先人工处理并关闭");
+    // A CompareDetailDrawer contains other drawers, some appended to body.
+    // Bind to its direct ElDrawer instance + wrapper, never a global count or
+    // the first descendant. ElDrawer's `closed` event also clears detail data.
+    const drawerSurface = (owner, label) => {
+      const candidates = (owner?.$children || []).filter(child => child.$options?.name === "ElDrawer");
+      if (candidates.length !== 1) stop(label + "窗口结构未唯一识别，请人工关闭窗口后重试或更新扩展");
+      const ui = candidates[0], wrapper = ui.$el, panel = ui.$refs?.drawer;
+      if (!wrapper?.isConnected || !wrapper.matches(".el-drawer__wrapper") ||
+          !panel?.matches(".el-drawer") || panel.closest(".el-drawer__wrapper") !== wrapper ||
+          typeof ui.closeDrawer !== "function" || typeof ui.$on !== "function" || typeof ui.$off !== "function")
+        stop(label + "窗口结构不兼容，停止自动关闭");
+      return {owner, ui, wrapper, panel};
+    };
+    const detailSurface = drawerSurface(drawer, "只读详情");
     const previousClaim = drawer.$refs?.claimDetail;
-    if (previousClaim?.drawer) {
+    const claimSurface = previousClaim ? drawerSurface(previousClaim, "认领") : null;
+    let closingClaim = !!claimSurface && (previousClaim.drawer || visible(claimSurface.wrapper) || visible(claimSurface.panel));
+    const safeWindows = () => {
+      if (visibleAll(".el-dialog, .el-message-box").length)
+        stop("网页存在未关闭的编辑/确认弹窗，请先人工处理并关闭");
+      const allowed = [detailSurface.panel, closingClaim ? claimSurface?.panel : null];
+      const others = visibleAll(".el-drawer").filter(panel => !allowed.includes(panel));
+      if (others.length) stop("网页另有 " + others.length + " 个查看/编辑或未知抽屉窗口，请人工处理并关闭；不会自动丢弃修改");
+      if (drawer.$refs?.compareStatusDialog?.dialogVisible)
+        stop("详情中的状态编辑窗口尚未关闭，请先人工处理");
+      if (drawer.$refs?.itemEdit?.drawer || drawer.$refs?.itemEdit?.dialogVisible)
+        stop("元数据编辑窗口尚未关闭，请先保存或取消，程序不会丢弃修改");
+    };
+    const cleanClaim = () => {
       if (previousClaim.__saAssistant !== command.sa_id || previousClaim.loading ||
           previousClaim.tableData?.metadata?.author?.some(author => author.data))
         stop("认领窗口存在人工操作或未保存选择，请先人工处理并关闭");
-      previousClaim.drawer = false;
-      await vm.$nextTick();
-      await wait(() => visibleAll(".el-drawer").length <= 1, "收起已查找的认领窗口", 5000);
+    };
+    const closeDrawer = async (surface, property, label, guard = () => {}) => {
+      const {owner, ui, wrapper, panel} = surface;
+      safeWindows(); guard();
+      if (owner[property] && typeof ui.beforeClose === "function") stop(label + "有额外关闭确认，请人工关闭后继续");
+      let closed = !owner[property];
+      const onClosed = () => { closed = true; };
+      ui.$on("closed", onClosed);
+      try {
+        if (owner[property]) ui.closeDrawer(); // Same public UI lifecycle as its close button; once only.
+        await vm.$nextTick();
+        await wait(() => {
+          safeWindows(); guard();
+          if (owner[property] || ui.visible) stop(label + "窗口被重新打开或拒绝关闭，请人工处理");
+          if (ui.$el !== wrapper || ui.$refs?.drawer !== panel)
+            stop(label + "窗口在关闭时被替换，请重新定位");
+          return closed && !visible(wrapper) && !visible(panel);
+        }, label, 5000);
+      } finally {
+        ui.$off("closed", onClosed);
+      }
+    };
+    safeWindows();
+    if (closingClaim) {
+      // If the user already closed a claim drawer, just wait for its animation;
+      // do not issue a second close or require ownership of that manual action.
+      const needsClose = previousClaim.drawer;
+      await closeDrawer(claimSurface, "drawer", "收起已查找的认领窗口", needsClose ? cleanClaim : () => {});
+      closingClaim = false;
       await wait(() => !drawer.dialogLoading, "等待详情刷新", 10000);
     }
+    const closeReadOnlyDetail = () => {
+      if (drawer.dialogLoading) stop("详情仍在加载，请等待后重查");
+      const id = drawer.currentSaLzkId;
+      return closeDrawer(detailSurface, "dialogVisible", "关闭只读详情", () => {
+        if (drawer.currentSaLzkId !== id && drawer.currentSaLzkId !== "")
+          stop("关闭期间详情目标已变化，请重新定位");
+      });
+    };
     if (drawer.dialogVisible) {
       if (drawer.dialogLoading) stop("详情仍在加载，请等待后重查");
-      drawer.dialogVisible = false;
-      await vm.$nextTick();
-      await wait(() => !visibleAll(".el-drawer").length, "关闭只读详情", 5000);
+      // Re-reading the same record needs a fresh request, not a close/reopen
+      // cycle that can race the previous `closed` callback and clear new data.
+      if (drawer.currentSaLzkId !== command.sa_id) await closeReadOnlyDetail();
+    } else if (visible(detailSurface.wrapper) || visible(detailSurface.panel)) {
+      await closeReadOnlyDetail(); // A user-initiated close may still be animating.
     }
     if (vm.loading) stop("列表仍在加载，请等待后重查");
     const fresh = async () => {
@@ -117,6 +179,9 @@ async function runSACommand(command) {
     }
     const showDetail = async () => {
       check();
+      safeWindows();
+      if (drawer.dialogVisible && drawer.currentSaLzkId !== command.sa_id)
+        stop("查询期间详情目标已变化，请重新定位");
       vm.showItemId(row);
       await vm.$nextTick();
       await wait(() => drawer.dialogVisible && !drawer.dialogLoading, "读取对比详情");
@@ -321,9 +386,7 @@ async function runSACommand(command) {
         if (field(comparison, label, side) !== field(command.expected_comparison, label, side))
           stop("备注相关详情在确认后发生变化，请重新查询和核验");
       }
-      drawer.dialogVisible = false;
-      await vm.$nextTick();
-      await wait(() => !visibleAll(".el-drawer").length, "关闭只读详情", 5000);
+      await closeReadOnlyDetail();
     }
     if (command.action === "complete") {
       const modal = vm.$refs.compareStatusDialog;

@@ -30,6 +30,140 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.ok(result.data.comparison[1].sa.includes('\n'));
     assert.equal(await page.evaluate(()=>writeCount),0);
   });
+  test('same-record readonly drawer is refreshed without a close cycle',async()=>{
+    const first=await execute(command('search'));assert.equal(first.ok,true,JSON.stringify(first));
+    await page.evaluate(()=>testConfig.drawerCloseDelay=20000);
+    const result=await execute(command('search',{expires:Date.now()+4200}));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(await page.evaluate(()=>window.closeCalls||0),0);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('same-record drawer refresh still fetches changed comparison data',async()=>{
+    await execute(command('search'));
+    await page.evaluate(()=>testConfig.saDoi='10.example/new');
+    const result=await execute(command('search'));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.comparison.find(x=>x.label==='DOI').sa,'10.example/new');
+    assert.equal(await page.evaluate(()=>queryCount),2);
+    assert.equal(await page.evaluate(()=>window.closeCalls||0),0);
+  });
+  test('different-record drawer waits for closed cleanup before opening new detail',async()=>{
+    await execute(command('search'));
+    await page.evaluate(()=>{synthetic.saLzkId='demo-002';testConfig.drawerCloseDelay=350;});
+    const result=await execute(command('search',{sa_id:'demo-002'}));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.row.saLzkId,'demo-002');
+    await page.waitForTimeout(400);
+    assert.equal(await page.evaluate(()=>vm.$refs.compareDetailDrawer.currentSaLzkId),'demo-002');
+    assert.equal(await page.evaluate(()=>closeCalls),1);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('foreign visible drawer blocks before closing or querying and is preserved',async()=>{
+    await execute(command('search'));
+    await page.evaluate(()=>{const el=document.createElement('div');el.className='el-drawer';el.id='foreign';
+      el.innerHTML='<input value="unsaved">';document.body.append(el);});
+    const result=await execute(command('search'));
+    assert.match(result.error,/另有 1 个.*抽屉/);
+    assert.equal(await page.evaluate(()=>vm.$refs.compareDetailDrawer.dialogVisible),true);
+    assert.equal(await page.evaluate(()=>queryCount),1);
+    assert.equal(await page.locator('#foreign input').inputValue(),'unsaved');
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('hidden foreign drawer does not block repeated reads',async()=>{
+    await execute(command('search'));
+    await page.evaluate(()=>{const el=document.createElement('div');el.className='el-drawer';
+      el.style.display='none';document.body.append(el);});
+    assert.equal((await execute(command('search'))).ok,true);
+  });
+  test('readonly drawer with ambiguous component mapping stops without closing',async()=>{
+    await execute(command('search'));
+    await page.evaluate(()=>{const d=vm.$refs.compareDetailDrawer;d.$children.push(d.$children[0]);});
+    const result=await execute(command('search'));
+    assert.match(result.error,/窗口结构未唯一识别/);
+    assert.equal(await page.evaluate(()=>vm.$refs.compareDetailDrawer.dialogVisible),true);
+    assert.equal(await page.evaluate(()=>window.closeCalls||0),0);
+  });
+  test('readonly drawer cannot borrow another wrapper or panel',async()=>{
+    await execute(command('search'));
+    await page.evaluate(()=>vm.$refs.compareDetailDrawer.$children[0].$refs.drawer=document.getElementById('claim'));
+    assert.match((await execute(command('search'))).error,/窗口结构不兼容/);
+    assert.equal(await page.evaluate(()=>vm.$refs.compareDetailDrawer.dialogVisible),true);
+  });
+  test('drawer close timeout reports no write and does not retry the close',async()=>{
+    await execute(command('search'));
+    await page.evaluate(()=>{synthetic.saLzkId='demo-002';testConfig.drawerCloseDelay=20000;});
+    const result=await execute(command('search',{sa_id:'demo-002',expires:Date.now()+4000}));
+    assert.match(result.error,/关闭只读详情超时.*本次命令未提交写入/);
+    assert.equal(await page.evaluate(()=>closeCalls),1);
+    assert.equal(await page.evaluate(()=>queryCount),1);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('drawer DOM hidden without closed event still blocks next-record query',async()=>{
+    await execute(command('search'));
+    await page.evaluate(()=>{synthetic.saLzkId='demo-002';vm.$refs.compareDetailDrawer.$children[0].$on=()=>{};});
+    const result=await execute(command('search',{sa_id:'demo-002',expires:Date.now()+4000}));
+    assert.match(result.error,/关闭只读详情超时/);
+    assert.equal(await page.evaluate(()=>queryCount),1);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('drawer closed event without disappearance does not permit next query',async()=>{
+    await execute(command('search'));
+    await page.evaluate(()=>{synthetic.saLzkId='demo-002';const ui=vm.$refs.compareDetailDrawer.$children[0];
+      ui.$on('closed',()=>ui.$el.style.display='block');});
+    const result=await execute(command('search',{sa_id:'demo-002',expires:Date.now()+4000}));
+    assert.match(result.error,/关闭只读详情超时/);
+    assert.equal(await page.evaluate(()=>queryCount),1);
+  });
+  test('drawer manual close already in progress is awaited without another close',async()=>{
+    await execute(command('search'));
+    await page.evaluate(()=>{testConfig.drawerCloseDelay=250;vm.$refs.compareDetailDrawer.dialogVisible=false;});
+    const result=await execute(command('search'));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(await page.evaluate(()=>window.closeCalls||0),0);
+    assert.equal(await page.evaluate(()=>vm.$refs.compareDetailDrawer.currentSaLzkId),'demo-001');
+  });
+  test('drawer reopening during close stops and is not closed again',async()=>{
+    await execute(command('search'));
+    await page.evaluate(()=>{synthetic.saLzkId='demo-002';testConfig.drawerCloseDelay=500;
+      const d=vm.$refs.compareDetailDrawer,u=d.$children[0],original=u.closeDrawer;
+      u.closeDrawer=()=>{original();setTimeout(()=>d.dialogVisible=true,60);};});
+    assert.match((await execute(command('search',{sa_id:'demo-002'}))).error,/被重新打开/);
+    assert.equal(await page.evaluate(()=>closeCalls),1);
+    assert.equal(await page.evaluate(()=>queryCount),1);
+  });
+  test('drawer close never dismisses a newly appearing foreign dialog',async()=>{
+    await execute(command('search'));
+    await page.evaluate(()=>{synthetic.saLzkId='demo-002';testConfig.drawerCloseDelay=500;
+      const u=vm.$refs.compareDetailDrawer.$children[0],original=u.closeDrawer;
+      u.closeDrawer=()=>{original();document.getElementById('status').style.display='block';};});
+    assert.match((await execute(command('search',{sa_id:'demo-002'}))).error,/未关闭的编辑/);
+    assert.equal(await page.locator('#status').isVisible(),true);
+    assert.equal(await page.evaluate(()=>queryCount),1);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('drawer requiring an unknown beforeClose hook is left for human',async()=>{
+    await execute(command('search'));
+    await page.evaluate(()=>{synthetic.saLzkId='demo-002';vm.$refs.compareDetailDrawer.$children[0].beforeClose=()=>{writeCount++;};});
+    assert.match((await execute(command('search',{sa_id:'demo-002'}))).error,/额外关闭确认/);
+    assert.equal(await page.evaluate(()=>vm.$refs.compareDetailDrawer.dialogVisible),true);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('drawer reuse never hides an active metadata editor state',async()=>{
+    await execute(command('search'));
+    await page.evaluate(()=>vm.$refs.compareDetailDrawer.$refs.itemEdit={drawer:true,unsaved:'keep'});
+    assert.match((await execute(command('search'))).error,/元数据编辑窗口尚未关闭/);
+    assert.equal(await page.evaluate(()=>vm.$refs.compareDetailDrawer.$refs.itemEdit.unsaved),'keep');
+  });
+  test('manual claim drawer closing animation is awaited without auto-dismiss',async()=>{
+    const read=await execute(command('search'));
+    assert.equal((await execute(command('open_claim',{expected:read.data.row}))).ok,true);
+    await page.waitForFunction(()=>claimWindow.drawer && !claimWindow.loading);
+    await page.evaluate(()=>{testConfig.claimCloseDelay=300;claimWindow.drawer=false;});
+    const result=await execute(command('search'));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(await page.evaluate(()=>window.closeCalls||0),0);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
   test('wrong route stops',async()=>{
     await page.evaluate(()=>location.hash='#/login');
     assert.equal((await execute(command('search'))).ok,false);

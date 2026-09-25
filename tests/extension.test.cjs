@@ -62,6 +62,13 @@ assert.ok(['https://www.webofscience.com','https://webofscience.clarivate.cn'].i
     assert.equal(read.ok,true,JSON.stringify(read));
     assert.equal(read.data.row.saLzkId,'demo-001');
     console.log('PASS desktop bridge -> extension -> page -> result round trip');
+    await site.evaluate(()=>testConfig.drawerCloseDelay=20000);
+    read=await invoke('search',{sa_id:'demo-001'});
+    assert.equal(read.ok,true,JSON.stringify(read));
+    assert.equal(await site.evaluate(()=>window.closeCalls||0),0);
+    assert.equal(await site.evaluate(()=>writeCount),0);
+    await site.evaluate(()=>testConfig.drawerCloseDelay=180);
+    console.log('PASS repeated SA reads reuse the same drawer without close timeout or writes');
     const editor=await invoke('open_metadata',{sa_id:'demo-001',expected:read.data.row});
     assert.equal(editor.ok,true,JSON.stringify(editor));
     assert.equal(await site.evaluate(()=>openedEditor),'1234567890123456789');
@@ -144,7 +151,7 @@ assert.ok(['https://www.webofscience.com','https://webofscience.clarivate.cn'].i
       const tabs=await chrome.tabs.query({url:origin+'/*'});
       return chrome.runtime.sendMessage({type:'inspect_workflow',tabId:tabs[0].id});
     },wosOrigin);
-    assert.equal(diagnostic.ok,true);assert.equal(diagnostic.data.bindings.wos,true);assert.equal(diagnostic.data.version,'0.3.3');
+    assert.equal(diagnostic.ok,true);assert.equal(diagnostic.data.bindings.wos,true);assert.equal(diagnostic.data.version,'0.3.4');
     assert.equal(diagnostic.data.site,new URL(wosOrigin).hostname);
     console.log('PASS popup read-only diagnostics report role and version without searching');
     const muted=await popup.evaluate(()=>chrome.runtime.sendMessage({type:'toggle_wos_mute'}));assert.equal(muted.ok,true);
@@ -194,7 +201,7 @@ assert.ok(['https://www.webofscience.com','https://webofscience.clarivate.cn'].i
     const changedTab=await invoke('import_scan',{sa_id:'demo-001',instructions:'SA补充-demo-001',candidate:c});
     assert.equal(changedTab.ok,false);
     console.log('PASS changed workflow tab stops before executing commands');
-    console.log(`Extension integration: 18 cases passed (${wosOrigin}). Only synthetic data; no production requests.`);
+    console.log(`Extension integration: 19 cases passed (${wosOrigin}). Only synthetic data; no production requests.`);
   } finally {
     if(context)await context.close();
     if(stagedExtension && path.dirname(path.resolve(stagedExtension))===path.resolve(os.tmpdir()) &&

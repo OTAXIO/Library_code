@@ -1,8 +1,8 @@
 <!doctype html><html><head><meta charset="utf-8"><title>Offline synthetic SA fixture</title></head><body>
 <main id="app"><h1>OFFLINE TEST — no production data</h1></main>
-<div class="el-drawer" id="drawer" style="display:none">Synthetic comparison</div>
+<div class="el-drawer__wrapper" id="drawer-wrapper" style="display:none"><div class="el-drawer" id="drawer">Synthetic comparison</div></div>
 <div class="el-dialog" id="status" style="display:none">备注 / 确认</div>
-<div class="el-drawer" id="claim" style="display:none">作者认领</div>
+<div class="el-drawer__wrapper" id="claim-wrapper" style="display:none"><div class="el-drawer" id="claim">作者认领</div></div>
 <div class="el-dialog" id="people" style="display:none">选择作者 · 工号/学号</div>
 <script>
 window.writeCount = 0;
@@ -13,8 +13,31 @@ window.synthetic = {id:"test-row-001", saLzkId:"demo-001", itemId:"1234567890123
 const copy = value => JSON.parse(JSON.stringify(value));
 const bindVisibility = (component, id, property="dialogVisible") => {
   let shown = false;
+  const wrapper=document.getElementById(id+"-wrapper");
+  const listeners=new Set();
+  if(wrapper){
+    const ui={$options:{name:"ElDrawer"},$el:wrapper,$refs:{drawer:document.getElementById(id)},
+      get visible(){return shown;},
+      $on(event,fn){if(event==="closed")listeners.add(fn);},
+      $off(event,fn){if(event==="closed")listeners.delete(fn);},
+      closeDrawer(){window.closeCalls=(window.closeCalls||0)+1;component[property]=false;}};
+    component.$el=wrapper;component.$children=[ui];
+  }
   Object.defineProperty(component,property, {get:()=>shown,set:value=>{
+    if(shown===value)return;
     shown=value;
+    if(wrapper){
+      if(value){wrapper.style.display="block";return;}
+      const finish=()=>{
+        if(shown)return;
+        wrapper.style.display="none";
+        if(id==="drawer"){component.currentSaLzkId="";component.compareData=[];component.saLzkCompareData=[];}
+        for(const fn of [...listeners])fn();
+      };
+      // Simulate Element UI's retained wrapper and asynchronous `closed` cleanup.
+      setTimeout(finish,testConfig[id+"CloseDelay"]??180);
+      return;
+    }
     // Element UI keeps a closing dialog rendered until its transition ends.
     if(id==="people" && !value && testConfig.peopleCloseDelay) {
       setTimeout(()=>{if(!shown)document.getElementById(id).style.display="none";},testConfig.peopleCloseDelay);
@@ -82,6 +105,7 @@ const vm = {$options:{name:"dataCompare"},$children:[],
   tableData:[],loading:false,page:{currentPage:1,pageSize:10,total:0},
   $refs:{compareDetailDrawer:detail,compareStatusDialog:statusModal}, $nextTick:()=>Promise.resolve(),
   async getData(){this.loading=true;await new Promise(r=>setTimeout(r,5));
+    window.queryCount=(window.queryCount||0)+1;
     if (!testConfig.stale){this.tableData=testConfig.noRows?[]:[copy(synthetic)];this.page.total=testConfig.total??this.tableData.length;}
     this.loading=false;},
   showItemId(row){detail.show(row);},handleEdit(row){statusModal.show(row);},
