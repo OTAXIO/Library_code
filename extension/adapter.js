@@ -108,18 +108,19 @@ async function runSACommand(command) {
       if (typeof ui.closeDrawer !== "function" || typeof ui.$on !== "function" || typeof ui.$off !== "function")
         stop(label + "窗口结构不兼容（关闭方法或事件接口缺失），停止自动关闭");
       // Element UI can leave a logically-open drawer at an inert lazy root.
-      // Some builds put empty layout DIVs inside that root before creating the
-      // wrapper. Never treat visible content or an interactive control as inert.
-      // Only a read-only search may reconcile that stale state, after checking
-      // for all visible windows.
+      // Some builds mount one non-interactive placeholder DIV (occasionally
+      // with text) before creating the wrapper. Accept that shape only for a
+      // read-only search; a stale logical-open flag is reconciled below. Never
+      // dismiss a visible window or treat an interactive child as inert.
       const emptyComment = root?.nodeType === 8 && owner[property] === false && ui.visible !== true;
       const inertDiv = root?.nodeName === "DIV" &&
+        command.action === "search" && label === "只读详情" && ui.rendered !== true &&
         !root.matches(".el-drawer, .el-drawer__wrapper") &&
-        !root.querySelector(".el-drawer, .el-drawer__wrapper") &&
-        (root.childElementCount === 0 || !visible(root) ||
-          (!root.textContent.trim() &&
-            ![...root.querySelectorAll("input, textarea, select, button, [role='dialog'], [contenteditable='true']")]
-              .some(visible)));
+        !root.querySelector(".el-drawer, .el-drawer__wrapper, .el-dialog, .el-message-box") &&
+        root.childElementCount <= 1 &&
+        ![...root.querySelectorAll("input, textarea, select, button, [role='dialog'], [contenteditable='true']")]
+          .some(visible) &&
+        !visibleAll(".el-dialog, .el-message-box, .el-drawer").length;
       const emptyRoot = emptyComment || inertDiv;
       if (ui.rendered !== true && !ui.$refs?.drawer && emptyRoot)
         return {owner, ui, wrapper: null, panel: null, unrendered: true};
@@ -146,6 +147,8 @@ async function runSACommand(command) {
           "，已挂载=" + String(root?.isConnected === true) + "），停止自动关闭");
       return {owner, ui, wrapper, panel};
     };
+    if (visibleAll(".el-dialog, .el-message-box").length)
+      stop("网页存在未关闭的编辑/确认弹窗，请先人工处理并关闭");
     let detailSurface = drawerSurface(drawer, "只读详情");
     const previousClaim = drawer.$refs?.claimDetail;
     const claimSurface = previousClaim ? drawerSurface(previousClaim, "认领", "drawer") : null;
