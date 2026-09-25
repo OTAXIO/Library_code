@@ -10,6 +10,7 @@ from tkinter import ttk
 from notices import messages as messagebox
 from bridge import Bridge
 from claim import sa_claim_source
+from approval import complete_claim
 from model_review import KeyStore, ModelClient
 from model_panel import ModelPanel
 from automation_panel import AutomationPanel
@@ -191,8 +192,13 @@ class App:
         self.note.bind("<<Modified>>", self.note_changed)
         self.check = ttk.Checkbutton(page, variable=self.reviewed, text="我已核对当前记录，并完成网页处理")
         self.check.grid(row=8, column=0, sticky="w", pady=(7, 3))
-        self.complete_button = self.button(page, "批准完成", self.confirm_manual_done, style="Complete.TButton")
-        self.complete_button.grid(row=9, column=0, sticky="ew", pady=(0, 6))
+        approvals = ttk.Frame(page)
+        approvals.grid(row=9, column=0, sticky="ew", pady=(0, 6))
+        approvals.columnconfigure((0, 1), weight=1)
+        self.complete_button = self.button(approvals, "批准完成", self.confirm_manual_done, style="Complete.TButton")
+        self.complete_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.claimed_complete_button = self.button(approvals, "网页认领结案", self.confirm_claim_done, style="Complete.TButton")
+        self.claimed_complete_button.grid(row=0, column=1, sticky="ew")
         self.status_label = ttk.Label(page, textvariable=self.status, wraplength=485, foreground="#5b6572")
         self.status_label.grid(row=10, column=0, sticky="ew")
         page.bind("<Configure>", lambda event: self.status_label.configure(wraplength=max(250, event.width - 20)))
@@ -202,6 +208,8 @@ class App:
         done = bool(self.current and self.current.done)
         enabled = bool(self.current and not done and self.reviewed.get() and not self.busy)
         self.complete_button.configure(state="normal" if enabled else "disabled", text="已批准完成" if done else "✓ 批准完成")
+        can_close_claim = bool(enabled and self.current.owner == "谭勋策" and self.snapshot and self.comparison)
+        self.claimed_complete_button.configure(state="normal" if can_close_claim else "disabled")
         can_claim = bool(self.current and not done and self.prepared_claim and not self.busy and self.claim_author_box.current() >= 0)
         self.claim_button.configure(state="normal" if can_claim else "disabled")
         self.model_panel.refresh()
@@ -429,6 +437,7 @@ class App:
                 except SafetyStop:
                     self.sa_number.set("未识别唯一括号编号")
             self.status.set("已定位对应详情，请在浏览器核验。" if action == "search" else "已打开窗口，请手动修改并保存。")
+            self.refresh_approval()
         self.run(lambda: self.bridge.call(action, payload), opened, "正在定位当前记录，请勿同时操作该网页…")
 
     def next_record(self):
@@ -594,6 +603,54 @@ class App:
                 self.status.set("名单已写为 1，但日志保存失败。请检查磁盘，勿重复确认。")
                 messagebox.showwarning("名单已完成，日志异常", str(exc), parent=self.root)
         self.run(lambda: mark_complete(roster, record), saved, "正在备份并回写完成标记…")
+
+    def confirm_claim_done(self):
+        """Explicitly reviewed, single-record backend closure plus local sync."""
+        if self.busy:
+            return
+        try:
+            record, roster = self.current, self.roster
+            if (not roster or not record or record.owner != "谭勋策" or record.done or
+                    record not in self.records or not self.reviewed.get()):
+                raise SafetyStop("请选择谭勋策的一条待办，并勾选已核对。")
+            if not self.bridge or not self.bridge.online or not self.snapshot or not self.comparison:
+                raise SafetyStop("认领成功后请再次定位网页、核对结果，再进行结案。")
+            if self.note.get("1.0", "end").strip() != "已认领":
+                raise SafetyStop("此按钮仅保存“已认领”备注；其他问题请分别核验处理。")
+            if record.matches != 1 or record.reason != "作者不一致":
+                raise SafetyStop("此按钮仅用于单匹配、仅作者不一致的记录。")
+            roster.assert_unchanged()
+            snapshot, comparison = self.snapshot, self.comparison
+            if not messagebox.askyesno("确认网页认领结案", f"名单：{record.sa_id}\n{record.title[:120]}\n\n"
+                    "先重新核验已认领，再保存网页备注“已认领”并标为已处理。\n"
+                    "后台回读成功后，备份 list.xlsx 并把本行完成备注写为数字 1。\n"
+                    "如果后台已处理，只同步 Excel，不重复提交。是否继续？", parent=self.root):
+                return
+            self.journal.save(record, "认领结案待核验", "已认领", {"mode": "reviewed_claim_completion"})
+            self.reviewed.set(False)
+        except Exception as exc:
+            messagebox.showwarning("暂未结案", str(exc), parent=self.root)
+            return
+
+        def saved(result):
+            completion = result.completion
+            self.roster = completion.roster
+            self.current = next(r for r in self.roster.records if r.row == record.row and r.sa_id == record.sa_id)
+            self.clear_browser_state()
+            self.populate()
+            self.set_approval(True)
+            self.model_panel.clear()
+            self.status.set("后台原已处理，仅同步名单。" if result.already_processed else
+                            "已结案：网页备注/状态已回读，Excel 已备份并标为 1。")
+            try:
+                self.journal.save(record, "已完成", "已认领", {"mode": "reviewed_claim_completion",
+                    "row": result.row, "cell": completion.cell, "backup": str(completion.backup),
+                    "already_processed": result.already_processed})
+            except Exception:
+                self.status.set("网页与 Excel 已完成，但日志失败。请检查备份，不要重复提交。")
+
+        self.run(lambda: complete_claim(roster, record, self.bridge, snapshot, comparison, reviewed=True),
+                 saved, "正在核验认领、保存网页状态并同步名单；不自动重试…")
 
     def show_guide(self):
         if not self.current:

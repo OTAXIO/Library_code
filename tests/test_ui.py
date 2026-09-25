@@ -218,6 +218,33 @@ class UITests(unittest.TestCase):
             warning.assert_called_once()
             run.assert_not_called()
 
+    def test_claim_closure_requires_review_snapshot_and_exact_remark(self):
+        self.select_tan_first()
+        self.app.bridge = Mock(online=True)
+        with patch('app.messagebox.showwarning'), patch.object(self.app, 'run') as run:
+            self.app.confirm_claim_done()
+            self.app.reviewed.set(True)
+            self.app.confirm_claim_done()
+            self.app.snapshot = {'saLzkId': self.app.current.sa_id}
+            self.app.comparison = [{'label': '认领状态', 'library': '已认领'}]
+            self.app.confirm_claim_done()
+            run.assert_not_called()
+
+    def test_claim_closure_confirmation_passes_scoped_evidence(self):
+        self.select_tan_first()
+        self.app.bridge = Mock(online=True)
+        self.app.snapshot = {'saLzkId': self.app.current.sa_id}
+        self.app.comparison = [{'label': '认领状态', 'library': '已认领'}]
+        self.app.note.insert('1.0', '已认领')
+        self.app.reviewed.set(True)
+        with patch('app.messagebox.askyesno', return_value=True), patch.object(self.app, 'run') as run:
+            self.app.confirm_claim_done()
+            run.assert_called_once()
+            with patch('app.complete_claim') as close:
+                run.call_args.args[0]()
+                self.assertEqual(close.call_args.args[1].owner, '谭勋策')
+                self.assertTrue(close.call_args.kwargs['reviewed'])
+
     def test_automation_precheck_syncs_remote_done_without_browser_writes(self):
         self.select_tan_first()
         browser = Mock(online=True)
