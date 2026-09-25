@@ -6,6 +6,7 @@ const readline=require('node:readline');
 const {spawn}=require('node:child_process');
 const {chromium}=require('playwright');
 const root=path.resolve(__dirname,'..');
+const expectedVersion=require('../extension/manifest.json').version;
 const pythonBundle=path.join(os.homedir(),'.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe');
 const python=process.env.SA_TEST_PYTHON || (fs.existsSync(pythonBundle)?pythonBundle:'python');
 const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
@@ -151,7 +152,7 @@ assert.ok(['https://www.webofscience.com','https://webofscience.clarivate.cn'].i
       const tabs=await chrome.tabs.query({url:origin+'/*'});
       return chrome.runtime.sendMessage({type:'inspect_workflow',tabId:tabs[0].id});
     },wosOrigin);
-    assert.equal(diagnostic.ok,true);assert.equal(diagnostic.data.bindings.wos,true);assert.equal(diagnostic.data.version,'0.3.6');
+    assert.equal(diagnostic.ok,true);assert.equal(diagnostic.data.bindings.wos,true);assert.equal(diagnostic.data.version,expectedVersion);
     assert.equal(diagnostic.data.site,new URL(wosOrigin).hostname);
     console.log('PASS popup read-only diagnostics report role and version without searching');
     const muted=await popup.evaluate(()=>chrome.runtime.sendMessage({type:'toggle_wos_mute'}));assert.equal(muted.ok,true);

@@ -107,13 +107,15 @@ async function runSACommand(command) {
       const ui = candidates[0], root = ui.$el;
       if (typeof ui.closeDrawer !== "function" || typeof ui.$on !== "function" || typeof ui.$off !== "function")
         stop(label + "窗口结构不兼容（关闭方法或事件接口缺失），停止自动关闭");
-      // Before first open the UI may expose an empty DIV instead of a comment.
-      // In that state there is no panel to close. Require both visibility
-      // states to be closed and no panel anywhere inside this component root.
-      if (owner[property] === false && ui.visible !== true && ui.rendered !== true &&
-          !ui.$refs?.drawer && !root?.querySelector?.(".el-drawer") &&
-          !(root?.matches?.(".el-drawer")))
-        return {owner, ui, wrapper: null, panel: null};
+      // Element UI can leave a logically-open drawer at an empty lazy root.
+      // There is no rendered panel to close. Only a read-only search may
+      // reconcile that stale state, after checking for all visible windows.
+      const emptyComment = root?.nodeType === 8 && owner[property] === false && ui.visible !== true;
+      const emptyDiv = root?.nodeName === "DIV" && root.childElementCount === 0 &&
+        !root.matches(".el-drawer, .el-drawer__wrapper");
+      const emptyRoot = emptyComment || emptyDiv;
+      if (ui.rendered !== true && !ui.$refs?.drawer && emptyRoot)
+        return {owner, ui, wrapper: null, panel: null, unrendered: true};
       // Different Element UI builds place the wrapper at the component root,
       // below a root container, or above the component's root element.
       const wrappers = root?.nodeType === 1 ?
@@ -136,6 +138,8 @@ async function runSACommand(command) {
     let detailSurface = drawerSurface(drawer, "只读详情");
     const previousClaim = drawer.$refs?.claimDetail;
     const claimSurface = previousClaim ? drawerSurface(previousClaim, "认领", "drawer") : null;
+    if (claimSurface?.unrendered && previousClaim.drawer)
+      stop("认领窗口状态与页面不一致，请人工核验，不能自动关闭");
     let closingClaim = !!claimSurface && (previousClaim.drawer || visible(claimSurface.wrapper) || visible(claimSurface.panel));
     const safeWindows = () => {
       if (visibleAll(".el-dialog, .el-message-box").length)
@@ -192,6 +196,17 @@ async function runSACommand(command) {
           stop("关闭期间详情目标已变化，请重新定位");
       });
     };
+    if (detailSurface.unrendered && drawer.dialogVisible === true) {
+      if (command.action !== "search")
+        stop("只读详情状态与页面不一致，请先重新定位，不能继续修改");
+      if (drawer.dialogLoading) stop("只读详情仍在加载，请等待后重查");
+      safeWindows();
+      drawer.dialogVisible = false; // No panel exists: reconcile UI state only.
+      await vm.$nextTick();
+      await wait(() => drawer.dialogVisible !== true && detailSurface.ui.visible !== true,
+        "重置未渲染的只读详情", 2000);
+      safeWindows();
+    }
     if (drawer.dialogVisible) {
       if (drawer.dialogLoading) stop("详情仍在加载，请等待后重查");
       // Re-reading the same record needs a fresh request, not a close/reopen
@@ -216,6 +231,10 @@ async function runSACommand(command) {
       vm.showItemId(row);
       await vm.$nextTick();
       await wait(() => drawer.dialogVisible && !drawer.dialogLoading, "读取对比详情");
+      if (detailSurface.unrendered)
+        await wait(() => detailSurface.ui.rendered === true ||
+          !!detailSurface.ui.$refs?.drawer?.matches?.(".el-drawer") ||
+          !!detailSurface.ui.$el?.querySelector?.(".el-drawer"), "渲染只读详情", 5000);
       detailSurface = drawerSurface(drawer, "只读详情");
       safeWindows();
       if (drawer.currentSaLzkId !== command.sa_id) stop("详情 ID 不一致");

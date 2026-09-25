@@ -75,7 +75,7 @@ test('a redirect to the other WOS origin stops before page execution', async () 
 
 test('manifest grants both exact WOS hosts, not broad wildcard hosts', () => {
   const manifest=require('../extension/manifest.json');
-  assert.equal(manifest.version,'0.3.3');
+  assert.match(manifest.version,/^0\.3\.\d+$/);
   for(const origin of origins)assert.ok(manifest.host_permissions.includes(origin+'/*'));
   assert.ok(!manifest.host_permissions.some(x=>x.includes('*://')||x.includes('://*.')||x==='<all_urls>'));
 });

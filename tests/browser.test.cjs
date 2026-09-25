@@ -86,6 +86,37 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.equal(result.data.row.saLzkId,'demo-001');
     assert.equal(await page.evaluate(()=>writeCount),0);
   });
+  test('stale logically-open but unrendered DIV is reset only for a readonly search',async()=>{
+    await page.evaluate(()=>{
+      const d=vm.$refs.compareDetailDrawer,u=d.$children[0],root=u.$el,panel=u.$refs.drawer;
+      const placeholder=document.createElement('div');
+      root.replaceWith(placeholder);u.$el=placeholder;u.$refs={};u.rendered=false;
+      d.dialogVisible=true;
+      const show=d.show;
+      d.show=function(row){placeholder.replaceWith(root);u.$el=root;u.$refs.drawer=panel;
+        u.rendered=true;show.call(this,row);};
+    });
+    const result=await execute(command('search'));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.row.saLzkId,'demo-001');
+    assert.equal(await page.evaluate(()=>vm.$refs.compareDetailDrawer.dialogVisible),true);
+    assert.equal(await page.evaluate(()=>window.closeCalls||0),0);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('stale unrendered detail never dismisses a visible foreign dialog',async()=>{
+    await page.evaluate(()=>{
+      const d=vm.$refs.compareDetailDrawer,u=d.$children[0];
+      u.$el=document.createElement('div');u.$refs={};u.rendered=false;
+      d.dialogVisible=true;
+      document.getElementById('drawer-wrapper').style.display='none';
+      document.getElementById('status').style.display='block';
+    });
+    const result=await execute(command('search'));
+    assert.match(result.error,/未关闭的编辑/);
+    assert.equal(await page.evaluate(()=>vm.$refs.compareDetailDrawer.dialogVisible),true);
+    assert.equal(await page.evaluate(()=>window.queryCount||0),0);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
   test('owned wrapper nested under a component root remains uniquely scoped',async()=>{
     await page.evaluate(()=>{
       const u=vm.$refs.compareDetailDrawer.$children[0],wrapper=u.$el;
