@@ -33,6 +33,60 @@ async function runWOSCommand(command) {
     fail(label+"超时，未自动重复操作");
   };
   const button=(labels,root=document)=>one(all('button,[role="button"],a',root).filter(el=>labels.includes(caption(el))),labels.join(" / "));
+  // Read the action label, not decorative Material/SVG ligature text. Keep this
+  // search-only: export menus and all write-side checks retain their own guards.
+  const searchIcons='mat-icon,.mat-icon,svg,.material-icons,.material-icons-outlined,.material-symbols-outlined,.material-symbols-rounded,.material-symbols-sharp';
+  const searchText=el=>{
+    if(el.matches('input[type="submit"],input[type="button"]'))return norm(el.value);
+    const parts=[];
+    const visit=node=>{
+      if(node.nodeType===Node.TEXT_NODE){parts.push(node.nodeValue);return;}
+      if(node.nodeType!==Node.ELEMENT_NODE)return;
+      if(node.matches(searchIcons+',script,style,[hidden],[aria-hidden="true"]'))return;
+      const style=getComputedStyle(node);
+      if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse')return;
+      for(const child of node.childNodes)visit(child);
+    };
+    visit(el);return norm(parts.join(''));
+  };
+  const searchButton=(field,input)=>{
+    if(!field.isConnected||!input.isConnected)fail("文献检索区域已变化，请重新核验页面");
+    const short=['search','检索','搜索','檢索','搜尋'];
+    const accessible=[...short,'search documents','search publications','检索文献','搜索文献','文献检索','檢索文獻'];
+    const isAction=el=>{
+      if(el.closest('nav,header,footer,aside,[role="navigation"],[role="banner"],[hidden],[inert],[aria-hidden="true"]'))return false;
+      const label=searchText(el).toLowerCase();
+      // Never let an aria label turn a visible Delete/Clear/history action into Search.
+      if(label)return short.includes(label);
+      const aria=norm(el.getAttribute('aria-label')).toLowerCase();
+      if(aria)return accessible.includes(aria);
+      const ids=norm(el.getAttribute('aria-labelledby')).split(' ').filter(Boolean);
+      return accessible.includes(norm(ids.map(id=>document.getElementById(id)?.textContent||'').join(' ')).toLowerCase());
+    };
+    const selector='button,[role="button"],input[type="submit"],input[type="button"]';
+    const form=input.form||field.closest('form');
+    let root=form&&form.contains(field)&&form.contains(input)?form:field.parentElement;
+    while(root&&!root.contains(input))root=root.parentElement;
+    if(!root)fail("无法确认文献检索区域，请检查工作页");
+    const boundary=root.closest('[role="tabpanel"],main,[role="main"]')||document.body;
+    // A button may be a sibling of the condition form, or use HTML's explicit
+    // form= association. Other forms and navigation links are never borrowed.
+    const associated=form?all(selector).filter(el=>el.form===form):[];
+    while(root){
+      const matches=[...new Set([...all(selector,root),...associated])].filter(el=>{
+        const owner=el.form||el.closest('form');
+        return (!owner||owner===form)&&isAction(el);
+      });
+      const actions=matches.filter(el=>!matches.some(other=>other!==el&&el.contains(other)));
+      if(actions.length){
+        if(actions.length!==1)fail(`文献检索按钮未唯一识别（当前检索区域识别到 ${actions.length} 个）。未点击检索按钮；请点扩展“检查工作页”复制按钮诊断`);
+        return actions[0];
+      }
+      if(root===boundary)break;
+      root=root.parentElement;
+    }
+    fail("文献检索按钮未唯一识别（当前检索区域识别到 0 个）。未点击检索按钮；请点扩展“检查工作页”复制按钮诊断");
+  };
   const click=el=>{check();if(el.disabled||el.getAttribute("aria-disabled")==="true")fail("控件尚不可用");el.click();};
   const set=(el,value)=>{
     const proto=el.tagName==="TEXTAREA"?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
@@ -80,13 +134,14 @@ async function runWOSCommand(command) {
       }
       await wait(()=>fields().length===1 && choices.includes(fieldText(fields()[0])),"确认检索字段",5000);
       field=fields()[0];
-      // Only an empty single-row basic-search form can be controlled.
+      // Only the uniquely identified single-row document query is controlled.
       const scope=field.closest("form") || document;
       const inputs=all('input:not([type]),input[type="text"],input[type="search"],textarea',scope).filter(e=>!e.readOnly&&!e.disabled);
       const input=one(inputs,"单行文献检索输入框");
+      searchButton(field,input); // Ambiguity stops before replacing the query.
       set(input,query);
       const previous=location.href;
-      click(button(["Search","检索","搜索"],scope));
+      click(searchButton(field,input)); // Input events may have replaced the button.
       await wait(()=>location.href!==previous,"WOS 检索结果");
       await wait(()=>all('a[href*="/full-record/WOS:"]').length || /No results found|未找到结果|没有检索结果/.test(document.body.innerText),"加载结果");
       if(/No results found|未找到结果|没有检索结果/.test(document.body.innerText))fail("WOS 未找到记录；这不等于未发表，也不自动标记完成");

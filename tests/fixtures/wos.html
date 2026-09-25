@@ -20,7 +20,7 @@ window.recordPage=function(){
   };
 };
 window.searchPage=function(){
-  main.innerHTML='<select aria-label="Search field"><option>All Fields</option><option>Topic</option><option>DOI</option><option>Title</option><option>Accession Number</option></select><input type="text" aria-label="Search documents"><button>Search</button>';
+  main.innerHTML='<form id="document-query"><select aria-label="Search field"><option>All Fields</option><option>Topic</option><option>DOI</option><option>Title</option><option>Accession Number</option></select><input type="text" aria-label="Search documents"></form><div class="query-actions"><button type="button" aria-label="Submit document query"><mat-icon>search</mat-icon><span>Search</span></button></div>';
   main.querySelector('button').onclick=()=>{searches++;history.pushState({},'', '/wos/woscc/summary/synthetic');
     main.innerHTML='<h1>'+(wosMany?'2 results':'1 result')+'</h1><a href="/wos/woscc/full-record/'+ut+'">Synthetic paper</a>';
     main.querySelector('a').onclick=e=>{e.preventDefault();recordPage();};
