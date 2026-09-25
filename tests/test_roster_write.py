@@ -9,7 +9,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill
 
 from core import HEADERS, QUERY_HEADER, SafetyStop, file_hash, read_roster
-from roster_write import mark_complete
+from roster_write import mark_complete, reconcile_processed
 
 
 def make_roster(path, flags=(None, 1, "1", 0, True)):
@@ -33,6 +33,49 @@ def make_roster(path, flags=(None, 1, "1", 0, True)):
 
 
 class RosterWriteTests(unittest.TestCase):
+    def tan_roster(self):
+        book = load_workbook(self.path)
+        book.active['B2'] = '谭勋策'
+        book.save(self.path)
+        book.close()
+        return read_roster(self.path)
+
+    def test_remote_processed_sync_marks_only_exact_tan_row(self):
+        roster = self.tan_roster()
+        record = roster.records[0]
+        before = self.path.read_bytes()
+        completion = reconcile_processed(roster, record, {
+            'saLzkId': record.sa_id, 'markStatus': '已处理'})
+        self.assertEqual(completion.cell, 'A2')
+        self.assertEqual(completion.backup.read_bytes(), before)
+        self.assertTrue(completion.roster.records[0].done)
+        self.assertEqual([r.done for r in completion.roster.records[1:]],
+                         [r.done for r in roster.records[1:]])
+
+    def test_remote_pending_does_not_touch_roster(self):
+        roster = self.tan_roster()
+        before = file_hash(self.path)
+        self.assertIsNone(reconcile_processed(roster, roster.records[0], {
+            'saLzkId': 'demo-001', 'markStatus': '待处理'}))
+        self.assertEqual(file_hash(self.path), before)
+
+    def test_remote_sync_rejects_wrong_owner_id_and_unknown_state(self):
+        roster = read_roster(self.path)
+        before = file_hash(self.path)
+        with self.assertRaises(SafetyStop):
+            reconcile_processed(roster, roster.records[0], {
+                'saLzkId': 'demo-001', 'markStatus': '已处理'})
+        roster = self.tan_roster()
+        tan_hash = file_hash(self.path)
+        for row in ({'saLzkId': 'different', 'markStatus': '已处理'},
+                    {'saLzkId': 'demo-001', 'markStatus': '未知'}):
+            with self.assertRaises(SafetyStop):
+                reconcile_processed(roster, roster.records[0], row)
+        self.assertNotEqual(tan_hash, before)
+        self.assertEqual(file_hash(self.path), tan_hash)
+        roster.assert_unchanged()
+        self.assertFalse(roster.records[0].done)
+
     def test_self_closing_flag_does_not_swallow_next_cell(self):
         import copy
         import io
@@ -42,7 +85,7 @@ class RosterWriteTests(unittest.TestCase):
             for entry in original.infolist():
                 data = original.read(entry)
                 if entry.filename == 'xl/worksheets/sheet1.xml':
-                    data = re.sub(rb'<c r="A2"[^>]*></c>', b'<c r="A2" s="1"/>', data)
+                    data = re.sub(rb'<c r="A2"[^>]*(?:/>|></c>)', b'<c r="A2" s="1"/>', data)
                     self.assertIn(b'<c r="A2" s="1"/>', data)
                 target.writestr(copy.copy(entry), data)
         roster = read_roster(self.path)

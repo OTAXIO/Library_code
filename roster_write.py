@@ -131,7 +131,7 @@ def patch_cell(data, reference, row_number):
 
 
 def mark_complete(roster, record, backup_dir=None):
-    """Only the UI's explicit, confirmed human action may call this function."""
+    """Back up and mark one verified record complete in the local roster."""
     path = roster.path
     if path.name.lower() != "list.xlsx" or not roster.completion_column:
         raise SafetyStop("只允许回写当前 list.xlsx 的完成备注列。")
@@ -190,3 +190,24 @@ def mark_complete(roster, record, backup_dir=None):
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def reconcile_processed(roster, record, remote_row, owner="谭勋策"):
+    """Mirror an already-processed backend row; never change backend state here.
+
+    Returns ``None`` only when the exact remote row is still pending. All
+    unfamiliar or conflicting states stop before touching the workbook.
+    """
+    if record.owner != owner or record not in roster.records:
+        raise SafetyStop("自动核验只允许处理谭勋策本人名单中的记录。")
+    if record.done:
+        raise SafetyStop("本地名单已经完成，请重新读取后跳过。")
+    if not isinstance(remote_row, dict) or remote_row.get("saLzkId") != record.sa_id:
+        raise SafetyStop("后台结果与名单 ID 不完全一致，禁止同步完成标记。")
+    status = remote_row.get("markStatus")
+    if status not in ("待处理", "已处理"):
+        raise SafetyStop("后台标记状态未知，禁止同步完成标记。")
+    roster.assert_unchanged()
+    if status == "待处理":
+        return None
+    return mark_complete(roster, record)

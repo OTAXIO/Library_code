@@ -7,6 +7,7 @@ from notices import messages as messagebox
 
 from automation import ImportStore, WOSFlow, classify
 from core import SafetyStop
+from roster_write import reconcile_processed
 
 
 class AutomationPanel:
@@ -58,10 +59,27 @@ class AutomationPanel:
         app = self.app
         if not app.current or not app.roster or app.current.done:
             raise SafetyStop("请先选择一条未完成记录。")
+        if app.current.owner != "谭勋策":
+            raise SafetyStop("本次自动化试验只处理谭勋策负责的记录。")
         app.roster.assert_unchanged()
         if not app.bridge or not app.bridge.online:
             raise SafetyStop("请先连接浏览器，并在扩展绑定两个工作页。")
         return app.current
+
+    def synced(self, record, completion):
+        app = self.app
+        app.roster = completion.roster
+        app.clear_selection()
+        app.populate()
+        self.route.set("后台已处理，已同步名单；跳过所有自动修改。")
+        self.show(f"{record.sa_id}\n后台标记：已处理\nExcel 完成标记：{completion.cell} = 1\n已跳过认领、编辑和导入。")
+        app.status.set("后台已处理：名单已备份并标为数字 1，当前条目已从待办移除。")
+        try:
+            app.journal.save(record, "后台已处理并同步名单", "", {
+                "cell": completion.cell, "backup": str(completion.backup),
+                "previous": completion.previous, "mode": "remote_processed_sync"})
+        except Exception:
+            app.status.set("名单已标为 1，但本地日志失败；请检查备份，勿重复操作。")
 
     def engine(self):
         if self.store is None:
@@ -99,7 +117,15 @@ class AutomationPanel:
         except SafetyStop as exc:
             messagebox.showwarning("暂未自动处理", str(exc), parent=app.root)
             return
-        def planned(result):
+        roster = app.roster
+        def inspect():
+            result = app.bridge.call("search", {"sa_id": record.sa_id})
+            return result, reconcile_processed(roster, record, result.get("row"))
+        def planned(outcome):
+            result, completion = outcome
+            if completion:
+                self.synced(record, completion)
+                return
             plan = classify(record, result)
             app.snapshot, app.comparison = result["row"], result.get("comparison")
             self.route.set(plan.reason)
@@ -121,7 +147,7 @@ class AutomationPanel:
                 app.open_browser_panel("open_metadata")
             else:
                 app.status.set(plan.reason)
-        app.run(lambda: app.bridge.call("search", {"sa_id": record.sa_id}), planned, "读取最新网页并判断处理路径…")
+        app.run(inspect, planned, "先核验后台是否已处理，再判断处理路径…")
 
     def resume(self):
         app = self.app
@@ -147,4 +173,15 @@ class AutomationPanel:
         except SafetyStop as exc:
             messagebox.showwarning("暂未继续", str(exc), parent=app.root)
             return
-        app.run(lambda: flow.proceed(record, confirm_identity=confirm), self.render_state, "继续单条导入流程；不重试已发出的写入…")
+        roster = app.roster
+        def job():
+            result = app.bridge.call("search", {"sa_id": record.sa_id})
+            completion = reconcile_processed(roster, record, result.get("row"))
+            return completion, None if completion else flow.proceed(record, confirm_identity=confirm)
+        def finished(outcome):
+            completion, state = outcome
+            if completion:
+                self.synced(record, completion)
+            else:
+                self.render_state(state)
+        app.run(job, finished, "先核验后台状态，再继续单条导入…")

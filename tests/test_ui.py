@@ -5,6 +5,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch, Mock
+from openpyxl import load_workbook
 
 from app import App, BASE, GREEN, YELLOW
 from core import Journal, SafetyStop, file_hash, read_roster
@@ -36,6 +37,16 @@ class UITests(unittest.TestCase):
     def select_first(self):
         self.app.next_record()
         self.root.update_idletasks()
+
+    def select_tan_first(self):
+        book = load_workbook(self.path)
+        book.active['B2'] = '谭勋策'
+        book.save(self.path)
+        book.close()
+        self.app.loaded(read_roster(self.path))
+        self.app.owner.set('谭勋策')
+        self.app.select_owner()
+        self.select_first()
 
     def sync_run(self, job, callback, status):
         self.app.set_busy(True)
@@ -206,6 +217,39 @@ class UITests(unittest.TestCase):
             self.app.locate()
             warning.assert_called_once()
             run.assert_not_called()
+
+    def test_automation_precheck_syncs_remote_done_without_browser_writes(self):
+        self.select_tan_first()
+        browser = Mock(online=True)
+        browser.call.return_value = {'row': {'saLzkId': 'demo-001', 'markStatus': '已处理'}}
+        self.app.bridge = browser
+        with patch.object(self.app, 'run', side_effect=self.sync_run):
+            self.app.automation_panel.start()
+        browser.call.assert_called_once_with('search', {'sa_id': 'demo-001'})
+        self.assertTrue(read_roster(self.path).records[0].done)
+        self.assertNotIn('demo-001', self.app.tree.get_children())
+        self.assertIsNone(self.app.current)
+        self.assertIn('跳过', self.app.automation_panel.route.get())
+
+    def test_resume_precheck_skips_import_when_remote_is_done(self):
+        self.select_tan_first()
+        browser = Mock(online=True)
+        browser.call.return_value = {'row': {'saLzkId': 'demo-001', 'markStatus': '已处理'}}
+        self.app.bridge = browser
+        panel = self.app.automation_panel
+        panel.store = Mock()
+        panel.store.get.return_value = {
+            'candidate': {'title': 'Synthetic 1', 'authors': 'Alice', 'journal': 'Journal',
+                          'year': '2026', 'doi': '', 'wos': '', 'affiliation': '上海交通大学'},
+            'phase': 'exported', 'identity_confirmed': True,
+            'instructions': 'SA补充-demo-001', 'batch': None}
+        flow = Mock()
+        with patch.object(panel, 'engine', return_value=flow), \
+             patch.object(self.app, 'run', side_effect=self.sync_run):
+            panel.resume()
+        browser.call.assert_called_once_with('search', {'sa_id': 'demo-001'})
+        flow.proceed.assert_not_called()
+        self.assertTrue(read_roster(self.path).records[0].done)
 
     def test_approval_button_enabled_only_after_review(self):
         self.select_first()
