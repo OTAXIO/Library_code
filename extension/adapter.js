@@ -113,14 +113,17 @@ async function runSACommand(command) {
       // read-only search; a stale logical-open flag is reconciled below. Never
       // dismiss a visible window or treat an interactive child as inert.
       const emptyComment = root?.nodeType === 8 && owner[property] === false && ui.visible !== true;
+      const controls = root?.nodeType === 1 ?
+        [...root.querySelectorAll("input, textarea, select, button, [role='dialog'], [contenteditable='true']")]
+          .filter(visible) : [];
+      const windows = visibleAll(".el-dialog, .el-message-box, .el-drawer");
+      const nestedWindows = root?.nodeType === 1 ?
+        root.querySelectorAll(".el-drawer, .el-drawer__wrapper, .el-dialog, .el-message-box").length : 0;
       const inertDiv = root?.nodeName === "DIV" &&
         command.action === "search" && label === "只读详情" && ui.rendered !== true &&
         !root.matches(".el-drawer, .el-drawer__wrapper") &&
-        !root.querySelector(".el-drawer, .el-drawer__wrapper, .el-dialog, .el-message-box") &&
         root.childElementCount <= 1 &&
-        ![...root.querySelectorAll("input, textarea, select, button, [role='dialog'], [contenteditable='true']")]
-          .some(visible) &&
-        !visibleAll(".el-dialog, .el-message-box, .el-drawer").length;
+        controls.length === 0 && windows.length === 0;
       const emptyRoot = emptyComment || inertDiv;
       if (ui.rendered !== true && !ui.$refs?.drawer && emptyRoot)
         return {owner, ui, wrapper: null, panel: null, unrendered: true};
@@ -144,7 +147,9 @@ async function runSACommand(command) {
           "，逻辑开启=" + String(owner[property] === true) +
           "，UI可见=" + String(ui.visible === true) +
           "，子节点=" + String(root?.childElementCount ?? -1) +
-          "，已挂载=" + String(root?.isConnected === true) + "），停止自动关闭");
+          "，已挂载=" + String(root?.isConnected === true) +
+          "，内部窗口=" + nestedWindows + "，可见控件=" + controls.length +
+          "，全页可见窗口=" + windows.length + "），停止自动关闭");
       return {owner, ui, wrapper, panel};
     };
     if (visibleAll(".el-dialog, .el-message-box").length)

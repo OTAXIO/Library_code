@@ -116,6 +116,22 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.equal(result.data.row.saLzkId,'demo-001');
     assert.equal(await page.evaluate(()=>writeCount),0);
   });
+  test('mounted lazy DIV with one hidden leftover drawer is revalidated after opening',async()=>{
+    await page.evaluate(()=>{
+      const d=vm.$refs.compareDetailDrawer,u=d.$children[0],root=u.$el,panel=u.$refs.drawer;
+      const placeholder=document.createElement('div');
+      const hidden=document.createElement('div');hidden.className='el-drawer';hidden.style.display='none';
+      placeholder.append(hidden);document.body.append(placeholder);
+      root.remove();u.$el=placeholder;u.$refs={};u.rendered=false;
+      const show=d.show;
+      d.show=function(row){placeholder.replaceWith(root);u.$el=root;u.$refs.drawer=panel;
+        u.rendered=true;show.call(this,row);};
+    });
+    const result=await execute(command('search'));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.row.saLzkId,'demo-001');
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
   test('lazy DIV root with visible controls is not treated as empty',async()=>{
     await page.evaluate(()=>{
       const d=vm.$refs.compareDetailDrawer,u=d.$children[0];
