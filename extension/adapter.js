@@ -107,13 +107,20 @@ async function runSACommand(command) {
       const ui = candidates[0], root = ui.$el;
       if (typeof ui.closeDrawer !== "function" || typeof ui.$on !== "function" || typeof ui.$off !== "function")
         stop(label + "窗口结构不兼容（关闭方法或事件接口缺失），停止自动关闭");
-      // Element UI can leave a logically-open drawer at an empty lazy root.
-      // There is no rendered panel to close. Only a read-only search may
-      // reconcile that stale state, after checking for all visible windows.
+      // Element UI can leave a logically-open drawer at an inert lazy root.
+      // Some builds put empty layout DIVs inside that root before creating the
+      // wrapper. Never treat visible content or an interactive control as inert.
+      // Only a read-only search may reconcile that stale state, after checking
+      // for all visible windows.
       const emptyComment = root?.nodeType === 8 && owner[property] === false && ui.visible !== true;
-      const emptyDiv = root?.nodeName === "DIV" && root.childElementCount === 0 &&
-        !root.matches(".el-drawer, .el-drawer__wrapper");
-      const emptyRoot = emptyComment || emptyDiv;
+      const inertDiv = root?.nodeName === "DIV" &&
+        !root.matches(".el-drawer, .el-drawer__wrapper") &&
+        !root.querySelector(".el-drawer, .el-drawer__wrapper") &&
+        (root.childElementCount === 0 || !visible(root) ||
+          (!root.textContent.trim() &&
+            ![...root.querySelectorAll("input, textarea, select, button, [role='dialog'], [contenteditable='true']")]
+              .some(visible)));
+      const emptyRoot = emptyComment || inertDiv;
       if (ui.rendered !== true && !ui.$refs?.drawer && emptyRoot)
         return {owner, ui, wrapper: null, panel: null, unrendered: true};
       // Different Element UI builds place the wrapper at the component root,

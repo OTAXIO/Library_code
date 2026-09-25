@@ -86,6 +86,31 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.equal(result.data.row.saLzkId,'demo-001');
     assert.equal(await page.evaluate(()=>writeCount),0);
   });
+  test('lazy DIV root with inert layout children does not block first read',async()=>{
+    await page.evaluate(()=>{
+      const d=vm.$refs.compareDetailDrawer,u=d.$children[0],root=u.$el,panel=u.$refs.drawer;
+      const placeholder=document.createElement('div');
+      placeholder.append(document.createElement('div'));
+      root.replaceWith(placeholder);u.$el=placeholder;u.$refs={};u.rendered=false;
+      const show=d.show;
+      d.show=function(row){placeholder.replaceWith(root);u.$el=root;u.$refs.drawer=panel;
+        u.rendered=true;show.call(this,row);};
+    });
+    const result=await execute(command('search'));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('lazy DIV root with visible controls is not treated as empty',async()=>{
+    await page.evaluate(()=>{
+      const d=vm.$refs.compareDetailDrawer,u=d.$children[0];
+      const placeholder=document.createElement('div');
+      placeholder.innerHTML='<div><button>unsaved action</button></div>';
+      document.body.append(placeholder);u.$el=placeholder;u.$refs={};u.rendered=false;
+    });
+    const result=await execute(command('search'));
+    assert.match(result.error,/窗口结构不兼容/);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
   test('stale logically-open but unrendered DIV is reset only for a readonly search',async()=>{
     await page.evaluate(()=>{
       const d=vm.$refs.compareDetailDrawer,u=d.$children[0],root=u.$el,panel=u.$refs.drawer;
