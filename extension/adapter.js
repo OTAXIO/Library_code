@@ -153,7 +153,15 @@ async function runSACommand(command) {
           "，子节点=" + String(root?.childElementCount ?? -1) +
           "，已挂载=" + String(root?.isConnected === true) +
           "，内部窗口=" + nestedWindows + "，可见控件=" + controls.length +
-          "，全页可见窗口=" + windows.length + "），停止自动关闭");
+          "，全页可见窗口=" + windows.length +
+          "，面板引用=" + String(panel?.nodeType === 1) +
+          "，引用为抽屉=" + String(panel?.matches?.(".el-drawer") === true) +
+          "，引用可见=" + String(panel?.nodeType === 1 && visible(panel)) +
+          "，引用在根内=" + String(root?.contains?.(panel) === true) +
+          "，引用有外框=" + String(!!panel?.closest?.(".el-drawer__wrapper")) +
+          "，引用有容器=" + String(!!panel?.closest?.(".el-drawer__container")) +
+          "，根可见=" + String(root?.nodeType === 1 && visible(root)) +
+          "），停止自动关闭");
       return {owner, ui, wrapper, panel};
     };
     if (visibleAll(".el-dialog, .el-message-box").length)
