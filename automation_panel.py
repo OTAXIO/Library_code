@@ -165,6 +165,10 @@ class AutomationPanel:
             return
         roster = app.roster
         def inspect():
+            status = app.bridge.call("status", {"sa_id": record.sa_id})
+            completion = reconcile_processed(roster, record, status.get("row"))
+            if completion:
+                return status, completion
             result = app.bridge.call("search", {"sa_id": record.sa_id})
             return result, reconcile_processed(roster, record, result.get("row"))
         def planned(outcome):
@@ -221,6 +225,10 @@ class AutomationPanel:
             return
         roster = app.roster
         def job():
+            status = app.bridge.call("status", {"sa_id": record.sa_id})
+            completion = reconcile_processed(roster, record, status.get("row"))
+            if completion:
+                return completion, None
             result = app.bridge.call("search", {"sa_id": record.sa_id})
             completion = reconcile_processed(roster, record, result.get("row"))
             return completion, None if completion else flow.proceed(record, confirm_identity=confirm)

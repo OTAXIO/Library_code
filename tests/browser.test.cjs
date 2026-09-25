@@ -30,6 +30,27 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.ok(result.data.comparison[1].sa.includes('\n'));
     assert.equal(await page.evaluate(()=>writeCount),0);
   });
+  test('status precheck reads exact row without opening lazy detail',async()=>{
+    const result=await execute(command('status'));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.row.saLzkId,'demo-001');
+    assert.equal(result.data.row.markStatus,'待处理');
+    assert.equal(await page.evaluate(()=>vm.$refs.compareDetailDrawer.dialogVisible),false);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('status precheck works with unrendered detail but rejects visible windows',async()=>{
+    await page.evaluate(()=>{
+      const d=vm.$refs.compareDetailDrawer,u=d.$children[0];
+      u.$el=document.createElement('div');u.$refs={};u.rendered=false;
+      d.dialogVisible=true;
+      document.getElementById('drawer-wrapper').style.display='none';
+    });
+    const result=await execute(command('status'));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    await page.evaluate(()=>document.getElementById('status').style.display='block');
+    assert.match((await execute(command('status'))).error,/未关闭的窗口/);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
   test('same-record readonly drawer is refreshed without a close cycle',async()=>{
     const first=await execute(command('search'));assert.equal(first.ok,true,JSON.stringify(first));
     await page.evaluate(()=>testConfig.drawerCloseDelay=20000);

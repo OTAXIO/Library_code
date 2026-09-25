@@ -52,7 +52,7 @@ async function runSACommand(command) {
   };
   try {
     check();
-    if (!["search", "open_metadata", "open_claim", "prepare_claim", "submit_claim", "link", "complete"].includes(command.action)) stop("不支持的命令");
+    if (!["status", "search", "open_metadata", "open_claim", "prepare_claim", "submit_claim", "link", "complete"].includes(command.action)) stop("不支持的命令");
     if (typeof command.sa_id !== "string" || !command.sa_id || command.sa_id.length > 160) stop("名单 ID 不合法");
     const roots = [...document.querySelectorAll("*")].map(el => el.__vue__).filter(Boolean);
     const found = new Set(), visited = new Set();
@@ -66,6 +66,36 @@ async function runSACommand(command) {
     if (found.size !== 1) stop("未找到唯一的比对页面组件，可能未登录或页面已升级");
     const vm = [...found][0];
     if (!vm.searchForm || !Array.isArray(vm.tableData) || !vm.page || typeof vm.getData !== "function") stop("页面结构不兼容");
+    const fresh = async () => {
+      check();
+      const defaults = {saLzkId: command.sa_id, matchCount: null, claimStatus: "", markStatus: "",
+        titleValue: "", doiValue: "", wosValue: "", qr: "", gh: "", reason: "", markType: null,
+        updateUsername: "", createTimeRange: [], updateTimeRange: []};
+      if (Object.keys(vm.searchForm).sort().join() !== Object.keys(defaults).sort().join()) stop("检索字段发生变化，需更新适配器");
+      for (const [key, value] of Object.entries(defaults)) vm.searchForm[key] = value;
+      vm.page.currentPage = 1;
+      const previous = vm.tableData;
+      const request = vm.getData();
+      if (!request || typeof request.then !== "function") stop("查询方法结构发生变化");
+      let finished = false, failure;
+      request.then(() => { finished = true; }, error => { failure = error; finished = true; });
+      await wait(() => finished && !vm.loading, "查询记录");
+      if (failure || vm.tableData === previous) stop("查询未取得新数据，可能登录失效或后台报错");
+      if (Number(vm.page.total) !== 1 || vm.tableData.length !== 1) stop("名单 ID 未返回唯一结果，停止自动操作");
+      const row = vm.tableData[0];
+      if (row.saLzkId !== command.sa_id) stop("网页结果与名单 ID 不完全相同");
+      snap(row);
+      return row;
+    };
+    // Status precheck deliberately does not open or close a detail drawer.
+    // It can continue when a read-only drawer is lazily unrendered, but never
+    // changes the list search while a visible edit/confirmation UI is open.
+    if (command.action === "status") {
+      if (visibleAll(".el-dialog, .el-message-box, .el-drawer").length)
+        stop("网页有未关闭的窗口，请人工处理后再预检");
+      if (vm.loading) stop("列表仍在加载，请等待后重查");
+      return {ok: true, data: {row: snap(await fresh())}};
+    }
     const drawer = vm.$refs?.compareDetailDrawer;
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");
     // A CompareDetailDrawer contains other drawers, some appended to body.
@@ -171,28 +201,6 @@ async function runSACommand(command) {
       await closeReadOnlyDetail(); // A user-initiated close may still be animating.
     }
     if (vm.loading) stop("列表仍在加载，请等待后重查");
-    const fresh = async () => {
-      check();
-      const defaults = {saLzkId: command.sa_id, matchCount: null, claimStatus: "", markStatus: "",
-        titleValue: "", doiValue: "", wosValue: "", qr: "", gh: "", reason: "", markType: null,
-        updateUsername: "", createTimeRange: [], updateTimeRange: []};
-      if (Object.keys(vm.searchForm).sort().join() !== Object.keys(defaults).sort().join()) stop("检索字段发生变化，需更新适配器");
-      for (const [key, value] of Object.entries(defaults)) vm.searchForm[key] = value;
-      vm.page.currentPage = 1;
-      const previous = vm.tableData;
-      // getData catches server errors internally; require a newly assigned result array.
-      const request = vm.getData();
-      if (!request || typeof request.then !== "function") stop("查询方法结构发生变化");
-      let finished = false, failure;
-      request.then(() => { finished = true; }, error => { failure = error; finished = true; });
-      await wait(() => finished && !vm.loading, "查询记录");
-      if (failure || vm.tableData === previous) stop("查询未取得新数据，可能登录失效或后台报错");
-      if (Number(vm.page.total) !== 1 || vm.tableData.length !== 1) stop("名单 ID 未返回唯一结果，停止自动操作");
-      const row = vm.tableData[0];
-      if (row.saLzkId !== command.sa_id) stop("网页结果与名单 ID 不完全相同");
-      snap(row);
-      return row;
-    };
     let row = await fresh();
     const before = snap(row);
     if (command.action !== "search") {

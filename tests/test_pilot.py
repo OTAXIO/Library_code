@@ -32,7 +32,7 @@ class PilotTests(unittest.TestCase):
         self.assertEqual(ids, ["demo-001", "demo-003"])
         browser = Mock()
         def reply(action, payload):
-            self.assertEqual(action, "search")
+            self.assertEqual(action, "status")
             sa_id = payload["sa_id"]
             return {"row": {"saLzkId": sa_id,
                             "markStatus": "已处理" if sa_id == "demo-001" else "待处理",

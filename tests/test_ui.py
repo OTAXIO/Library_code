@@ -225,11 +225,24 @@ class UITests(unittest.TestCase):
         self.app.bridge = browser
         with patch.object(self.app, 'run', side_effect=self.sync_run):
             self.app.automation_panel.start()
-        browser.call.assert_called_once_with('search', {'sa_id': 'demo-001'})
+        browser.call.assert_called_once_with('status', {'sa_id': 'demo-001'})
         self.assertTrue(read_roster(self.path).records[0].done)
         self.assertNotIn('demo-001', self.app.tree.get_children())
         self.assertIsNone(self.app.current)
         self.assertIn('跳过', self.app.automation_panel.route.get())
+
+    def test_automation_pending_status_requires_fresh_detail_before_routing(self):
+        self.select_tan_first()
+        browser = Mock(online=True)
+        row = {'saLzkId': 'demo-001', 'markStatus': '待处理',
+               'matchCount': 1, 'itemId': '1234567890123456789'}
+        browser.call.side_effect = [{'row': row}, {'row': row, 'comparison': []}]
+        self.app.bridge = browser
+        with patch.object(self.app, 'run', side_effect=self.sync_run):
+            self.app.automation_panel.start()
+        self.assertEqual([call.args[0] for call in browser.call.call_args_list],
+                         ['status', 'search'])
+        self.assertFalse(read_roster(self.path).records[0].done)
 
     def test_resume_precheck_skips_import_when_remote_is_done(self):
         self.select_tan_first()
@@ -247,7 +260,7 @@ class UITests(unittest.TestCase):
         with patch.object(panel, 'engine', return_value=flow), \
              patch.object(self.app, 'run', side_effect=self.sync_run):
             panel.resume()
-        browser.call.assert_called_once_with('search', {'sa_id': 'demo-001'})
+        browser.call.assert_called_once_with('status', {'sa_id': 'demo-001'})
         flow.proceed.assert_not_called()
         self.assertTrue(read_roster(self.path).records[0].done)
 

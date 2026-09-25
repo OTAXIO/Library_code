@@ -84,7 +84,10 @@ def precheck_pilot(roster, ids, bridge, cancelled=lambda: False, progress=lambda
             continue
         progress(f"试验预检 {position}/{len(ids)}：{sa_id}")
         try:
-            result = bridge.call("search", {"sa_id": sa_id})
+            # The first pass needs only the exact backend row and mark status.
+            # Opening detail here would couple 100-row reconciliation to an
+            # optional, version-sensitive read-only drawer.
+            result = bridge.call("status", {"sa_id": sa_id})
             checked += 1
             completion = reconcile_processed(roster, record, result.get("row"))
             if completion:
