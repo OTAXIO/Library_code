@@ -356,19 +356,24 @@ async function runSACommand(command) {
       if (!modal || !["getScholarData", "sureAuthor"].every(key => typeof modal[key] === "function") ||
           !modal.dialogModalVisible || modal.authorIndex !== target.index || !modal.queryForm)
         stop("选择学者窗口结构不兼容");
-      const pickerDialogs = visibleAll(".el-dialog").filter(element =>
-        modal.$el && (modal.$el === element || modal.$el.contains(element)));
+      const pickerRoot = modal.$el;
+      const ownsPicker = element => pickerRoot && (pickerRoot === element || pickerRoot.contains(element));
+      const pickerDialogs = visibleAll(".el-dialog").filter(ownsPicker);
       if (pickerDialogs.length !== 1) stop("无法唯一识别程序打开的选择作者窗口，请人工处理");
-      const pickerDialog = pickerDialogs[0];
       const waitForPickerClose = async () => {
         await wait(() => {
           guard();
           if (modal.dialogModalVisible) stop("选择作者窗口被重新打开，请人工处理");
-          // Only our known dialog may be fading out. Never wait out or dismiss
-          // an unrelated modal, which could need the user's decision.
-          if (claim.activeName !== "author" || visibleAll(".el-dialog, .el-message-box").some(element => element !== pickerDialog))
+          if (claim.activeName !== "author") stop("作者认领标签已切换，请重新定位");
+          if (modal.$el !== pickerRoot) stop("选择作者窗口所属组件已变化，请人工处理");
+          // Element UI 2.12 destroy-on-close replaces the inner .el-dialog
+          // before its leave animation ends. The component root stays stable.
+          // Re-resolve only within that owner; never wait out a foreign modal.
+          const ownDialogs = visibleAll(".el-dialog").filter(ownsPicker);
+          if (ownDialogs.length > 1) stop("选择作者窗口出现多个直属候选，请人工处理");
+          if (visibleAll(".el-dialog, .el-message-box").some(element => !ownDialogs.includes(element)))
             stop("网页出现其他操作窗口，请人工处理");
-          return !visible(pickerDialog);
+          return ownDialogs.length === 0;
         }, "等待选择作者窗口关闭", 5000);
       };
       // showDialog starts an initial name search. Let it finish before changing
@@ -426,7 +431,8 @@ async function runSACommand(command) {
       if (modal.dialogModalVisible || selected.data?.scholarId !== person.id || selected.data?.wno !== staffId ||
           selected.data?.name !== name || JSON.stringify(authorsSnapshot()) !== JSON.stringify(authors))
         stop("选择人员后的作者行校验失败");
-      if (claim.activeName !== "author" || visibleAll(".el-dialog, .el-message-box").length)
+      if (claim.activeName !== "author") stop("作者认领标签已切换，请重新定位");
+      if (visibleAll(".el-dialog, .el-message-box").length)
         stop("网页出现其他操作窗口，请人工处理");
       const beforeWrite = claim.tableData;
       submitted = true;
@@ -438,6 +444,9 @@ async function runSACommand(command) {
       const confirmed = after.filter(author => author.order === target.order && author.fullname === target.fullname && author.scholarId === person.id);
       if (confirmed.length !== 1 || after.filter(author => author.scholarId === person.id).length !== 1)
         stop("认领结果未匹配目标作者与学者，需人工核验");
+      // Only a verified write may restore ownership, allowing a subsequent
+      // read-only search to close this clean drawer. Uncertain writes stay open.
+      claim.__saAssistant = command.sa_id;
       return {ok: true, data: {row: before, claimed: true, verified: true,
         staff_id: staffId, scholar_id: person.id, author: target.fullname, order: target.order}};
     }

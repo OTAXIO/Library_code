@@ -40,6 +40,10 @@ const bindVisibility = (component, id, property="dialogVisible") => {
     }
     // Element UI keeps a closing dialog rendered until its transition ends.
     if(id==="people" && !value && testConfig.peopleCloseDelay) {
+      if(testConfig.peopleDestroyOnClose) {
+        const panel=document.getElementById(id);
+        panel.replaceWith(panel.cloneNode(true));
+      }
       setTimeout(()=>{if(!shown)document.getElementById(id).style.display="none";},testConfig.peopleCloseDelay);
     } else document.getElementById(id).style.display=value?"block":"none";
   }});

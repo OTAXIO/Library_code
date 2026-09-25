@@ -595,6 +595,15 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.equal(result.ok,true,JSON.stringify(result));
     assert.equal(await page.evaluate(()=>writeCount),1);
   });
+  test('verified claim permits a fresh read without another write',async()=>{
+    const prepared=await prepare();
+    const result=await submit(prepared);
+    assert.equal(result.ok,true,JSON.stringify(result));
+    const read=await execute(command('search'));
+    assert.equal(read.ok,true,JSON.stringify(read));
+    assert.equal(await page.locator('#claim').isVisible(),false);
+    assert.equal(await page.evaluate(()=>writeCount),1);
+  });
   test('claim still stops for a foreign modal during its own closing animation',async()=>{
     await page.evaluate(()=>testConfig.peopleCloseDelay=220);
     const prepared=await prepare();
@@ -604,6 +613,34 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.match(result.error,/网页出现其他操作窗口/);
     assert.equal(await page.evaluate(()=>writeCount),0);
     assert.equal(await page.locator('#status').isVisible(),true);
+  });
+  const destroyOnClosePicker = () => page.evaluate(()=>{
+    const panel=document.getElementById('people');
+    const owner=document.createElement('div');
+    panel.before(owner);owner.append(panel);people.$el=owner;
+    testConfig.peopleCloseDelay=220;testConfig.peopleDestroyOnClose=true;
+    window.originalPickerPanel=panel;
+  });
+  test('production destroy-on-close may replace the panel inside its stable owner',async()=>{
+    await destroyOnClosePicker();
+    const prepared=await prepare();
+    assert.equal(prepared.ok,true,JSON.stringify(prepared));
+    assert.equal(await page.evaluate(()=>originalPickerPanel.isConnected),false);
+    assert.equal(await page.locator('#people').isVisible(),false);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+    const result=await submit(prepared);
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.verified,true);
+    assert.equal(await page.evaluate(()=>writeCount),1);
+  });
+  test('destroy-on-close does not authorize ignoring a foreign confirmation dialog',async()=>{
+    await destroyOnClosePicker();
+    const prepared=await prepare();
+    assert.equal(prepared.ok,true,JSON.stringify(prepared));
+    await page.evaluate(()=>testConfig.foreignAfterSelect=true);
+    const result=await submit(prepared);
+    assert.match(result.error,/网页出现其他操作窗口/);
+    assert.equal(await page.evaluate(()=>writeCount),0);
   });
   test('lookup only returns after the owned selection dialog has closed',async()=>{
     await page.evaluate(()=>testConfig.peopleCloseDelay=250);
