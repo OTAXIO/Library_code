@@ -133,7 +133,7 @@ class UITests(unittest.TestCase):
             for child in self.app.automation_panel.subtabs.tabs():
                 self.app.automation_panel.subtabs.select(child)
                 self.root.update()
-                for widget in (*self.app.buttons, self.app.automation_panel.output):
+                for widget in (*self.app.buttons, self.app.automation_panel.output, self.app.auto_claim_check):
                     if widget.winfo_viewable():
                         self.assertGreater(widget.winfo_height(), 10)
                         self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(), self.root.winfo_rooty() + self.root.winfo_height())
@@ -484,6 +484,76 @@ class UITests(unittest.TestCase):
         self.assertEqual(self.app.note.get('1.0', 'end').strip(), '')
         self.assertFalse(self.app.current.done)
         self.assertIsNone(self.app.prepared_claim)
+
+    def set_tan_claim_ready(self):
+        self.select_tan_first()
+        self.set_claim_ready()
+        self.app.snapshot.update(gh='00001', markStatus='待处理', matchCount=1, reason='作者不一致', remark='')
+        self.app.comparison.append({'label': '作者信息', 'sa': '测试员', 'library': 'Demo'})
+        self.claim_proof = {'row': dict(self.app.snapshot), 'verified': True, 'claimed': True,
+                            'staff_id': '00001', 'scholar_id': 'scholar-1', 'author': 'Demo', 'order': 1}
+
+    def test_default_auto_claim_completes_backend_and_excel_after_one_confirmation(self):
+        self.set_tan_claim_ready()
+        self.assertTrue(self.app.auto_claim_completion.get())
+        latest = {'row': dict(self.app.snapshot), 'comparison': [dict(f) for f in self.app.comparison]}
+        latest['comparison'][0]['library'] = '已认领'
+        done = {**latest['row'], 'markStatus': '已处理', 'remark': '已认领'}
+        self.app.bridge.call.side_effect = [self.claim_proof, latest, latest, {'verified': True, 'row': done}]
+        with patch('app.messagebox.askyesno', return_value=True) as ask, patch.object(self.app, 'run', side_effect=self.sync_run):
+            self.app.submit_claim()
+        ask.assert_called_once()
+        self.assertIn('自动保存网页批注', ask.call_args.args[1])
+        self.assertTrue(self.app.current.done)
+        self.assertEqual(self.app.approval.get(), '已完成')
+        self.assertEqual([c.args[0] for c in self.app.bridge.call.call_args_list][-4:],
+                         ['submit_claim', 'search', 'search', 'complete'])
+        self.assertTrue(read_roster(self.path).records[0].done)
+        self.assertIn('Excel 已备份', self.app.status.get())
+
+    def test_auto_closure_option_is_captured_at_confirmation(self):
+        self.set_tan_claim_ready()
+        self.app.auto_claim_completion.set(False)
+        self.app.bridge.call.return_value = self.claim_proof
+        def flip_after_submit(job, callback, status):
+            result = job()
+            self.app.auto_claim_completion.set(True)
+            callback(result)
+        with patch('app.messagebox.askyesno', return_value=True), patch.object(self.app, 'run', side_effect=flip_after_submit), patch('app.auto_complete_claim') as close:
+            self.app.submit_claim()
+        close.assert_not_called()
+        self.assertFalse(self.app.current.done)
+
+    def test_existing_note_disables_automatic_closure(self):
+        self.set_tan_claim_ready()
+        self.app.note.insert('1.0', '还需核对其他问题')
+        self.app.bridge.call.return_value = self.claim_proof
+        with patch('app.messagebox.askyesno', return_value=True) as ask, patch.object(self.app, 'run', side_effect=self.sync_run), patch('app.auto_complete_claim') as close:
+            self.app.submit_claim()
+        close.assert_not_called()
+        self.assertIn('本条不自动结案', ask.call_args.args[1])
+        self.assertFalse(self.app.current.done)
+
+    def test_auto_closure_failure_preserves_claim_but_does_not_mark_excel(self):
+        self.set_tan_claim_ready()
+        before = file_hash(self.path)
+        self.app.bridge.call.return_value = self.claim_proof
+        with patch('app.messagebox.askyesno', return_value=True), patch.object(self.app, 'run', side_effect=self.sync_run), patch('app.auto_complete_claim', side_effect=SafetyStop('disconnected')):
+            with self.assertRaisesRegex(SafetyStop, '认领已成功.*自动批注'):
+                self.app.submit_claim()
+        self.assertEqual(file_hash(self.path), before)
+        self.assertFalse(self.app.current.done)
+        self.assertEqual(self.app.note.get('1.0', 'end').strip(), '已认领')
+        self.assertEqual([c.args[0] for c in self.app.bridge.call.call_args_list].count('submit_claim'), 1)
+
+    def test_claim_journal_failure_stops_automatic_closure(self):
+        self.set_tan_claim_ready()
+        self.app.bridge.call.return_value = self.claim_proof
+        with patch('app.messagebox.askyesno', return_value=True), patch.object(self.app, 'run', side_effect=self.sync_run), patch.object(self.app.journal, 'save', side_effect=[None, OSError('disk')]), patch('app.auto_complete_claim') as close:
+            self.app.submit_claim()
+        close.assert_not_called()
+        self.assertFalse(self.app.current.done)
+        self.assertIn('日志失败', self.app.status.get())
 
     def test_claim_lookup_requires_matching_staff_and_pending_record(self):
         self.set_claim_ready()

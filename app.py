@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from copy import deepcopy
 import queue
 import threading
 import tkinter as tk
@@ -10,7 +11,7 @@ from tkinter import ttk
 from notices import messages as messagebox
 from bridge import Bridge
 from claim import sa_claim_source
-from approval import complete_claim
+from approval import auto_complete_claim, complete_claim, verify_claim_result
 from model_review import KeyStore, ModelClient
 from model_panel import ModelPanel
 from automation_panel import AutomationPanel
@@ -54,6 +55,7 @@ class App:
         self.sa_number = tk.StringVar(value="先定位网页")
         self.claim_person = tk.StringVar(value="尚未查找人员")
         self.claim_author = tk.StringVar()
+        self.auto_claim_completion = tk.BooleanVar(value=True)
         self.build()
         self.reviewed.trace_add("write", lambda *_: self.refresh_approval())
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -119,7 +121,10 @@ class App:
         self.claim_author_box.bind("<<ComboboxSelected>>", lambda _e: self.refresh_approval())
         self.claim_button = self.button(auto, "确认并认领此作者", self.submit_claim, style="Complete.TButton")
         self.claim_button.pack(fill="x", pady=(0, 14))
-        ttk.Label(auto, text="编号或署名不唯一时暂停；认领后仍需人工批准。", wraplength=420, foreground="#5b6572").pack(anchor="w")
+        self.auto_claim_check = ttk.Checkbutton(auto, variable=self.auto_claim_completion,
+            text="认领核验成功后，自动批注并结案")
+        self.auto_claim_check.pack(anchor="w")
+        ttk.Label(auto, text="仅限本人单匹配作者差异；其他情况保留人工审批。", wraplength=420, foreground="#5b6572").pack(anchor="w", pady=(4, 0))
         ttk.Label(self.automation_page, textvariable=self.status, wraplength=445).pack(anchor="w", pady=(7, 0))
         page = self.manual_page
         page.columnconfigure(0, weight=1)
@@ -221,6 +226,7 @@ class App:
         for widget in (self.owner_box, self.preset_box, self.claim_author_box):
             widget.configure(state="disabled" if busy else "readonly")
         self.check.configure(state="disabled" if busy else "normal")
+        self.auto_claim_check.configure(state="disabled" if busy else "normal")
         self.note.configure(state="disabled" if busy else "normal")
         for tab in self.view_buttons:
             tab.configure(state="disabled" if busy else "normal")
@@ -524,25 +530,32 @@ class App:
             if not prepared or not 0 <= choice < len(self.claim_options):
                 raise SafetyStop("请先查找人员，再选择对应作者署名。")
             author, person, record = self.claim_options[choice], prepared["person"], self.current
+            roster, bridge = self.roster, self.bridge
+            snapshot, comparison = deepcopy(self.snapshot), deepcopy(self.comparison)
+            auto_close = bool(self.auto_claim_completion.get() and record.owner == "谭勋策" and
+                              record.matches == 1 and record.reason == "作者不一致" and
+                              self.note.get("1.0", "end").strip() in ("", "已认领") and
+                              snapshot.get("remark", "") in ("", "已认领"))
+            consequence = ("\n认领核验成功后，将自动保存网页批注“已认领”和已处理状态，\n"
+                           "回读成功后备份并将 Excel 完成备注写为 1。\n"
+                           "请同时确认本条没有其他待处理问题；信息变化时停止。" if auto_close else
+                           "\n本条不自动结案，Excel 保持未完成；核验后需单独审批。")
             question = (f"名单：{record.sa_id}\n{record.title[:100]}\n\n人员：{person['name']}（{person['wno']}）"
                         f"\n论文署名：第 {author['order']} 位 · {author['fullname']}\n\n确认该署名属于此人员，并向网站提交一次认领？"
-                        "\n不会自动把 Excel 标记完成。")
+                        + consequence)
             if not messagebox.askyesno("确认单条作者认领", question, parent=self.root):
                 return
             payload.update(prepared=prepared, author_index=author["index"], confirmed=True)
             self.journal.save(record, "认领待提交", self.note.get("1.0", "end").strip(),
-                              {"staff_id": person["wno"], "scholar_id": person["id"], "author": author["fullname"], "order": author["order"]})
+                              {"staff_id": person["wno"], "scholar_id": person["id"], "author": author["fullname"],
+                               "order": author["order"], "auto_complete": auto_close})
             self.clear_browser_state()
             self.reviewed.set(False)
         except Exception as exc:
             messagebox.showwarning("暂未认领", str(exc), parent=self.root)
             return
         def claimed(result):
-            if (result.get("row", {}).get("saLzkId") != record.sa_id or result.get("verified") is not True
-                    or result.get("claimed") is not True or result.get("staff_id") != person["wno"]
-                    or result.get("scholar_id") != person["id"] or result.get("author") != author["fullname"]
-                    or result.get("order") != author["order"]):
-                raise SafetyStop("已发出认领，但回读结果不一致。请核验网页，禁止直接重试。")
+            verify_claim_result(record, result, person, author)
             self.use_remark("已认领")
             self.claim_person.set(f"已认领：{person['name']} · {author['fullname']}")
             self.status.set("认领已回读确认，备注已填“已认领”；核对后回人工页批准完成。")
@@ -550,7 +563,18 @@ class App:
                 self.journal.save(record, "认领已核验", self.note.get("1.0", "end").strip(), result)
             except Exception:
                 self.status.set("网页认领已成功，但本地日志失败；请人工核验，勿重复认领。")
-        self.run(lambda: self.bridge.call("submit_claim", payload), claimed, "正在复核并提交单条认领，请勿操作网页…")
+                return
+            if auto_close:
+                self.journal.save(record, "认领结案待核验", "已认领", {"mode": "automatic_claim_completion"})
+                def finish():
+                    try:
+                        return auto_complete_claim(roster, record, bridge, snapshot, comparison,
+                                                   result, person, author, confirmed=True)
+                    except Exception as exc:
+                        raise SafetyStop("认领已成功，但自动批注/结案未全部完成。不要重复认领；重新定位核验后台。\n" + str(exc)) from exc
+                self.run(finish, lambda value: self.claim_completion_saved(record, value, "automatic_claim_completion"),
+                         "认领已核验，正在自动保存批注、回读状态并同步 Excel…")
+        self.run(lambda: bridge.call("submit_claim", payload), claimed, "正在复核并提交单条认领，请勿操作网页…")
 
     def copy_note(self):
         self.copy(self.note.get("1.0", "end").strip(), "备注已复制，请在网页手动粘贴并保存。")
@@ -632,25 +656,26 @@ class App:
             messagebox.showwarning("暂未结案", str(exc), parent=self.root)
             return
 
-        def saved(result):
-            completion = result.completion
-            self.roster = completion.roster
-            self.current = next(r for r in self.roster.records if r.row == record.row and r.sa_id == record.sa_id)
-            self.clear_browser_state()
-            self.populate()
-            self.set_approval(True)
-            self.model_panel.clear()
-            self.status.set("后台原已处理，仅同步名单。" if result.already_processed else
-                            "已结案：网页备注/状态已回读，Excel 已备份并标为 1。")
-            try:
-                self.journal.save(record, "已完成", "已认领", {"mode": "reviewed_claim_completion",
-                    "row": result.row, "cell": completion.cell, "backup": str(completion.backup),
-                    "already_processed": result.already_processed})
-            except Exception:
-                self.status.set("网页与 Excel 已完成，但日志失败。请检查备份，不要重复提交。")
-
         self.run(lambda: complete_claim(roster, record, self.bridge, snapshot, comparison, reviewed=True),
-                 saved, "正在核验认领、保存网页状态并同步名单；不自动重试…")
+                 lambda result: self.claim_completion_saved(record, result, "reviewed_claim_completion"),
+                 "正在核验认领、保存网页状态并同步名单；不自动重试…")
+
+    def claim_completion_saved(self, record, result, mode):
+        completion = result.completion
+        self.roster = completion.roster
+        self.current = next(r for r in self.roster.records if r.row == record.row and r.sa_id == record.sa_id)
+        self.clear_browser_state()
+        self.populate()
+        self.set_approval(True)
+        self.model_panel.clear()
+        self.status.set("后台原已处理，仅同步名单。" if result.already_processed else
+                        "已结案：网页备注/状态已回读，Excel 已备份并标为 1。")
+        try:
+            self.journal.save(record, "已完成", result.row.get("remark", ""), {"mode": mode,
+                "row": result.row, "cell": completion.cell, "backup": str(completion.backup),
+                "already_processed": result.already_processed})
+        except Exception:
+            self.status.set("网页与 Excel 已完成，但日志失败。请检查备份，不要重复提交。")
 
     def show_guide(self):
         if not self.current:
