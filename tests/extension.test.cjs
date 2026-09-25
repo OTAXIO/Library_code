@@ -151,7 +151,7 @@ assert.ok(['https://www.webofscience.com','https://webofscience.clarivate.cn'].i
       const tabs=await chrome.tabs.query({url:origin+'/*'});
       return chrome.runtime.sendMessage({type:'inspect_workflow',tabId:tabs[0].id});
     },wosOrigin);
-    assert.equal(diagnostic.ok,true);assert.equal(diagnostic.data.bindings.wos,true);assert.equal(diagnostic.data.version,'0.3.5');
+    assert.equal(diagnostic.ok,true);assert.equal(diagnostic.data.bindings.wos,true);assert.equal(diagnostic.data.version,'0.3.6');
     assert.equal(diagnostic.data.site,new URL(wosOrigin).hostname);
     console.log('PASS popup read-only diagnostics report role and version without searching');
     const muted=await popup.evaluate(()=>chrome.runtime.sendMessage({type:'toggle_wos_mute'}));assert.equal(muted.ok,true);

@@ -77,12 +77,20 @@ async function runSACommand(command) {
       const ui = candidates[0], root = ui.$el;
       if (typeof ui.closeDrawer !== "function" || typeof ui.$on !== "function" || typeof ui.$off !== "function")
         stop(label + "窗口结构不兼容（关闭方法或事件接口缺失），停止自动关闭");
-      const wrapper = root?.nodeType === 1 && root.matches(".el-drawer__wrapper") ? root : null;
-      // Some Element UI builds render a comment until first open. This is only
-      // accepted when BOTH component states explicitly say closed/unrendered.
-      if (owner[property] === false && ui.visible === false && ui.rendered === false &&
-          !ui.$refs?.drawer && (root?.nodeType === 8 || !root?.isConnected || (wrapper && !visible(wrapper))))
+      // Before first open the UI may expose an empty DIV instead of a comment.
+      // In that state there is no panel to close. Require both visibility
+      // states to be closed and no panel anywhere inside this component root.
+      if (owner[property] === false && ui.visible !== true && ui.rendered !== true &&
+          !ui.$refs?.drawer && !root?.querySelector?.(".el-drawer") &&
+          !(root?.matches?.(".el-drawer")))
         return {owner, ui, wrapper: null, panel: null};
+      // Different Element UI builds place the wrapper at the component root,
+      // below a root container, or above the component's root element.
+      const wrappers = root?.nodeType === 1 ?
+        (root.matches(".el-drawer__wrapper") ? [root] :
+          root.closest(".el-drawer__wrapper") ? [root.closest(".el-drawer__wrapper")] :
+            [...root.querySelectorAll(".el-drawer__wrapper")]) : [];
+      const wrapper = wrappers.length === 1 ? wrappers[0] : null;
       // Ref names are private implementation details. If absent, resolve a
       // unique panel inside THIS wrapper, excluding every nested drawer.
       const panels = wrapper ? [...wrapper.querySelectorAll(".el-drawer")]
@@ -91,7 +99,8 @@ async function runSACommand(command) {
       if (!wrapper?.isConnected || !panel?.matches?.(".el-drawer") ||
           panel.closest(".el-drawer__wrapper") !== wrapper || panels.length !== 1 || panels[0] !== panel)
         stop(label + "窗口结构不兼容（根节点 " + (root?.nodeName || "无") +
-          "，直属面板 " + panels.length + " 个，rendered=" + String(ui.rendered === true) + "），停止自动关闭");
+          "，wrapper " + wrappers.length + " 个，直属面板 " + panels.length +
+          " 个，rendered=" + String(ui.rendered) + "），停止自动关闭");
       return {owner, ui, wrapper, panel};
     };
     let detailSurface = drawerSurface(drawer, "只读详情");

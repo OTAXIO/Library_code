@@ -51,6 +51,32 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.equal((await execute(command('search'))).ok,true);
     assert.equal(await page.evaluate(()=>writeCount),0);
   });
+  test('lazy DIV root with zero panels does not block first read',async()=>{
+    await page.evaluate(()=>{
+      const d=vm.$refs.compareDetailDrawer,u=d.$children[0],root=u.$el,panel=u.$refs.drawer;
+      const placeholder=document.createElement('div');placeholder.textContent='closed lazy component';
+      root.replaceWith(placeholder);u.$el=placeholder;u.$refs={};u.rendered=false;
+      const show=d.show;
+      d.show=function(row){placeholder.replaceWith(root);u.$el=root;u.$refs.drawer=panel;
+        u.rendered=true;show.call(this,row);};
+    });
+    const result=await execute(command('search'));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.row.saLzkId,'demo-001');
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('owned wrapper nested under a component root remains uniquely scoped',async()=>{
+    await page.evaluate(()=>{
+      const u=vm.$refs.compareDetailDrawer.$children[0],wrapper=u.$el;
+      const outer=document.createElement('div');wrapper.replaceWith(outer);outer.append(wrapper);u.$el=outer;
+    });
+    const read=await execute(command('search'));
+    assert.equal(read.ok,true,JSON.stringify(read));
+    await page.evaluate(()=>synthetic.saLzkId='demo-002');
+    const next=await execute(command('search',{sa_id:'demo-002'}));
+    assert.equal(next.ok,true,JSON.stringify(next));
+    assert.equal(await page.evaluate(()=>closeCalls),1);
+  });
   test('drawer missing private panel ref uses only its own unique panel',async()=>{
     await page.evaluate(()=>{
       delete vm.$refs.compareDetailDrawer.$children[0].$refs.drawer;
