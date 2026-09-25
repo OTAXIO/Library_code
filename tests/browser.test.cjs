@@ -38,6 +38,45 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.equal(await page.evaluate(()=>window.closeCalls||0),0);
     assert.equal(await page.evaluate(()=>writeCount),0);
   });
+  test('lazy drawer comment before first open is materialized and revalidated',async()=>{
+    await page.evaluate(()=>{
+      const d=vm.$refs.compareDetailDrawer,u=d.$children[0],root=u.$el,panel=u.$refs.drawer;
+      const placeholder=document.createComment('lazy drawer');root.replaceWith(placeholder);
+      u.$el=placeholder;u.$refs={};u.rendered=false;
+      const show=d.show;
+      d.show=function(row){placeholder.replaceWith(root);u.$el=root;u.$refs.drawer=panel;u.rendered=true;show.call(this,row);};
+    });
+    const result=await execute(command('search'));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal((await execute(command('search'))).ok,true);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('drawer missing private panel ref uses only its own unique panel',async()=>{
+    await page.evaluate(()=>{
+      delete vm.$refs.compareDetailDrawer.$children[0].$refs.drawer;
+      delete claimWindow.$children[0].$refs.drawer;
+    });
+    const read=await execute(command('search'));assert.equal(read.ok,true,JSON.stringify(read));
+    await page.evaluate(()=>synthetic.saLzkId='demo-002');
+    const result=await execute(command('search',{sa_id:'demo-002'}));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(await page.evaluate(()=>closeCalls),1);
+  });
+  test('lazy drawer state cannot hide an open window or malformed rendered DOM',async()=>{
+    for(const active of [true,false]){
+      await reset();
+      await page.evaluate(active=>{const d=vm.$refs.compareDetailDrawer,u=d.$children[0];
+        d.dialogVisible=active;u.rendered=!active;u.$refs={};u.$el=document.createComment('unknown');},active);
+      assert.match((await execute(command('search'))).error,/窗口结构不兼容/);
+      assert.equal(await page.evaluate(()=>writeCount),0);
+    }
+  });
+  test('missing drawer ref never selects one of several owned panels',async()=>{
+    await page.evaluate(()=>{const u=vm.$refs.compareDetailDrawer.$children[0];delete u.$refs.drawer;
+      const p=document.createElement('div');p.className='el-drawer';u.$el.append(p);});
+    assert.match((await execute(command('search'))).error,/直属面板 2 个/);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
   test('same-record drawer refresh still fetches changed comparison data',async()=>{
     await execute(command('search'));
     await page.evaluate(()=>testConfig.saDoi='10.example/new');

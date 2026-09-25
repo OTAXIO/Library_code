@@ -71,19 +71,32 @@ async function runSACommand(command) {
     // A CompareDetailDrawer contains other drawers, some appended to body.
     // Bind to its direct ElDrawer instance + wrapper, never a global count or
     // the first descendant. ElDrawer's `closed` event also clears detail data.
-    const drawerSurface = (owner, label) => {
+    const drawerSurface = (owner, label, property = "dialogVisible") => {
       const candidates = (owner?.$children || []).filter(child => child.$options?.name === "ElDrawer");
       if (candidates.length !== 1) stop(label + "窗口结构未唯一识别，请人工关闭窗口后重试或更新扩展");
-      const ui = candidates[0], wrapper = ui.$el, panel = ui.$refs?.drawer;
-      if (!wrapper?.isConnected || !wrapper.matches(".el-drawer__wrapper") ||
-          !panel?.matches(".el-drawer") || panel.closest(".el-drawer__wrapper") !== wrapper ||
-          typeof ui.closeDrawer !== "function" || typeof ui.$on !== "function" || typeof ui.$off !== "function")
-        stop(label + "窗口结构不兼容，停止自动关闭");
+      const ui = candidates[0], root = ui.$el;
+      if (typeof ui.closeDrawer !== "function" || typeof ui.$on !== "function" || typeof ui.$off !== "function")
+        stop(label + "窗口结构不兼容（关闭方法或事件接口缺失），停止自动关闭");
+      const wrapper = root?.nodeType === 1 && root.matches(".el-drawer__wrapper") ? root : null;
+      // Some Element UI builds render a comment until first open. This is only
+      // accepted when BOTH component states explicitly say closed/unrendered.
+      if (owner[property] === false && ui.visible === false && ui.rendered === false &&
+          !ui.$refs?.drawer && (root?.nodeType === 8 || !root?.isConnected || (wrapper && !visible(wrapper))))
+        return {owner, ui, wrapper: null, panel: null};
+      // Ref names are private implementation details. If absent, resolve a
+      // unique panel inside THIS wrapper, excluding every nested drawer.
+      const panels = wrapper ? [...wrapper.querySelectorAll(".el-drawer")]
+        .filter(element => element.closest(".el-drawer__wrapper") === wrapper) : [];
+      const panel = ui.$refs?.drawer || (panels.length === 1 ? panels[0] : null);
+      if (!wrapper?.isConnected || !panel?.matches?.(".el-drawer") ||
+          panel.closest(".el-drawer__wrapper") !== wrapper || panels.length !== 1 || panels[0] !== panel)
+        stop(label + "窗口结构不兼容（根节点 " + (root?.nodeName || "无") +
+          "，直属面板 " + panels.length + " 个，rendered=" + String(ui.rendered === true) + "），停止自动关闭");
       return {owner, ui, wrapper, panel};
     };
-    const detailSurface = drawerSurface(drawer, "只读详情");
+    let detailSurface = drawerSurface(drawer, "只读详情");
     const previousClaim = drawer.$refs?.claimDetail;
-    const claimSurface = previousClaim ? drawerSurface(previousClaim, "认领") : null;
+    const claimSurface = previousClaim ? drawerSurface(previousClaim, "认领", "drawer") : null;
     let closingClaim = !!claimSurface && (previousClaim.drawer || visible(claimSurface.wrapper) || visible(claimSurface.panel));
     const safeWindows = () => {
       if (visibleAll(".el-dialog, .el-message-box").length)
@@ -114,7 +127,8 @@ async function runSACommand(command) {
         await wait(() => {
           safeWindows(); guard();
           if (owner[property] || ui.visible) stop(label + "窗口被重新打开或拒绝关闭，请人工处理");
-          if (ui.$el !== wrapper || ui.$refs?.drawer !== panel)
+          const current = drawerSurface(owner, label, property);
+          if (current.ui !== ui || current.wrapper !== wrapper || current.panel !== panel)
             stop(label + "窗口在关闭时被替换，请重新定位");
           return closed && !visible(wrapper) && !visible(panel);
         }, label, 5000);
@@ -185,6 +199,8 @@ async function runSACommand(command) {
       vm.showItemId(row);
       await vm.$nextTick();
       await wait(() => drawer.dialogVisible && !drawer.dialogLoading, "读取对比详情");
+      detailSurface = drawerSurface(drawer, "只读详情");
+      safeWindows();
       if (drawer.currentSaLzkId !== command.sa_id) stop("详情 ID 不一致");
       const values = Number(row.matchCount) === 1 ? drawer.compareData : drawer.saLzkCompareData;
       if (!Array.isArray(values) || !values.length) stop("详情为空，不能据此继续修改");
