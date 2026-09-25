@@ -115,6 +115,7 @@ assert.ok(['https://www.webofscience.com','https://webofscience.clarivate.cn'].i
     console.log('PASS completion round trip verifies status and remark');
     const duplicate=await invoke('complete',{sa_id:'demo-001',expected:completed.data.row,reviewed:true,note:'已核验测试原文，本库正确。'});
     assert.equal(duplicate.ok,false);
+    assert.match(duplicate.error,new RegExp(`^\\[扩展 ${expectedVersion.replaceAll('.', '\\.')}\\]`));
     assert.equal(await site.evaluate(()=>writeCount),3);
     console.log('PASS duplicate completion is refused across bridge');
     const importPage=await context.newPage();

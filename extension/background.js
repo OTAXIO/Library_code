@@ -102,6 +102,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       } catch (error) { result = {ok: false, error: error.message}; }
       finally { busy = false; }
     }
+    if (result && result.ok === false && typeof result.error === "string")
+      result.error = `[扩展 ${chrome.runtime.getManifest().version}] ${result.error}`;
     // Results can be resent safely, commands cannot. Failure here causes a desktop timeout.
     await request("/result", {client: String(pair.tabId), id: command.id, result}, pair.token);
     return {ok: true};

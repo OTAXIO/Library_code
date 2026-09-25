@@ -132,7 +132,11 @@ async function runSACommand(command) {
           panel.closest(".el-drawer__wrapper") !== wrapper || panels.length !== 1 || panels[0] !== panel)
         stop(label + "窗口结构不兼容（根节点 " + (root?.nodeName || "无") +
           "，wrapper " + wrappers.length + " 个，直属面板 " + panels.length +
-          " 个，rendered=" + String(ui.rendered) + "），停止自动关闭");
+          " 个，rendered=" + String(ui.rendered) +
+          "，逻辑开启=" + String(owner[property] === true) +
+          "，UI可见=" + String(ui.visible === true) +
+          "，子节点=" + String(root?.childElementCount ?? -1) +
+          "，已挂载=" + String(root?.isConnected === true) + "），停止自动关闭");
       return {owner, ui, wrapper, panel};
     };
     let detailSurface = drawerSurface(drawer, "只读详情");
