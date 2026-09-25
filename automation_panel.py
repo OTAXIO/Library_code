@@ -7,6 +7,7 @@ from notices import messages as messagebox
 
 from automation import ImportStore, WOSFlow, classify
 from core import SafetyStop
+from pilot import OWNER, pilot_scope, precheck_pilot
 from roster_write import reconcile_processed
 
 
@@ -21,6 +22,7 @@ class AutomationPanel:
         toolbar = ttk.Frame(parent)
         toolbar.pack(fill="x", pady=(0, 8))
         app.button(toolbar, "自动判断并执行", self.start, style="Model.TButton").pack(side="left")
+        app.button(toolbar, "预检前100条", self.pilot).pack(side="left", padx=5)
         self.stop_button = ttk.Button(toolbar, text="暂停后续步骤", command=self.cancelled.set)
         self.stop_button.pack(side="right")
         ttk.Label(parent, textvariable=self.route, wraplength=445).pack(anchor="w", pady=(0, 8))
@@ -80,6 +82,50 @@ class AutomationPanel:
                 "previous": completion.previous, "mode": "remote_processed_sync"})
         except Exception:
             app.status.set("名单已标为 1，但本地日志失败；请检查备份，勿重复操作。")
+
+    def pilot(self):
+        app = self.app
+        if app.busy:
+            return
+        try:
+            if not app.roster or app.owner.get() != OWNER:
+                raise SafetyStop("请先在人工页选择负责人谭勋策。")
+            app.roster.assert_unchanged()
+            if not app.bridge or not app.bridge.online:
+                raise SafetyStop("请先连接 Edge 中的 SA 比对结果页。")
+            roster = app.roster
+            ids = pilot_scope(roster, self.runtime.parent / "pilot-100.json")
+            self.cancelled.clear()
+            app.reviewed.set(False)
+        except SafetyStop as exc:
+            messagebox.showwarning("暂未开始试验预检", str(exc), parent=app.root)
+            return
+
+        def finished(result):
+            app.roster = result.roster
+            app.clear_selection()
+            app.populate()
+            for sa_id in result.synced_ids:
+                original = next(item for item in roster.records if item.sa_id == sa_id)
+                try:
+                    app.journal.save(original, "后台已处理并同步名单", "", {
+                        "mode": "pilot_remote_processed_sync"})
+                except Exception:
+                    pass  # The backed-up Excel write remains authoritative.
+            summary = (f"固定试验范围：{len(ids)} 条\n已读取后台：{result.checked} 条\n"
+                       f"后台已处理并同步 Excel：{result.synced} 条\n"
+                       f"原本本地已完成：{result.local_done} 条\n"
+                       f"待继续：{sum(result.routes.values())} 条\n"
+                       f"搁置待核验：{len(result.deferred)} 条")
+            details = "\n".join(f"{sa_id}：{reason}" for sa_id, reason in result.deferred[:12])
+            self.route.set("试验预检已暂停" if result.cancelled else "试验预检已完成；待办条目尚未自动批准。")
+            self.show(summary + ("\n\n搁置示例：\n" + details if details else ""))
+            app.status.set("试验预检已暂停，可对同一固定范围继续。" if result.cancelled else
+                           "100 条试验预检完成。仅同步后台已处理项；其余待逐条核验。")
+
+        app.run(lambda: precheck_pilot(roster, ids, app.bridge, self.cancelled.is_set,
+                                       self.progress.put), finished,
+                "正在只读核验固定的前 100 条；后台已处理的才同步 Excel…")
 
     def engine(self):
         if self.store is None:
