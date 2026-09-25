@@ -98,6 +98,7 @@ class AutomationPanel:
             self.cancelled.clear()
             app.reviewed.set(False)
         except SafetyStop as exc:
+            app.note_operation("预检前100条", "已暂停")
             messagebox.showwarning("暂未开始试验预检", str(exc), parent=app.root)
             return
 
@@ -125,7 +126,8 @@ class AutomationPanel:
 
         app.run(lambda: precheck_pilot(roster, ids, app.bridge, self.cancelled.is_set,
                                        self.progress.put), finished,
-                "正在只读核验固定的前 100 条；后台已处理的才同步 Excel…")
+                "正在只读核验固定的前 100 条；后台已处理的才同步 Excel…",
+                log_action="预检前100条")
 
     def engine(self):
         if self.store is None:
@@ -135,7 +137,18 @@ class AutomationPanel:
             if self.cancelled.is_set():
                 raise SafetyStop("已暂停后续步骤。已发出的请求不能撤回，请核验网页。")
             roster.assert_unchanged()
-        return WOSFlow(self.app.bridge, self.store, unchanged, self.progress.put)
+        labels = {"wos_search": "WOS 检索", "wos_export": "WOS 导出 TXT", "search": "重查 SA 比对",
+                  "import_scan": "核对导入批次", "import_upload": "上传 WOS TXT",
+                  "import_submit": "提交 WOS 导入", "import_check": "回读导入批次",
+                  "import_push": "推送 WOS 文献"}
+        def audit(action, result, sa_id):
+            try:
+                self.app.operation_log.record(labels.get(action, "核验 WOS 工作页"), result, sa_id)
+            except Exception:
+                # A logging failure must not turn an already-submitted upload
+                # into a retryable operation. Surface it through the UI queue.
+                self.progress.put("log.txt 未能保存 WOS 操作，请检查文件权限和格式。")
+        return WOSFlow(self.app.bridge, self.store, unchanged, self.progress.put, audit)
 
     def render_state(self, state):
         c = state["candidate"]
@@ -161,6 +174,7 @@ class AutomationPanel:
             self.cancelled.clear()
             app.reviewed.set(False)
         except SafetyStop as exc:
+            app.note_operation("导出当前 WOS 文献" if current_wos else "自动判断并执行", "已暂停")
             messagebox.showwarning("暂未自动处理", str(exc), parent=app.root)
             return
         roster = app.roster
@@ -187,7 +201,7 @@ class AutomationPanel:
                     state = flow.prepare(record, current_wos=current_wos)
                     self.progress.put("已取得 WOS 文献证据。")
                     return flow.proceed(record) if state["identity_confirmed"] else state
-                app.run(job, self.render_state, "开始单条 WOS 流程…")
+                app.run(job, self.render_state, "开始单条 WOS 流程…", log_action="WOS 单条导入流程")
             elif current_wos:
                 raise SafetyStop("当前条目不是零匹配，不允许使用 WOS 补录。")
             elif plan.route == "claim":
@@ -197,7 +211,8 @@ class AutomationPanel:
                 app.open_browser_panel("open_metadata")
             else:
                 app.status.set(plan.reason)
-        app.run(inspect, planned, "先核验后台是否已处理，再判断处理路径…")
+        app.run(inspect, planned, "先核验后台是否已处理，再判断处理路径…",
+                log_action="导出当前 WOS 文献" if current_wos else "自动判断并执行")
 
     def resume(self):
         app = self.app
@@ -221,6 +236,7 @@ class AutomationPanel:
                     return
             app.reviewed.set(False)
         except SafetyStop as exc:
+            app.note_operation("继续核验 WOS 导入", "已暂停")
             messagebox.showwarning("暂未继续", str(exc), parent=app.root)
             return
         roster = app.roster
@@ -238,4 +254,4 @@ class AutomationPanel:
                 self.synced(record, completion)
             else:
                 self.render_state(state)
-        app.run(job, finished, "先核验后台状态，再继续单条导入…")
+        app.run(job, finished, "先核验后台状态，再继续单条导入…", log_action="继续核验 WOS 导入")

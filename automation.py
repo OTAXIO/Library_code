@@ -206,9 +206,10 @@ class ImportStore:
 
 
 class WOSFlow:
-    def __init__(self, bridge, store, unchanged=lambda: None, progress=lambda text: None):
+    def __init__(self, bridge, store, unchanged=lambda: None, progress=lambda text: None,
+                 audit=lambda action, result, sa_id: None):
         self.bridge, self.store = bridge, store
-        self.unchanged, self.progress = unchanged, progress
+        self.unchanged, self.progress, self.audit = unchanged, progress, audit
 
     def call(self, action, payload):
         self.unchanged()
@@ -216,7 +217,13 @@ class WOSFlow:
                        "import_scan": "核对目标批次…", "import_upload": "上传 WOS TXT…",
                        "import_submit": "提交导入一次…", "import_check": "回读批次和文献…",
                        "import_push": "按 PPT 设置推送一次…"}.get(action, "核验网页…"))
-        return self.bridge.call(action, payload, timeout=75)
+        try:
+            answer = self.bridge.call(action, payload, timeout=75)
+        except Exception:
+            self.audit(action, "已暂停", payload.get("sa_id", ""))
+            raise
+        self.audit(action, "已执行", payload.get("sa_id", ""))
+        return answer
 
     def prepare(self, record, current_wos=False):
         existing = self.store.get(record)

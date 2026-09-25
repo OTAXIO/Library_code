@@ -1,5 +1,6 @@
 """Manual desk tests with native widgets and synthetic files; no website calls."""
 import tempfile
+import time
 import tkinter as tk
 import unittest
 from dataclasses import replace
@@ -11,6 +12,7 @@ from app import App, BASE, GREEN, YELLOW
 from core import Journal, SafetyStop, file_hash, read_roster
 from remarks import CLAIMED
 from notices import messages as quiet_messages
+from operation_log import OperationLog
 from tests.test_roster_write import make_roster
 
 
@@ -21,7 +23,8 @@ class UITests(unittest.TestCase):
         make_roster(self.path)
         self.root = tk.Tk()
         self.root.withdraw()
-        self.app = App(self.root, Journal(Path(self.tmp.name) / 'local.db'), auto_load=False)
+        self.app = App(self.root, Journal(Path(self.tmp.name) / 'local.db'), auto_load=False,
+                       operation_log=OperationLog(Path(self.tmp.name) / 'log.txt'))
         self.app.loaded(read_roster(self.path))
         self.app.owner.set('测试员')
         self.app.select_owner()
@@ -48,7 +51,7 @@ class UITests(unittest.TestCase):
         self.app.select_owner()
         self.select_first()
 
-    def sync_run(self, job, callback, status):
+    def sync_run(self, job, callback, status, **_kwargs):
         self.app.set_busy(True)
         try:
             result = job()
@@ -85,6 +88,30 @@ class UITests(unittest.TestCase):
         self.root.update_idletasks()
         self.assertGreater(window.winfo_height(), 200)
         window.destroy()
+
+    def test_background_operations_log_after_success_and_pause(self):
+        self.select_first()
+        self.app.run(lambda: "ok", lambda value: self.app.status.set(value), "后台查询", log_action="定位网页")
+        deadline = time.monotonic() + 3
+        while self.app.busy and time.monotonic() < deadline:
+            self.root.update()
+            time.sleep(.01)
+        self.assertFalse(self.app.busy)
+        self.assertEqual(self.app.operation_log.read()[-1]["result"], "已执行")
+        self.assertEqual(self.app.operation_log.read()[-1]["action"], "定位网页")
+        self.assertEqual(self.app.operation_log.read()[-1]["sa_id"], "demo-001")
+
+        def fail():
+            raise SafetyStop("private backend response")
+        with patch('app.messagebox.showwarning'):
+            self.app.run(fail, lambda _: None, "后台查询", log_action="定位网页")
+            deadline = time.monotonic() + 3
+            while self.app.busy and time.monotonic() < deadline:
+                self.root.update()
+                time.sleep(.01)
+        last = self.app.operation_log.read()[-1]
+        self.assertEqual(last["result"], "已暂停")
+        self.assertNotIn("private backend response", str(last))
 
     def test_warning_can_reopen_after_close_without_affecting_approval(self):
         self.select_first()
@@ -515,7 +542,7 @@ class UITests(unittest.TestCase):
         self.set_tan_claim_ready()
         self.app.auto_claim_completion.set(False)
         self.app.bridge.call.return_value = self.claim_proof
-        def flip_after_submit(job, callback, status):
+        def flip_after_submit(job, callback, status, **_kwargs):
             result = job()
             self.app.auto_claim_completion.set(True)
             callback(result)
@@ -616,7 +643,7 @@ class UITests(unittest.TestCase):
         panel.client = Mock()
         panel.client.review.return_value = {'advice': advice(), 'model': 'deepseek-reasoner', 'usage': {}}
         panel.consent.set(True)
-        def changed(job, callback, status):
+        def changed(job, callback, status, **_kwargs):
             result = job()
             panel.evidence.insert('1.0', 'changed')
             callback(result)

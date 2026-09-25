@@ -10,6 +10,7 @@ node_modules/
 *.db
 *.sqlite*
 *.log
+/log.txt
 *.zip
 *.bundle
 .env

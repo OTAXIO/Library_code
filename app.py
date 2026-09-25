@@ -15,6 +15,7 @@ from approval import auto_complete_claim, complete_claim, verify_claim_result
 from model_review import KeyStore, ModelClient
 from model_panel import ModelPanel
 from automation_panel import AutomationPanel
+from operation_log import OperationLog
 
 from core import Journal, SafetyStop, fixed_roster_path, guide, read_roster
 from remarks import PRESETS, append_remark
@@ -26,9 +27,10 @@ GREEN = "#d9f2df"
 
 
 class App:
-    def __init__(self, root, journal=None, auto_load=True, bridge=None, model_client=None):
+    def __init__(self, root, journal=None, auto_load=True, bridge=None, model_client=None, operation_log=None):
         self.root = root
         self.journal = journal or Journal(BASE / "runtime" / "progress.sqlite3")
+        self.operation_log = operation_log or OperationLog(BASE / "log.txt")
         self.roster = None
         self.records = []
         self.by_id = {}
@@ -233,17 +235,26 @@ class App:
         self.model_panel.set_busy(busy)
         self.refresh_approval()
 
-    def run(self, job, callback, status):
+    def run(self, job, callback, status, log_action=None):
         if self.busy:
             return
+        action = log_action or status.rstrip("…")
+        sa_id = self.current.sa_id if self.current else ""
         self.set_busy(True)
         self.status.set(status)
         def worker():
             try:
-                self.events.put((True, callback, job()))
+                self.events.put((True, callback, job(), action, sa_id))
             except Exception as exc:
-                self.events.put((False, callback, exc))
+                self.events.put((False, callback, exc, action, sa_id))
         threading.Thread(target=worker, daemon=True).start()
+
+    def note_operation(self, action, result="已执行", sa_id=None):
+        try:
+            self.operation_log.record(action, result,
+                                      self.current.sa_id if sa_id is None and self.current else sa_id or "")
+        except Exception:
+            self.status.set("log.txt 未能保存本次操作；请检查文件权限和格式。")
 
     def pump(self):
         self.connection.set("浏览器已连接" if self.bridge and self.bridge.online else "连接浏览器")
@@ -254,7 +265,7 @@ class App:
             pass
         try:
             while True:
-                success, callback, value = self.events.get_nowait()
+                success, callback, value, action, sa_id = self.events.get_nowait()
                 self.set_busy(False)
                 try:
                     if not success:
@@ -265,6 +276,9 @@ class App:
                     self.reviewed.set(False)
                     self.status.set("已暂停，请按提示处理；不自动重试。")
                     messagebox.showwarning("等待人工处理", str(exc), parent=self.root)
+                    self.note_operation(action, "已暂停", sa_id)
+                else:
+                    self.note_operation(action, sa_id=sa_id)
         except queue.Empty:
             pass
         self.pump_id = self.root.after(120, self.pump)
@@ -319,7 +333,8 @@ class App:
         self.clear_selection()
         self.pending_count.set("未完成 —")
         self.done_count.set("已完成 —")
-        self.run(lambda: read_roster(fixed_roster_path(BASE)), self.loaded, "读取 list.xlsx…")
+        self.run(lambda: read_roster(fixed_roster_path(BASE)), self.loaded, "读取 list.xlsx…",
+                 log_action="重读名单")
 
     def loaded(self, roster):
         self.roster = roster
@@ -353,6 +368,7 @@ class App:
         if self.roster:
             self.populate()
         self.status.set("已完成记录可查看和定位网页，不可重复批准。" if self.task_view.get() == "done" else "选择待办进行处理。")
+        self.note_operation("切换任务列表：" + ("已完成" if self.task_view.get() == "done" else "未完成"))
 
     def select_owner(self, _event=None):
         if self.busy or not self.roster:
@@ -360,6 +376,7 @@ class App:
         self.clear_selection()
         self.populate()
         self.status.set("选择记录后可定位网页。" if self.records else "当前分类没有记录。")
+        self.note_operation("选择负责人：" + self.owner.get(), sa_id="")
 
     def select_record(self, _event=None):
         if self.busy or not self.tree.selection():
@@ -373,6 +390,7 @@ class App:
         self.current_id.set(f"ID：{record.sa_id}")
         self.show_text(f"{record.title}\n\n工号 {record.staff_id or '—'}    匹配 {record.matches}\n{record.reason or '未提供差异原因'}")
         self.status.set("已完成记录，仅供查看。" if record.done else "可定位网页；处理完成后由你批准。")
+        self.note_operation("选择记录", sa_id=record.sa_id)
 
     def pair(self):
         if self.busy:
@@ -381,9 +399,11 @@ class App:
             if self.bridge is None:
                 self.bridge = Bridge()
         except OSError as exc:
+            self.note_operation("打开浏览器配对窗口", "已暂停")
             messagebox.showwarning("连接服务未启动", f"请关闭旧助手后重试。\n{exc}", parent=self.root)
             return
         popup = tk.Toplevel(self.root)
+        self.note_operation("打开浏览器配对窗口")
         popup.title("连接浏览器")
         popup.transient(self.root)
         popup.attributes("-topmost", True)
@@ -402,6 +422,7 @@ class App:
                 token.set(self.bridge.token)
                 self.clear_browser_state()
                 self.reviewed.set(False)
+                self.note_operation("更新浏览器配对码")
             except SafetyStop as exc:
                 messagebox.showwarning("等待当前操作结束", str(exc), parent=popup)
         ttk.Button(frame, text="更换标签页 / 新配对码", command=reset).pack(anchor="w", pady=8)
@@ -429,6 +450,8 @@ class App:
             self.clear_browser_state()
             self.reviewed.set(False)
         except Exception as exc:
+            self.note_operation({"search": "定位网页", "open_metadata": "打开网页编辑",
+                                 "open_claim": "打开网页认领"}.get(action, "打开网页"), "已暂停")
             messagebox.showwarning("暂未定位", str(exc), parent=self.root)
             return
         def opened(result):
@@ -444,7 +467,8 @@ class App:
                     self.sa_number.set("未识别唯一括号编号")
             self.status.set("已定位对应详情，请在浏览器核验。" if action == "search" else "已打开窗口，请手动修改并保存。")
             self.refresh_approval()
-        self.run(lambda: self.bridge.call(action, payload), opened, "正在定位当前记录，请勿同时操作该网页…")
+        self.run(lambda: self.bridge.call(action, payload), opened, "正在定位当前记录，请勿同时操作该网页…",
+                 log_action={"search": "定位网页", "open_metadata": "打开网页编辑", "open_claim": "打开网页认领"}[action])
 
     def next_record(self):
         if self.busy or not self.records:
@@ -463,6 +487,7 @@ class App:
         self.root.clipboard_clear()
         self.root.clipboard_append(value)
         self.status.set(status)
+        self.note_operation(status)
 
     def copy_id(self):
         if self.current:
@@ -477,6 +502,7 @@ class App:
             _, identifier = sa_claim_source(self.comparison)
             self.copy(identifier, "SA 括号编号已复制，前导 0 已保留。")
         except SafetyStop as exc:
+            self.note_operation("复制 SA 编号", "已暂停")
             messagebox.showwarning("暂未复制", str(exc), parent=self.root)
 
     def claim_payload(self):
@@ -500,6 +526,7 @@ class App:
             self.clear_claim_preview()
             self.reviewed.set(False)
         except SafetyStop as exc:
+            self.note_operation("查找认领人员", "已暂停")
             messagebox.showwarning("暂未查找", str(exc), parent=self.root)
             return
         def ready(result):
@@ -518,7 +545,8 @@ class App:
                 self.claim_author_box.current(choices[0])
             self.refresh_approval()
             self.status.set("已找到唯一人员，尚未认领。请核对并选择对应作者。")
-        self.run(lambda: self.bridge.call("prepare_claim", payload), ready, "正在按 SA 编号查找人员，请勿操作网页…")
+        self.run(lambda: self.bridge.call("prepare_claim", payload), ready, "正在按 SA 编号查找人员，请勿操作网页…",
+                 log_action="查找认领人员")
 
     def submit_claim(self):
         if self.busy:
@@ -552,6 +580,7 @@ class App:
             self.clear_browser_state()
             self.reviewed.set(False)
         except Exception as exc:
+            self.note_operation("提交作者认领", "已暂停")
             messagebox.showwarning("暂未认领", str(exc), parent=self.root)
             return
         def claimed(result):
@@ -573,8 +602,10 @@ class App:
                     except Exception as exc:
                         raise SafetyStop("认领已成功，但自动批注/结案未全部完成。不要重复认领；重新定位核验后台。\n" + str(exc)) from exc
                 self.run(finish, lambda value: self.claim_completion_saved(record, value, "automatic_claim_completion"),
-                         "认领已核验，正在自动保存批注、回读状态并同步 Excel…")
-        self.run(lambda: bridge.call("submit_claim", payload), claimed, "正在复核并提交单条认领，请勿操作网页…")
+                         "认领已核验，正在自动保存批注、回读状态并同步 Excel…",
+                         log_action="自动批注结案")
+        self.run(lambda: bridge.call("submit_claim", payload), claimed, "正在复核并提交单条认领，请勿操作网页…",
+                 log_action="提交作者认领")
 
     def copy_note(self):
         self.copy(self.note.get("1.0", "end").strip(), "备注已复制，请在网页手动粘贴并保存。")
@@ -587,6 +618,7 @@ class App:
         self.note.insert("1.0", updated)
         self.reviewed.set(False)
         self.status.set("模板仅辅助填写，请人工确认适用条件。")
+        self.note_operation("选择备注模板：" + value)
 
     def note_changed(self, _event=None):
         if self.note.edit_modified():
@@ -611,6 +643,7 @@ class App:
                 return
             self.journal.save(record, "人工批准待回写", note, {"row": record.row, "previous": record.remark})
         except Exception as exc:
+            self.note_operation("人工批准完成", "已暂停")
             messagebox.showwarning("暂未完成", str(exc), parent=self.root)
             return
         def saved(result):
@@ -626,7 +659,8 @@ class App:
             except Exception as exc:
                 self.status.set("名单已写为 1，但日志保存失败。请检查磁盘，勿重复确认。")
                 messagebox.showwarning("名单已完成，日志异常", str(exc), parent=self.root)
-        self.run(lambda: mark_complete(roster, record), saved, "正在备份并回写完成标记…")
+        self.run(lambda: mark_complete(roster, record), saved, "正在备份并回写完成标记…",
+                 log_action="人工批准完成")
 
     def confirm_claim_done(self):
         """Explicitly reviewed, single-record backend closure plus local sync."""
@@ -653,12 +687,14 @@ class App:
             self.journal.save(record, "认领结案待核验", "已认领", {"mode": "reviewed_claim_completion"})
             self.reviewed.set(False)
         except Exception as exc:
+            self.note_operation("网页认领结案", "已暂停")
             messagebox.showwarning("暂未结案", str(exc), parent=self.root)
             return
 
         self.run(lambda: complete_claim(roster, record, self.bridge, snapshot, comparison, reviewed=True),
                  lambda result: self.claim_completion_saved(record, result, "reviewed_claim_completion"),
-                 "正在核验认领、保存网页状态并同步名单；不自动重试…")
+                 "正在核验认领、保存网页状态并同步名单；不自动重试…",
+                 log_action="网页认领结案")
 
     def claim_completion_saved(self, record, result, mode):
         completion = result.completion

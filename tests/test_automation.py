@@ -139,6 +139,18 @@ class FlowTests(unittest.TestCase):
         self.assertNotIn("complete", self.calls)
         self.assertNotIn("submit_claim", self.calls)
 
+    def test_each_wos_call_reports_one_operation_even_when_paused(self):
+        events = []
+        self.flow.audit = lambda action, outcome, sa_id: events.append((action, outcome, sa_id))
+        self.flow.prepare(record())
+        self.assertEqual(events[:2], [("wos_search", "已执行", "demo-001"),
+                                      ("wos_export", "已执行", "demo-001")])
+        self.fail = "import_upload"
+        with self.assertRaises(SafetyStop):
+            self.flow.proceed(record())
+        self.assertEqual(events[-1], ("import_upload", "已暂停", "demo-001"))
+        self.assertEqual(sum(action == "import_upload" for action, _, _ in events), 1)
+
     def test_title_only_pauses_before_any_upload(self):
         rec = record(doi="")
         original = self.bridge.call.side_effect

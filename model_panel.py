@@ -176,7 +176,8 @@ class ModelPanel:
                 return
             self.info.set("连接成功，可用：" + "、".join(models) if models else "连接成功，但未返回已配置的调用名，请核对授权。")
             self.model_box["values"] = models or MODELS
-        self.app.run(self.client.models, ready, "测试交大模型连接（不发送论文或名单）…")
+        self.app.run(self.client.models, ready, "测试交大模型连接（不发送论文或名单）…",
+                     log_action="测试模型连接")
 
     def review(self):
         if self.app.busy:
@@ -210,7 +211,8 @@ class ModelPanel:
             self.info.set("意见仅供参考。网页有修改后请重新定位并重新核对。")
             self.app.status.set("模型意见已生成，尚未批准或修改任何数据。")
             self.refresh()
-        self.app.run(lambda: self.client.review(context, model), ready, "模型正在辅助核对；不提交网页、不改 Excel…")
+        self.app.run(lambda: self.client.review(context, model), ready, "模型正在辅助核对；不提交网页、不改 Excel…",
+                     log_action="模型辅助核对")
 
     def cancel(self):
         if self.running:
