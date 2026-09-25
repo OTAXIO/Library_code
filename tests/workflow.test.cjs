@@ -13,7 +13,7 @@ const cmd=(action,more={})=>({action,sa_id:'demo-001',instructions:'SA补充-dem
 (async()=>{
   const browser=await chromium.launch({headless:true,...(fs.existsSync(edge)?{executablePath:edge}:{})});
   const context=await browser.newContext();
-  await context.route('**/*',r=>r.fulfill({status:200,contentType:'text/html',body:new URL(r.request().url()).hostname==='www.webofscience.com'?wosFixture:fixture}));
+  await context.route('**/*',r=>r.fulfill({status:200,contentType:'text/html',body:new URL(r.request().url()).hostname==='admin.ir.lib.sjtu.edu.cn'?fixture:wosFixture}));
   const page=await context.newPage();
   const reset=async()=>{await page.goto('http://admin.ir.lib.sjtu.edu.cn/#/collectItem/batchManage');await page.reload();};
   const execute=c=>page.evaluate(runImportCommand,c);
@@ -84,6 +84,12 @@ const cmd=(action,more={})=>({action,sa_id:'demo-001',instructions:'SA补充-dem
   test('WOS author search and foreign hosts are rejected',async()=>{
     await page.goto('https://www.webofscience.com/wos/author/author-search');
     assert.equal((await page.evaluate(runWOSCommand,{...cmd('wos_search'),title:'Synthetic paper'})).ok,false);
+    for(const origin of ['http://webofscience.clarivate.cn','https://webofscience.clarivate.cn.example.invalid','https://www.webofscience.com.example.invalid']) {
+      await page.goto(origin+'/wos/woscc/basic-search');
+      assert.equal((await page.evaluate(runWOSCommand,{...cmd('wos_search'),title:'Synthetic paper'})).ok,false);
+      assert.equal(await page.evaluate(()=>searches),0);
+      assert.equal((await page.evaluate(inspectWorkPage)).error,'非工作网站');
+    }
   });
   test('expired commands are rejected before scanning',async()=>{
     assert.equal((await execute(cmd('import_scan',{expires:Date.now()-1}))).ok,false);
@@ -144,6 +150,21 @@ const cmd=(action,more={})=>({action,sa_id:'demo-001',instructions:'SA补充-dem
       const p=document.createElement('p');p.textContent='Oops, something went wrong!';document.body.appendChild(p);});
     const d=await page.evaluate(inspectWorkPage);assert.equal(d.wos_error,true);
     assert.ok(!JSON.stringify(d).includes('DO_NOT_DISCLOSE_QUERY'));assert.equal(await page.evaluate(()=>searches),0);
+  });
+  test('Clarivate CN supports diagnosis, title search, and one Full Record export on the same origin',async()=>{
+    const origin='https://webofscience.clarivate.cn';
+    await page.goto(origin+'/wos/woscc/basic-search');
+    const diagnostic=await page.evaluate(inspectWorkPage);
+    assert.equal(diagnostic.site,'webofscience.clarivate.cn');assert.equal(diagnostic.controls.length,1);
+    const base={...cmd('wos_search'),title:'Synthetic paper'};
+    const found=await page.evaluate(runWOSCommand,base);assert.equal(found.ok,true,JSON.stringify(found));
+    assert.ok(found.data.record_url.startsWith(origin+'/wos/woscc/full-record/'));
+    const prepared=await page.evaluate(runWOSCommand,{...base,action:'wos_prepare_export'});
+    assert.equal(prepared.ok,true,JSON.stringify(prepared));assert.equal(await page.evaluate(()=>document.querySelector('select').value),'Full Record');
+    const downloaded=page.waitForEvent('download');
+    assert.equal((await page.evaluate(runWOSCommand,{...base,action:'wos_download'})).ok,true);
+    await downloaded;assert.equal(await page.evaluate(()=>exportsMade),1);
+    assert.equal((await page.evaluate(runWOSCommand,{...base,action:'wos_download'})).ok,false);
   });
   try{for(const [name,fn] of tests){await reset();await fn();console.log('PASS '+name);}console.log(`Workflow adapters: ${tests.length} offline cases passed.`);}
   finally{await context.close();await browser.close();}

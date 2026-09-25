@@ -2,7 +2,9 @@
  * full HTML, or arbitrary URLs, and never transmits diagnostics to a server. */
 function inspectWorkPage() {
   const u=new URL(location.href);
-  if(!["www.webofscience.com","admin.ir.lib.sjtu.edu.cn"].includes(u.hostname))return {error:"非工作网站"};
+  const wos=["https://www.webofscience.com","https://webofscience.clarivate.cn"].includes(u.origin) && u.pathname.startsWith("/wos/");
+  const admin=["http:","https:"].includes(u.protocol) && u.hostname==="admin.ir.lib.sjtu.edu.cn";
+  if((!wos && !admin) || u.username || u.password)return {error:"非工作网站"};
   const visible=el=>el.getClientRects().length>0&&getComputedStyle(el).visibility!=="hidden";
   const text=String(document.body?.innerText||"");
   const normal=s=>String(s||"").replace(/\s+/g," ").trim().slice(0,120);

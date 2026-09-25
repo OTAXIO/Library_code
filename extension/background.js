@@ -39,7 +39,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       const tab=await chrome.tabs.get(message.tabId);
       const u=new URL(tab.url);
-      if (!(u.origin==="https://www.webofscience.com" || (["http:","https:"].includes(u.protocol)&&u.hostname==="admin.ir.lib.sjtu.edu.cn")))
+      if (!(isWOSPage(tab.url) || (["http:","https:"].includes(u.protocol)&&u.hostname==="admin.ir.lib.sjtu.edu.cn")))
         throw new Error("请切换到 WOS 或机构知识库后台，再检查当前工作页");
       const results=await chrome.scripting.executeScript({target:{tabId:tab.id},func:inspectWorkPage});
       const page=results[0]?.result;
@@ -66,8 +66,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!pair.token) throw new Error("请先连接 SA 比对页");
       if (!["wosTabId", "importTabId"].includes(message.role)) throw new Error("未知工作页类型");
       const tab = await chrome.tabs.get(message.tabId);
-      if (tab.id === pair.tabId || !validRolePage(tab.url, message.role))
-        throw new Error("请在独立标签页打开对应工作页面，再点击绑定");
+      const bindingError=workflowBindingError(tab.url,message.role,tab.id===pair.tabId);
+      if(bindingError)throw new Error(bindingError);
       await chrome.storage.session.set({[message.role]: tab.id});
       return {ok: true};
     }

@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "SA 比对半自动助手",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "单条 SA 比对、WOS 完整记录导出与导入；独立绑定工作页，未知情况暂停。",
   "permissions": ["storage", "scripting", "activeTab", "downloads"],
   "host_permissions": [
     "http://127.0.0.1:8765/*",
     "http://admin.ir.lib.sjtu.edu.cn/*",
     "https://admin.ir.lib.sjtu.edu.cn/*",
-    "https://www.webofscience.com/*"
+    "https://www.webofscience.com/*",
+    "https://webofscience.clarivate.cn/*"
   ],
   "background": {"service_worker": "background.js"},
   "action": {"default_popup": "popup.html", "default_title": "连接 SA 比对助手"}

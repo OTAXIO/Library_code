@@ -9,6 +9,8 @@ const root=path.resolve(__dirname,'..');
 const pythonBundle=path.join(os.homedir(),'.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe');
 const python=process.env.SA_TEST_PYTHON || (fs.existsSync(pythonBundle)?pythonBundle:'python');
 const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const wosOrigin=process.env.SA_TEST_WOS_ORIGIN || 'https://www.webofscience.com';
+assert.ok(['https://www.webofscience.com','https://webofscience.clarivate.cn'].includes(wosOrigin));
 (async()=>{
   const backend=spawn(python,['-u','-m','tests.extension_backend'],{cwd:root,windowsHide:true,stdio:['pipe','pipe','pipe']});
   let stderr='';backend.stderr.on('data',x=>stderr+=x);
@@ -114,7 +116,9 @@ const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
     const wosPage=await context.newPage();
     const wosFixture=fs.readFileSync(path.join(__dirname,'fixtures/wos.html'),'utf8');
     await wosPage.route('**/*',r=>r.fulfill({status:200,contentType:'text/html',body:wosFixture}));
-    await wosPage.goto('https://www.webofscience.com/wos/woscc/basic-search');
+    // Start outside document search to verify that navigation preserves the
+    // selected regional host instead of silently switching CN back to .com.
+    await wosPage.goto(wosOrigin+'/wos/author/author-search');
     // Playwright normally stores downloads under extensionless GUIDs. Give this
     // isolated test browser a normal dedicated download directory; production
     // extension behavior remains strict about .txt and is not relaxed for tests.
@@ -127,16 +131,26 @@ const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
     },{role,url});
     assert.equal((await bind('importTabId',importPage.url())).ok,true);
     assert.equal((await bind('wosTabId',wosPage.url())).ok,true);
-    const diagnostic=await popup.evaluate(async()=>{
-      const tabs=await chrome.tabs.query({url:'https://www.webofscience.com/*'});
+    const before=await popup.evaluate(()=>chrome.storage.session.get(['tabId','wosTabId','importTabId']));
+    assert.match((await bind('wosTabId',site.url())).error,/SA 比对.*独立标签页/);
+    assert.match((await bind('importTabId',wosPage.url())).error,/不是后台/);
+    assert.match((await bind('wosTabId',importPage.url())).error,/网址不受支持/);
+    await importPage.evaluate(()=>location.hash='#/item/entryManage');
+    assert.match((await bind('importTabId',importPage.url())).error,/普通.*数据管理.*数据导入与批次管理/);
+    assert.deepEqual(await popup.evaluate(()=>chrome.storage.session.get(['tabId','wosTabId','importTabId'])),before);
+    await importPage.evaluate(()=>location.hash='#/collectItem/batchManage');
+    console.log('PASS distinct binding errors preserve existing valid bindings');
+    const diagnostic=await popup.evaluate(async origin=>{
+      const tabs=await chrome.tabs.query({url:origin+'/*'});
       return chrome.runtime.sendMessage({type:'inspect_workflow',tabId:tabs[0].id});
-    });
-    assert.equal(diagnostic.ok,true);assert.equal(diagnostic.data.bindings.wos,true);assert.equal(diagnostic.data.version,'0.3.1');
+    },wosOrigin);
+    assert.equal(diagnostic.ok,true);assert.equal(diagnostic.data.bindings.wos,true);assert.equal(diagnostic.data.version,'0.3.2');
+    assert.equal(diagnostic.data.site,new URL(wosOrigin).hostname);
     console.log('PASS popup read-only diagnostics report role and version without searching');
     const muted=await popup.evaluate(()=>chrome.runtime.sendMessage({type:'toggle_wos_mute'}));assert.equal(muted.ok,true);
-    const muteState=await popup.evaluate(async()=>{
-      const tabs=await chrome.tabs.query({url:'https://www.webofscience.com/*'});return tabs[0].mutedInfo.muted;
-    });assert.equal(muteState,true);
+    const muteState=await popup.evaluate(async origin=>{
+      const tabs=await chrome.tabs.query({url:origin+'/*'});return tabs[0].mutedInfo.muted;
+    },wosOrigin);assert.equal(muteState,true);
     assert.equal((await popup.evaluate(()=>chrome.runtime.sendMessage({type:'toggle_wos_mute'}))).ok,true);
     console.log('PASS user-requested mute toggles only the explicitly bound WOS tab');
     const newImportPage=context.waitForEvent('page');
@@ -156,10 +170,12 @@ const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
     console.log('PASS extension independently hashes file before any upload');
     const wosQuery={sa_id:'demo-001',title:'Synthetic paper',doi:'10.1234/test',wos:'WOS:000123456789012'};
     const searched=await invoke('wos_search',wosQuery);assert.equal(searched.ok,true,JSON.stringify(searched));
+    assert.equal(new URL(wosPage.url()).origin,wosOrigin);
     const exported=await invoke('wos_export',wosQuery);
     if(!exported.ok)console.log('Synthetic download diagnostics',await worker.evaluate(async()=>
       (await chrome.downloads.search({})).map(x=>({id:x.id,state:x.state,size:x.fileSize,bytes:x.bytesReceived,filename:x.filename,referrer:x.referrer,url:x.url,error:x.error}))));
     assert.equal(exported.ok,true,JSON.stringify(exported));
+    assert.equal(new URL(exported.data.record_url).origin,wosOrigin);
     assert.equal(exported.data.sa_id,'demo-001');assert.match(exported.data.path,/\.txt$/i);
     console.log('PASS WOS search and correlated TXT download cross authenticated bridge');
     const raw=fs.readFileSync(exported.data.path);
@@ -178,7 +194,7 @@ const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
     const changedTab=await invoke('import_scan',{sa_id:'demo-001',instructions:'SA补充-demo-001',candidate:c});
     assert.equal(changedTab.ok,false);
     console.log('PASS changed workflow tab stops before executing commands');
-    console.log('Extension integration: 17 cases passed. Only synthetic data; no production requests.');
+    console.log(`Extension integration: 18 cases passed (${wosOrigin}). Only synthetic data; no production requests.`);
   } finally {
     if(context)await context.close();
     if(stagedExtension && path.dirname(path.resolve(stagedExtension))===path.resolve(os.tmpdir()) &&

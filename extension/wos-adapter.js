@@ -17,7 +17,10 @@ async function runWOSCommand(command) {
   };
   const one = (items,label)=>{if(items.length!==1)fail(label+"未唯一识别，请人工调整网页后继续");return items[0];};
   const check=()=>{
-    if(location.hostname!=="www.webofscience.com" || location.protocol!=="https:")fail("请在 WOS 核心合集的文献检索页登录，不能使用作者检索");
+    // This function is serialized into the page; keep its exact origins aligned
+    // with workflow-background.js and manifest.json (covered by browser tests).
+    if(!["https://www.webofscience.com","https://webofscience.clarivate.cn"].includes(location.origin) || new URL(location.href).username || new URL(location.href).password)
+      fail("WOS 网址不受支持，请在 www.webofscience.com 或 webofscience.clarivate.cn 的 HTTPS 文献检索页操作");
     if(!Number.isFinite(command.expires) || Date.now()>=command.expires-2500)fail("WOS 操作超时，请人工查看网页");
     if(/Oops,?\s*something went wrong!?/i.test(document.body?.innerText||""))
       fail("WOS 网站自身报错：Oops, something went wrong! 这不是导入管理页的问题。请先点击 WOS 网页顶部 Search 或导航菜单重新进入检索；若仍报错，请人工检查登录、校园网/机构访问。网页恢复前不继续检索或导入");
