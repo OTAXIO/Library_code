@@ -23,6 +23,32 @@ MAX_PROMPT_BYTES = 18000
 MAX_OUTPUT_TOKENS = 8192
 MAX_RESPONSE_BYTES = 512000
 REQUEST_TIMEOUT = 150
+
+# Reasoning models spend most of the output budget on hidden thinking and answer far
+# more slowly than chat models, so batch classification needs a larger output budget
+# and a longer socket timeout for them. Interactive single-record review keeps the
+# conservative 8192/150 defaults above regardless of model.
+MODEL_LIMITS = {
+    "deepseek-reasoner": {"max_output_tokens": 16384, "request_timeout": 300, "batch_size": 2},
+    "deepseek-chat": {"max_output_tokens": 8192, "request_timeout": 150, "batch_size": 5},
+    "qwen": {"max_output_tokens": 8192, "request_timeout": 180, "batch_size": 5},
+    "minimax": {"max_output_tokens": 8192, "request_timeout": 180, "batch_size": 5},
+}
+DEFAULT_LIMITS = {"max_output_tokens": MAX_OUTPUT_TOKENS, "request_timeout": REQUEST_TIMEOUT, "batch_size": 5}
+
+
+def limits(model):
+    return MODEL_LIMITS.get(model, DEFAULT_LIMITS)
+
+
+class ModelRequestError(SafetyStop):
+    """Structured failure for opt-in batch retry; interactive review never retries."""
+    def __init__(self, message, retryable=False, retry_after=0):
+        super().__init__(message)
+        self.retryable = retryable
+        self.retry_after = retry_after
+
+
 VERDICTS = ("资料一致", "差异待处理", "证据不足")
 REVIEW_FIELDS = frozenset({"题名", "标题", "DOI", "WOS记录号", "WOS_ID", "作者信息", "认领状态",
     "通讯作者", "第一作者", "第一单位", "作者单位", "单位信息", "出版年", "发表年", "发表年份",
@@ -230,6 +256,7 @@ class ModelClient:
         self.key_store = key_store
         self.connection_factory = connection_factory or http.client.HTTPSConnection
         self.clock = clock
+        self.timeout = REQUEST_TIMEOUT
         self._request_lock = threading.Lock()
         self._cancel = threading.Event()
         self._connection = None
@@ -261,14 +288,14 @@ class ModelClient:
                 raise SafetyStop(f"请求频率保护：请约 {int(until - now) + 1} 秒后手动再试。")
             key = self.key_store.load()
             body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            conn = self.connection_factory(API_HOST, timeout=REQUEST_TIMEOUT)
+            conn = self.connection_factory(API_HOST, timeout=self.timeout)
             self._connection = conn
             def timeout_request():
                 expired.set()
                 if self._connection is conn and conn.sock:
                     with suppress(OSError):
                         conn.sock.shutdown(socket.SHUT_RDWR)
-            watchdog = threading.Timer(REQUEST_TIMEOUT, timeout_request)
+            watchdog = threading.Timer(self.timeout, timeout_request)
             watchdog.daemon = True
             watchdog.start()
             self._starts.append(now)
@@ -288,7 +315,9 @@ class ModelClient:
                 message = {401: "密钥无效或已过期，请重新配置。", 403: "访问被拒绝，请检查校内网络/VPN及模型授权。",
                            429: "服务端限流或额度不足，请稍后手动再试。"}.get(response.status, "请求失败，请检查模型可用性和校园网络。")
                 # Never echo response bodies: gateways may reflect credentials or prompts.
-                raise SafetyStop(f"模型服务 HTTP {response.status}：{message} 不自动重试。")
+                raise ModelRequestError(f"模型服务 HTTP {response.status}：{message} 本次请求结束。",
+                                        retryable=response.status in (429, 500, 502, 503, 504),
+                                        retry_after=seconds if response.status == 429 else 10)
             raw = response.read(MAX_RESPONSE_BYTES + 1)
             if expired.is_set():
                 raise SafetyStop("模型请求超过等待时限；本次可能已计入用量，不自动重试。")
@@ -305,7 +334,8 @@ class ModelClient:
         except Exception:
             if self._cancel.is_set():
                 raise SafetyStop("已停止等待模型。本次可能已计费，不自动重试。") from None
-            raise SafetyStop("模型连接失败、超时或响应损坏。请检查校内网络/VPN；未自动重试。") from None
+            raise ModelRequestError("模型连接失败、超时或响应损坏。请检查校内网络/VPN；本次请求结束，可能已计费用。",
+                                    retryable=True, retry_after=10) from None
         finally:
             if watchdog:
                 watchdog.cancel()

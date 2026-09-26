@@ -5,6 +5,7 @@ runtime/
 logs/
 node_modules/
 *.xlsx
+!templates/*.xlsx
 *.xls
 *.pptx
 *.db

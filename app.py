@@ -27,8 +27,12 @@ GREEN = "#d9f2df"
 
 
 class App:
-    def __init__(self, root, journal=None, auto_load=True, bridge=None, model_client=None, operation_log=None):
+    def __init__(self, root, journal=None, auto_load=True, bridge=None, model_client=None, operation_log=None, unified=False, initial_tab=None):
         self.root = root
+        self.unified = unified
+        self.classifier = None
+        self.submission_panel = None
+        self.closing = False
         self.journal = journal or Journal(BASE / "runtime" / "progress.sqlite3")
         self.operation_log = operation_log or OperationLog(BASE / "log.txt")
         self.roster = None
@@ -59,10 +63,141 @@ class App:
         self.claim_author = tk.StringVar()
         self.auto_claim_completion = tk.BooleanVar(value=True)
         self.build()
+        if unified:
+            self.build_classification()
+            if initial_tab == 'classification':
+                self.tabs.select(self.classification_page)
         self.reviewed.trace_add("write", lambda *_: self.refresh_approval())
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.pump_id = self.root.after(120, self.pump)
         self.load_id = self.root.after(200, self.reload_roster) if auto_load else None
+
+    def build_classification(self):
+        from classify_app import ClassifyApp
+        self.root.title('机构知识库工作台 · 处理 / 认领 / AI 分类')
+        self.root.attributes('-topmost',False)
+        height=min(900,self.root.winfo_screenheight()-80)
+        width=min(1180,self.root.winfo_screenwidth()-80)
+        self.root.geometry(f'{width}x{height}+30+25')
+        self.root.minsize(960,740)
+        self.classification_page=ttk.Frame(self.tabs)
+        self.tabs.add(self.classification_page,text='批量分类 / 导入渠道')
+        self.tabs.tab(self.automation_page,text='自动化 / 认领')
+        self.classifier=ClassifyApp(self.root,parent=self.classification_page,
+                                   on_busy=self.set_busy,on_review=self.review_classified,
+                                   on_export=self.export_wos_metadata)
+        from submission_panel import SubmissionPanel
+        self.submission_page=ttk.Frame(self.tabs,padding=20)
+        self.tabs.add(self.submission_page,text='零匹配提交准备')
+        self.submission_panel=SubmissionPanel(self,self.submission_page)
+        self.tabs.bind('<<NotebookTabChanged>>',self.refresh_workspace)
+
+    def refresh_workspace(self,_event=None):
+        if self.classifier and str(self.tabs.select())==str(self.classification_page):
+            self.classifier.key_status.set('密钥已配置' if self.classifier.store.configured() else '请配置密钥')
+            if not self.busy:
+                self.classifier.reload()
+                self.classifier.load_results()
+
+    def review_classified(self,item):
+        if self.busy:
+            return
+        if not self.roster:
+            messagebox.showinfo('请先读取名单','请在人工处理页读取 list.xlsx。',parent=self.root)
+            self.tabs.select(self.manual_page)
+            return
+        try:
+            self.roster.assert_unchanged()
+        except SafetyStop as exc:
+            messagebox.showwarning('请重读名单',str(exc),parent=self.root)
+            return
+        matches=[r for r in self.roster.records if r.row in item['rows'] and r.title.strip()==item['title'] and r.doi.strip()==item.get('doi','')]
+        if not matches:
+            messagebox.showwarning('记录不匹配','分类结果与当前名单不一致，请重新读取。',parent=self.root)
+            return
+        def select(record):
+            self.owner.set(record.owner)
+            self.task_view.set('done' if record.done else 'pending')
+            self.select_owner()
+            self.tree.selection_set(record.sa_id)
+            self.tree.see(record.sa_id)
+            self.select_record()
+            self.tabs.select(self.manual_page)
+        if len(matches)==1:
+            select(matches[0])
+            return
+        popup=tk.Toplevel(self.root)
+        popup.title('选择要处理的原表记录')
+        popup.transient(self.root)
+        frame=ttk.Frame(popup,padding=18)
+        frame.pack(fill='both',expand=True)
+        ttk.Label(frame,text='同一论文对应多条名单，请选择具体记录。').pack(anchor='w',pady=(0,10))
+        choice=ttk.Combobox(frame,state='readonly',width=52,values=[f'第 {r.row} 行 · {r.owner} · {r.sa_id}' for r in matches])
+        choice.pack(fill='x')
+        choice.current(0)
+        def confirm():
+            if choice.current()<0:
+                return
+            record=matches[choice.current()]
+            popup.destroy()
+            select(record)
+        ttk.Button(frame,text='打开所选记录',command=confirm).pack(anchor='e',pady=(12,0))
+        popup.grab_set()
+
+    def export_wos_metadata(self):
+        # Batch download only. Upload, import and push write to the production library
+        # and stay single-record with explicit confirmation in the automation page.
+        if self.busy or not self.classifier:
+            return
+        if not self.roster:
+            messagebox.showinfo('请先读取名单','请在人工处理页读取 list.xlsx。',parent=self.root)
+            self.tabs.select(self.manual_page)
+            return
+        if not self.bridge or not self.bridge.online:
+            messagebox.showinfo('需要连接浏览器',
+                '批量导出会操作你在扩展里绑定的 WOS 标签页。\n'
+                '请先在人工处理页点“连接浏览器”，并在扩展中绑定 WOS 工作页，然后再试。',
+                parent=self.root)
+            return
+        from paper_classify import read_papers
+        from wos_batch import default_inbox, export as export_batch, plan
+        try:
+            document=read_papers(BASE/'list.xlsx')
+            classification,papers=plan(document,BASE/'runtime'/'classification')
+        except SafetyStop as exc:
+            messagebox.showwarning('无法开始批量导出',str(exc),parent=self.root)
+            return
+        roster=self.roster
+        bridge=self.bridge
+        store=self.automation_panel.store
+        report=self.automation_panel.progress.put
+        def job():
+            return export_batch(roster,classification,papers,bridge,store,default_inbox(),
+                                stop=self.classifier.stop,unchanged=roster.assert_unchanged,
+                                progress=report)
+        def done(result):
+            detail=''
+            if result.get('unconfirmed'):
+                shown=result['unconfirmed'][:5]
+                detail+=('\n\n身份未获强匹配（未放入待收目录，需人工核验）：\n'
+                         +'\n'.join(f'· 原表第 {v["row"]} 行：{v["title"][:40]}' for v in shown))
+                if len(result['unconfirmed'])>len(shown):
+                    detail+=f'\n…共 {len(result["unconfirmed"])} 条。'
+                detail+='\n请在“自动化 / 认领”页对这些条目逐条检索、核对身份后再导入。'
+            if result['failed']:
+                shown=list(result['failed'].values())[:5]
+                detail+='\n\n失败条目：\n'+'\n'.join(f'· 原表第 {v["row"]} 行：{v["error"]}' for v in shown)
+                if len(result['failed'])>len(shown):
+                    detail+=f'\n…共 {len(result["failed"])} 条，其余见运行日志。'
+            messagebox.showinfo('WOS 元数据导出结束',
+                f'待导出 {result["total"]} 条，成功 {len(result["exported"])} 条，'
+                f'身份待核验 {len(result.get("unconfirmed",[]))} 条，'
+                f'失败 {len(result["failed"])} 条。\n\n'
+                f'成功导出的 TXT 已放入待收目录：\n{result["inbox"]}\n\n'
+                '下一步：在“零匹配提交准备”页点“开始 / 继续准备”，这些文件会被自动采纳；'
+                '上传、导入与推送仍需在“自动化 / 认领”页逐条确认执行。'+detail,parent=self.root)
+        self.classifier.set_exporting(True)
+        self.run(job,done,'正在按分类结果导出 WOS 元数据…',log_action='WOS 批量导出')
 
     def button(self, parent, text, command, **kwargs):
         # Use text-sized buttons; ttk's default nine-character minimum clips the
@@ -233,6 +368,12 @@ class App:
         for tab in self.view_buttons:
             tab.configure(state="disabled" if busy else "normal")
         self.model_panel.set_busy(busy)
+        if self.classifier:
+            self.classifier.set_external_busy(busy)
+        if self.submission_panel:
+            self.submission_panel.set_external_busy(busy)
+        if not busy and self.closing:
+            self.root.after_idle(self.close)
         self.refresh_approval()
 
     def run(self, job, callback, status, log_action=None):
@@ -736,6 +877,17 @@ class App:
         os.startfile(BASE / "README.md")
 
     def close(self):
+        if self.submission_panel and self.submission_panel.busy:
+            self.closing=True
+            self.submission_panel.request_stop()
+            self.tabs.select(self.submission_page)
+            return
+        if self.classifier and self.classifier.busy:
+            self.closing=True
+            self.classifier.request_stop()
+            self.classifier.status.set('正在保存当前批次，完成后关闭工作台。')
+            self.tabs.select(self.classification_page)
+            return
         if self.busy:
             messagebox.showwarning("正在处理", "请等待当前操作结束再关闭。模型请求可先点击“停止等待”。", parent=self.root)
             return
@@ -744,14 +896,18 @@ class App:
                 self.root.after_cancel(timer)
         if self.bridge:
             self.bridge.close()
+        if self.classifier:
+            self.classifier.dispose()
+        if self.submission_panel:
+            self.submission_panel.dispose()
         self.journal.close()
         self.root.destroy()
 
 
-def main():
+def main(initial_tab=None):
     root = tk.Tk()
     try:
-        App(root)
+        App(root,unified=True,initial_tab=initial_tab)
         root.mainloop()
     except Exception as exc:
         messagebox.showerror("助手无法启动", f"{exc}\n请检查名单、依赖及目录权限。", parent=root)
@@ -759,4 +915,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser=argparse.ArgumentParser()
+    parser.add_argument('--tab',choices=['manual','classification'],default='manual')
+    main(initial_tab=parser.parse_args().tab)
