@@ -140,13 +140,15 @@ class PlanTests(unittest.TestCase):
 
 class PreflightTests(unittest.TestCase):
     def test_running_capabilities_are_checked_before_search(self):
-        bridge=Mock(call=Mock(return_value={'extension_version':'0.3.27','wos_download_protocol':1,
+        bridge=Mock(call=Mock(return_value={'extension_version':'0.3.28','wos_download_protocol':1,
                     'result_reader':'shared-diagnostic','read_results_world':'ISOLATED'}))
-        self.assertEqual(preflight(bridge),{'extension_version':'0.3.27'})
+        self.assertEqual(preflight(bridge),{'extension_version':'0.3.28'})
         bridge.call.assert_called_once_with('wos_diagnose',{},timeout=15)
 
     def test_old_or_incompatible_extension_fails_without_a_search(self):
-        results=({}, {'extension_version':'0.3.26','wos_download_protocol':1,
+        results=({}, {'extension_version':'0.3.27','wos_download_protocol':1,
+                      'result_reader':'shared-diagnostic','read_results_world':'ISOLATED'},
+                 {'extension_version':'0.3.26','wos_download_protocol':1,
                       'result_reader':'other','read_results_world':'ISOLATED'},
                  {'extension_version':'0.3.27','wos_download_protocol':True,
                   'result_reader':'shared-diagnostic','read_results_world':'ISOLATED'})

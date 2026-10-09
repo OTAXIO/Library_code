@@ -36,10 +36,11 @@ def save_download_report(result, owner, scope, root):
              f"时间：{now:%Y-%m-%d %H:%M:%S}（北京时间）",
              f"负责人：{_text(owner)}",
              f"浏览器插件：{_text(result.get('extension_version', '未记录'))}",
-             f"范围：{'已跳过论文（备注为 2）' if scope == 'skipped' else '待补论文（不含跳过项）'}",
+             f"范围：{'已跳过论文（是否识别为 2）' if scope == 'skipped' else '待补论文（不含跳过项）'}",
              f"论文总数：{total}；已尝试：{attempted}；尚未执行：{remaining}",
              f"文件已采纳：{len(exported)}；身份待核验：{len(unconfirmed)}",
              f"WOS 无可用记录：{unavailable}；页面/会话问题：{problems}",
+             f"已回写跳过原因及是否识别=2：{result.get('skipped_saved', 0)} 行；未执行项不改状态",
              f"通信不可继续：{'是' if result.get('disconnected') else '否'}；本轮提前停止：{'是' if result.get('stopped') else '否'}",
              f"TXT 目录：{_text(result.get('inbox', '未提供'))}", "```", "",
              "下载文件不等于已入库，也不代表 SA 任务完成。无结果或多个结果不等于论文未发表。", ""]
@@ -64,6 +65,7 @@ def save_download_report(result, owner, scope, root):
     section("WOS 无可用记录", [entry for entry in outcomes if entry.get("per_record")])
     section("页面或会话问题", [entry for entry in outcomes if not entry.get("per_record")])
     for key, label in (("source_error", "数据来源回写未完成"),
+                       ("workflow_error", "跳过状态及原因回写未完成"),
                        ("classification_rebind_error", "分类索引刷新未完成")):
         if result.get(key):
             lines.extend([f"## {label}", "", "```text", _text(result[key]), "```", ""])

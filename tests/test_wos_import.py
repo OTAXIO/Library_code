@@ -398,3 +398,40 @@ class ImportQueueTests(unittest.TestCase):
         self.assertTrue(verified.records[0].done)
         self.assertFalse(verified.records[1].done)
         self.assertEqual(verified.records[2], self.roster.records[2])
+
+    def test_import_failure_records_two_and_resume_does_not_repeat_submission(self):
+        from openpyxl import load_workbook
+        from core import HEADERS, read_roster
+        from tests.test_roster_write import make_roster
+        path = self.root / 'list.xlsx'
+        make_roster(path, flags=(None, None, None))
+        book = load_workbook(path)
+        sheet = book.active
+        columns = {key: 2 + list(HEADERS).index(key) for key in HEADERS}
+        sheet.cell(1, 14, '是否识别')
+        for row, title, identifier in ((2, 'Synthetic paper', '10.1234/test'),
+                                       (3, 'Next paper', '10.1234/next')):
+            for key, value in {'owner': '谭勋策', 'matches': 0, 'item_ids': '', 'reason': '',
+                               'title': title, 'doi': identifier}.items():
+                sheet.cell(row, columns[key], value)
+        book.save(path)
+        book.close()
+        (self.inbox / 'next.txt').write_bytes(sample(TI='Next paper', DI='10.1234/next', UT='WOS:000123456789013'))
+        self.roster = read_roster(path)
+        untouched = self.roster.records[1:]
+        self.bridge = Bridge(self.roster.records)
+        self.bridge.fail = 'import_check'
+        result = self.run_plan()
+        self.assertTrue(result.halted)
+        self.assertEqual(len(result.outcomes), 1)
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertIn('synthetic timeout', result.roster.records[0].remark)
+        self.assertEqual(result.roster.records[1:], untouched)
+        self.assertEqual(self.actions().count('import_submit'), 1)
+        self.roster = result.roster
+        self.bridge.fail = None
+        resumed = self.run_plan(self.plan(scope='skipped'))
+        self.assertEqual(resumed.outcomes[0]['status'], 'pushed')
+        self.assertTrue(resumed.roster.records[0].skipped)
+        self.assertFalse(resumed.roster.records[0].done)
+        self.assertEqual(self.actions().count('import_submit'), 1)

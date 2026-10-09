@@ -64,6 +64,8 @@ class UITests(unittest.TestCase):
 
     def complete_first(self):
         self.select_first()
+        self.app.use_remark(CLAIMED)
+        self.root.update()
         self.app.reviewed.set(True)
         with patch('app.messagebox.askyesno', return_value=True), patch.object(self.app, 'run', side_effect=self.sync_run):
             self.app.confirm_manual_done()
@@ -425,6 +427,17 @@ class UITests(unittest.TestCase):
         self.assertEqual(self.app.badge.cget('background'), YELLOW)
         self.assertNotEqual(self.app.current.sa_id, 'demo-001')
 
+    def test_completion_requires_nonempty_actual_note(self):
+        self.select_first()
+        self.app.note.delete('1.0','end')
+        self.root.update()
+        self.app.reviewed.set(True)
+        with patch('app.messagebox.showwarning') as warning, patch('app.messagebox.askyesno') as confirmation, patch('app.mark_complete') as write:
+            self.app.confirm_manual_done()
+            warning.assert_called_once()
+            confirmation.assert_not_called()
+            write.assert_not_called()
+
     def test_reload_keeps_completed_hidden(self):
         self.complete_first()
         with patch('app.fixed_roster_path', return_value=self.path) as fixed, patch.object(self.app, 'run', side_effect=self.sync_run):
@@ -472,6 +485,8 @@ class UITests(unittest.TestCase):
 
     def test_failed_save_remains_yellow_and_pending(self):
         self.select_first()
+        self.app.use_remark(CLAIMED)
+        self.root.update()
         self.app.reviewed.set(True)
         before = file_hash(self.path)
         with patch('app.messagebox.askyesno', return_value=True), patch('app.mark_complete', side_effect=SafetyStop('locked')):
@@ -490,6 +505,8 @@ class UITests(unittest.TestCase):
 
     def test_log_failure_after_save_does_not_undo_completion(self):
         self.select_first()
+        self.app.use_remark(CLAIMED)
+        self.root.update()
         self.app.reviewed.set(True)
         save = self.app.journal.save
         def fail_when_done(record, state, *args):

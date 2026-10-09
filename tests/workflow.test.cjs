@@ -107,6 +107,32 @@ const cmd=(action,more={})=>({action,sa_id:'demo-001',instructions:'SA补充-dem
     assert.equal((await page.evaluate(runWOSCommand,{...base,action:'wos_download'})).ok,false);
     assert.equal(await page.evaluate(()=>exportsMade),1);
   });
+  test('WOS nested content dialog still resolves the complete export panel',async()=>{
+    await page.goto('https://www.webofscience.com/wos/woscc/basic-search');
+    const base={...cmd('wos_search'),title:'Synthetic paper',doi:'10.1234/test',wos:''};
+    assert.equal((await page.evaluate(runWOSCommand,base)).ok,true);
+    await page.evaluate(()=>{
+      const root=document.getElementById('main');
+      document.getElementById('export').onclick=()=>{
+        const choice=document.createElement('button');choice.textContent='Tab delimited file';root.appendChild(choice);
+        choice.onclick=()=>{
+          choice.remove();
+          const dialog=document.createElement('section');dialog.setAttribute('role','dialog');
+          dialog.innerHTML='<form><div role="dialog"><select aria-label="Record Content"><option>Author, Title, Source</option><option>Full Record</option></select></div><button type="button">Export</button></form>';
+          root.appendChild(dialog);
+          dialog.querySelector('button').onclick=()=>{
+            exportsMade++;const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['synthetic'],{type:'text/plain'}));a.download='nested.txt';a.click();dialog.remove();
+          };
+        };
+      };
+    });
+    const prepared=await page.evaluate(runWOSCommand,{...base,action:'wos_prepare_export'});
+    assert.equal(prepared.ok,true,JSON.stringify(prepared));
+    assert.equal(await page.locator('select').inputValue(),'Full Record');
+    const downloaded=page.waitForEvent('download');
+    assert.equal((await page.evaluate(runWOSCommand,{...base,action:'wos_download'})).ok,true);
+    await downloaded;assert.equal(await page.evaluate(()=>exportsMade),1);
+  });
   test('WOS split search returns before navigation and exposes one safe read-only result',async()=>{
     await page.goto('https://www.webofscience.com/wos/woscc/basic-search');
     const base={...cmd('wos_start_search'),title:'Synthetic paper',doi:'',wos:''};

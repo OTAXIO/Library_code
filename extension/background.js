@@ -1,6 +1,21 @@
 importScripts("adapter.js", "import-adapter.js", "wos-adapter.js", "workflow-background.js", "page-diagnostics.js");
 let polling = false;
 let busy = false;
+let updatingConnection = false;
+async function withIdleConnection(operation) {
+  if (busy || updatingConnection) throw new Error("正在执行命令或更新连接，请完成后再配对");
+  // Reserve the connection before waiting for an empty heartbeat to finish.
+  // A claimed command still blocks changes; an idle poll should not make the
+  // user race against the 1.5-second heartbeat to bind another work page.
+  updatingConnection = true;
+  try {
+    const until = Date.now() + 3000;
+    while (polling && !busy && Date.now() < until)
+      await new Promise(resolve => setTimeout(resolve, 50));
+    if (busy || polling) throw new Error("浏览器请求尚未结束，请稍候再调整连接");
+    return await operation();
+  } finally { updatingConnection = false; }
+}
 const trustedPopup = sender => sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL("popup.html");
 const validPage = url => {
   try { const u = new URL(url); return ["http:", "https:"].includes(u.protocol) &&
@@ -49,69 +64,82 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (message.type === "pair") {
       if (!trustedPopup(sender)) throw new Error("只能由扩展弹窗配对");
-      if (busy) throw new Error("正在执行命令，请完成后再配对");
-      if (!/^[A-Za-z0-9_-]{43}$/.test(message.token || "")) throw new Error("配对码格式不正确");
-      const tab = await chrome.tabs.get(message.tabId);
-      const wosOnly=isWOSPage(tab.url);
-      if (!validPage(tab.url) && !wosOnly) throw new Error("请切换到已登录的 WOS 页面或 SA 比对结果页");
-      await request("/poll", {client: String(tab.id), claimOnly: true}, message.token);
-      await chrome.storage.session.clear();
-      await chrome.storage.session.set({token: message.token, tabId: tab.id,
-        mode:wosOnly?"wos":"sa", ...(wosOnly?{wosTabId:tab.id}:{})});
-      await chrome.scripting.executeScript({target: {tabId: tab.id}, files: ["content.js"]});
-      return {ok: true};
+      return withIdleConnection(async () => {
+        if (!/^[A-Za-z0-9_-]{43}$/.test(message.token || "")) throw new Error("配对码格式不正确");
+        const tab = await chrome.tabs.get(message.tabId);
+        const wosOnly=isWOSPage(tab.url);
+        if (!validPage(tab.url) && !wosOnly) throw new Error("请切换到已登录的 WOS 页面或 SA 比对结果页");
+        await request("/poll", {client: String(tab.id), claimOnly: true}, message.token);
+        await chrome.storage.session.clear();
+        await chrome.storage.session.set({token: message.token, tabId: tab.id,
+          mode:wosOnly?"wos":"sa", ...(wosOnly?{wosTabId:tab.id}:{})});
+        await chrome.scripting.executeScript({target: {tabId: tab.id}, files: ["content.js"]});
+        return {ok: true};
+      });
     }
     if (message.type === "bind_workflow") {
       if (!trustedPopup(sender)) throw new Error("只能由扩展弹窗绑定工作页");
-      if (busy) throw new Error("正在执行命令，不能更换工作页");
-      const pair = await chrome.storage.session.get(["token", "tabId"]);
-      if (!pair.token) throw new Error("请先粘贴桌面配对码，连接当前 WOS 或 SA 页");
-      if (!["wosTabId", "importTabId"].includes(message.role)) throw new Error("未知工作页类型");
-      const tab = await chrome.tabs.get(message.tabId);
-      const bindingError=workflowBindingError(tab.url,message.role,tab.id===pair.tabId);
-      if(bindingError)throw new Error(bindingError);
-      await chrome.storage.session.set({[message.role]: tab.id});
-      return {ok: true};
+      return withIdleConnection(async () => {
+        const pair = await chrome.storage.session.get(["token", "tabId"]);
+        if (!pair.token) throw new Error("请先粘贴桌面配对码，连接当前 WOS 或 SA 页");
+        if (!["wosTabId", "importTabId"].includes(message.role)) throw new Error("未知工作页类型");
+        const tab = await chrome.tabs.get(message.tabId);
+        const bindingError=workflowBindingError(tab.url,message.role,tab.id===pair.tabId);
+        if(bindingError)throw new Error(bindingError);
+        await chrome.storage.session.set({[message.role]: tab.id});
+        return {ok: true};
+      });
     }
     if (message.type === "disconnect") {
       if (!trustedPopup(sender)) throw new Error("只能由扩展弹窗断开");
-      if (busy) throw new Error("命令执行中，请先在桌面等待结果；不能撤回已发出的请求");
-      await chrome.storage.session.clear();
-      return {ok: true};
+      return withIdleConnection(async () => {
+        await chrome.storage.session.clear();
+        return {ok: true};
+      });
     }
-    if (message.type !== "tick" || polling) return {ok: true};
+    if (message.type !== "tick" || polling || busy || updatingConnection) return {ok: true};
     const pair = await chrome.storage.session.get(["token", "tabId", "wosTabId", "importTabId", "mode"]);
     const primaryValid=url=>pair.mode==="wos"?isWOSPage(url):validPage(url);
-    if (!pair.token || sender.tab?.id !== pair.tabId || !primaryValid(sender.tab.url)) return {ok: true};
+    // A background SA tab can throttle its interval; a bound active WOS/import
+    // tab may wake the same authenticated client. Unbound/changed tabs cannot.
+    const heartbeatAllowed=sender.tab && (
+      (sender.tab.id===pair.tabId && primaryValid(sender.tab.url)) ||
+      (sender.tab.id===pair.wosTabId && validRolePage(sender.tab.url,"wosTabId")) ||
+      (sender.tab.id===pair.importTabId && validRolePage(sender.tab.url,"importTabId")));
+    if (!pair.token || !heartbeatAllowed || polling || busy || updatingConnection) return {ok: true};
     polling = true;
-    let data;
-    try { data = await request("/poll", {client: String(pair.tabId)}, pair.token); }
-    finally { polling = false; }
-    if (!data.command) return {ok: true};
-    const command = data.command;
-    let result;
-    if (busy) result = {ok: false, error: "上一条浏览器命令仍在执行，暂停等待人工核验"};
-    else {
-      busy = true;
-      try {
-        const tab = await chrome.tabs.get(pair.tabId);
-        if (!primaryValid(tab.url)) throw new Error("页面已切换，停止执行");
-        if (pair.mode==="wos" && !command.action.startsWith("wos_"))
-          throw new Error("当前是 WOS 下载连接。后台操作请在桌面重新配对 SA 页面");
-        if (workflowRole(command.action)) result = await dispatchWorkflow(command, pair);
-        else {
-          const outcomes = await chrome.scripting.executeScript({target: {tabId: pair.tabId},
-            world: "MAIN", func: runSACommand, args: [command]});
-          result = outcomes[0]?.result || {ok: false, error: "页面没有返回执行结果"};
-        }
-      } catch (error) { result = {ok: false, error: error.message}; }
-      finally { busy = false; }
-    }
-    if (result && result.ok === false && typeof result.error === "string")
-      result.error = `[扩展 ${chrome.runtime.getManifest().version}] ${result.error}`;
-    // Results can be resent safely, commands cannot. Failure here causes a desktop timeout.
-    await request("/result", {client: String(pair.tabId), id: command.id, result}, pair.token);
-    return {ok: true};
+    try {
+      // Keep the primary client identity, and verify its current URL even when
+      // the wake-up came from a secondary tab. Never use cached sender URLs here.
+      const primary=await chrome.tabs.get(pair.tabId);
+      if(!primaryValid(primary.url)) return {ok:true};
+      const data = await request("/poll", {client: String(pair.tabId)}, pair.token);
+      if (!data.command) return {ok: true};
+      const command = data.command;
+      let result;
+      if (busy) result = {ok: false, error: "上一条浏览器命令仍在执行，暂停等待人工核验"};
+      else {
+        busy = true;
+        try {
+          const tab = await chrome.tabs.get(pair.tabId);
+          if (!primaryValid(tab.url)) throw new Error("页面已切换，停止执行");
+          if (pair.mode==="wos" && !command.action.startsWith("wos_"))
+            throw new Error("当前是 WOS 下载连接。后台操作请在桌面重新配对 SA 页面");
+          if (workflowRole(command.action)) result = await dispatchWorkflow(command, pair);
+          else {
+            const outcomes = await chrome.scripting.executeScript({target: {tabId: pair.tabId},
+              world: "MAIN", func: runSACommand, args: [command]});
+            result = outcomes[0]?.result || {ok: false, error: "页面没有返回执行结果"};
+          }
+        } catch (error) { result = {ok: false, error: error.message}; }
+        finally { busy = false; }
+      }
+      if (result && result.ok === false && typeof result.error === "string")
+        result.error = `[扩展 ${chrome.runtime.getManifest().version}] ${result.error}`;
+      // Results can be resent safely, commands cannot. Failure here causes a desktop timeout.
+      await request("/result", {client: String(pair.tabId), id: command.id, result}, pair.token);
+      return {ok: true};
+    } finally {polling=false;}
   })().then(sendResponse, error => sendResponse({ok: false, error: error.message}));
   return true;
 });

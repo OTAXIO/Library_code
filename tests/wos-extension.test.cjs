@@ -68,7 +68,7 @@ const fixture=fs.readFileSync(path.join(__dirname,'fixtures/wos-navigation.html'
       assert.equal(paired.ok,true,JSON.stringify(paired));
       const ready=await invoke('wos_diagnose',{});
       assert.equal(ready.ok,true,JSON.stringify(ready));
-      assert.equal(ready.data.extension_version,'0.3.27');
+      assert.equal(ready.data.extension_version,JSON.parse(fs.readFileSync(path.join(root,'extension/manifest.json'),'utf8')).version);
       assert.equal(ready.data.result_reader,'shared-diagnostic');
       console.log(`PASS ${origin} actual extension capability handshake before any search`);
       const missing=await invoke('wos_search',{sa_id:'offline-missing',title:'Missing synthetic paper',doi:'',wos:''});

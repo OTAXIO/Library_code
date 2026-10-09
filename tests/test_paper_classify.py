@@ -9,7 +9,7 @@ import openpyxl
 
 from core import SafetyStop, file_hash
 from paper_classify import (ClassificationClient, DEFAULT_MODEL, MAX_CONSECUTIVE_FAILURES,
-                            list_owners, read_papers, rebind_classification_sources,
+                            list_owners, read_papers, rebind_classification_sources, rebind_current_classification_sources,
                             run, validate_result, InvalidClassification, ModelRequestError)
 
 
@@ -178,6 +178,43 @@ class ClassificationTests(unittest.TestCase):
         fresh.classify.assert_not_called()
         self.assertNotEqual(second,first)
         self.assertEqual(json.loads((second/'status.json').read_text(encoding='utf-8'))['completed'],4)
+
+    def test_current_roster_recovers_exact_cached_results_without_model_calls(self):
+        output=self.root/'cache-recovery'
+        first=run(self.path,output,client=self.client())
+        book=openpyxl.load_workbook(self.path)
+        book.active.cell(1,book.active.max_column+1,'是否识别')
+        book.save(self.path)
+        book.close()
+        self.assertEqual(rebind_current_classification_sources(self.path,output),1)
+        self.assertEqual(rebind_current_classification_sources(self.path,output),0)
+        fresh=self.client()
+        run(self.path,output,client=fresh)
+        fresh.classify.assert_not_called()
+        self.assertEqual(json.loads((first/'分类结果.json').read_text(encoding='utf-8'))['source']['sha256'],file_hash(self.path))
+
+    def test_cache_recovery_refuses_changed_paper_identity(self):
+        output=self.root/'cache-identity-conflict'
+        first=run(self.path,output,client=self.client())
+        before=json.loads((first/'分类结果.json').read_text(encoding='utf-8'))
+        book=openpyxl.load_workbook(self.path)
+        book.active['B2']='Changed paper'
+        book.save(self.path)
+        book.close()
+        self.assertEqual(rebind_current_classification_sources(self.path,output),0)
+        self.assertEqual(json.loads((first/'分类结果.json').read_text(encoding='utf-8')),before)
+
+    def test_cache_recovery_preserves_locked_report_and_does_not_block_roster_loading(self):
+        output=self.root/'cache-running'
+        first=run(self.path,output,client=self.client())
+        before=json.loads((first/'分类结果.json').read_text(encoding='utf-8'))
+        book=openpyxl.load_workbook(self.path)
+        book.active.cell(1,book.active.max_column+1,'是否识别')
+        book.save(self.path)
+        book.close()
+        (first/'run.lock').touch()
+        self.assertEqual(rebind_current_classification_sources(self.path,output),0)
+        self.assertEqual(json.loads((first/'分类结果.json').read_text(encoding='utf-8')),before)
 
     def test_cancel_saves_current_batch_resume_only_remaining(self):
         stop=threading.Event()

@@ -20,7 +20,7 @@ class DownloadReportTests(unittest.TestCase):
         self.assertEqual(text.count('名单 ID：'), 74)
         self.assertIn('synthetic failure 73', text)
         self.assertIn('尚未执行：26', text)
-        self.assertIn('备注为 2', text)
+        self.assertIn('是否识别为 2', text)
         self.assertIn('通信不可继续：是', text)
 
     def test_minimal_result_and_multiple_reports_do_not_overwrite(self):

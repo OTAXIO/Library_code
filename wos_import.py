@@ -5,11 +5,12 @@ No completion/claim/platform writes: only remote-already-processed rows sync to 
 """
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 
 from automation import MAX_TXT, WOSFlow, classify, doi, identity, norm, parse_wos, wos
 from core import SafetyStop
 from pilot import OWNER
-from roster_write import reconcile_processed
+from roster_write import mark_skipped_many, reconcile_processed
 
 
 @dataclass(frozen=True)
@@ -192,6 +193,21 @@ def run_import_plan(plan, roster, bridge, store, *, reviewed=False, stop=lambda:
             raise SafetyStop("已暂停后续步骤；已发出的提交请先核验结果。")
 
     def record_outcome(item, status, message):
+        # Only the item actually attempted is deferred. A lost reply must not
+        # turn the rest of the unexecuted plan into red/skipped tasks.
+        if status in ('deferred', 'halted'):
+            try:
+                if not getattr(result.roster, 'status_separate', False):
+                    raise SafetyStop('请重新读取名单建立“是否识别”列；不在旧备注写入数字状态。')
+                latest = next(r for r in result.roster.records if r.sa_id == item.record.sa_id)
+                reason = re.sub(r'\bsk-[A-Za-z0-9_-]{10,}\b|Bearer\s+[A-Za-z0-9._~-]+', '[已隐藏凭据]', message)
+                reason = re.sub(r'[\x00-\x1f]', ' ', reason).strip()
+                saved = mark_skipped_many(result.roster, [latest],
+                    reasons={latest.sa_id: ('WOS 导入未完成：' + reason)[:2000]})
+                result.roster = saved.roster
+            except (SafetyStop, OSError) as exc:
+                message += '；跳过原因/状态未回写：' + str(exc)
+                result.halted = True
         result.outcomes.append({"sa_id": item.record.sa_id, "title": item.record.title,
                                 "status": status, "message": message})
         audit("WOS 导入队列", "已暂停" if status == "halted" else "已跳过" if status == "deferred" else "已执行",
@@ -231,6 +247,8 @@ def run_import_plan(plan, roster, bridge, store, *, reviewed=False, stop=lambda:
                 raise SafetyStop("同一论文已由其他名单提交，不重复导入。")
         except (SafetyStop, OSError) as exc:
             record_outcome(item, "deferred", str(exc))
+            if result.halted:
+                break
             continue
         try:
             state = flow.proceed(record)

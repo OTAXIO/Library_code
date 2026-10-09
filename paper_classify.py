@@ -312,7 +312,7 @@ def export_report(folder, roster, results, model, failures=None):
     os.replace(channel_tmp,folder/'导入渠道分类.md')
 
 
-def rebind_classification_sources(old_sha256, new_sha256, output=BASE/'runtime'/'classification'):
+def rebind_classification_sources(old_sha256, new_sha256, output=BASE/'runtime'/'classification', *, skip_locked=False):
     """Rebind saved reports after a provenance-only ``list.xlsx`` revision.
 
     Every paper identity and grouped row must still match before a report is updated;
@@ -336,6 +336,8 @@ def rebind_classification_sources(old_sha256, new_sha256, output=BASE/'runtime'/
         if source.get('sha256') != old_sha256 or not isinstance(records,list):
             continue
         if (path.parent/'run.lock').exists():
+            if skip_locked:
+                continue
             raise SafetyStop('分类任务仍在运行，暂不能写入数据来源；请等待该批保存完成。')
         input_value = source.get('input')
         if not isinstance(input_value,str):
@@ -363,6 +365,32 @@ def rebind_classification_sources(old_sha256, new_sha256, output=BASE/'runtime'/
         atomic_json(path,data)
         changed += 1
     return changed
+
+
+def rebind_current_classification_sources(input_path, output=BASE/'runtime'/'classification'):
+    """Restore cache bindings after a status/provenance-only roster edit.
+
+    This never reruns a model or adopts results by row number alone. The existing
+    rebind function compares every paper ID, title, DOI and grouped row, including
+    each report's owner and pending scope, before changing its fingerprint.
+    """
+    input_path = Path(input_path).resolve()
+    current = file_hash(input_path)
+    prior = set()
+    for path in Path(output).glob('*/分类结果.json'):
+        try:
+            data = _json(path.read_text(encoding='utf-8'))
+            source = data.get('source', {}) if isinstance(data, dict) else {}
+            value = source.get('sha256')
+            if (isinstance(source.get('input'), str)
+                    and Path(source['input']).resolve() == input_path
+                    and isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}',value)
+                    and value != current):
+                prior.add(value)
+        except (OSError, ValueError):
+            continue
+    return sum(rebind_classification_sources(previous, current, output, skip_locked=True)
+               for previous in sorted(prior))
 
 
 def reusable_results(roster, model, output):

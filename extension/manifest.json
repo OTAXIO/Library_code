@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SA 比对半自动助手",
-  "version": "0.3.27",
+  "version": "0.3.28",
   "description": "SA 比对、WOS 论文信息下载与核验入库；明确区分下载和入库，未知情况暂停。",
   "permissions": ["storage", "scripting", "activeTab", "downloads"],
   "host_permissions": [
@@ -11,7 +11,7 @@
     "https://www.webofscience.com/*",
     "https://webofscience.clarivate.cn/*"
   ],
-  "content_scripts": [{"matches": ["https://www.webofscience.com/wos/*", "https://webofscience.clarivate.cn/wos/*"], "js": ["content.js"]}],
+  "content_scripts": [{"matches": ["https://www.webofscience.com/wos/*", "https://webofscience.clarivate.cn/wos/*", "http://admin.ir.lib.sjtu.edu.cn/*", "https://admin.ir.lib.sjtu.edu.cn/*"], "js": ["content.js"]}],
   "background": {"service_worker": "background.js"},
   "action": {"default_popup": "popup.html", "default_title": "连接 SA 比对助手"}
 }

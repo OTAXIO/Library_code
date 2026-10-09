@@ -13,7 +13,7 @@ from wos_import import build_plan, require_owner, run_import_plan
 
 LABELS = {"ready": "本轮可入库", "resume": "本轮续验", "deferred": "需人工核验", "pushed": "已入库·待关联",
           "synced": "原已处理", "halted": "已暂停", "queued": "下轮可入库"}
-SCOPES = {"待补论文（不含跳过项）": "pending", "已跳过论文（备注为 2）": "skipped"}
+SCOPES = {"待补论文（不含跳过项）": "pending", "已跳过论文（是否识别为 2）": "skipped"}
 
 
 class WOSImportPanel:
@@ -234,6 +234,8 @@ class WOSImportPanel:
         def done(result):
             self.running = False
             app.roster = result.roster
+            app.skipped = {record.sa_id: record.remark or '是否识别为 2，已标记为跳过。'
+                           for record in app.roster.records if record.skipped and not record.done}
             app.clear_selection()
             app.populate()
             for outcome in result.outcomes:

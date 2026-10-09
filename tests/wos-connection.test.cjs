@@ -31,7 +31,7 @@ test('WOS pairs and executes without an SA or import tab; rejects backend operat
     fetch:async(url,opts)=>{
       requests.push({url,body:JSON.parse(opts.body)});
       return {ok:true,json:async()=>({command:JSON.parse(opts.body).claimOnly?null:command})};
-    },runWOSCommand:()=>{},setTimeout});
+    },runWOSCommand:()=>{},inspectWorkPage:()=>{},setTimeout});
   vm.runInContext(fs.readFileSync(path.join(root,'workflow-background.js'),'utf8'),context);
   vm.runInContext(fs.readFileSync(path.join(root,'background.js'),'utf8'),context);
   const send=(message,sender)=>new Promise(resolve=>listener(message,sender,resolve));
@@ -50,4 +50,80 @@ test('WOS pairs and executes without an SA or import tab; rejects backend operat
   await send({type:'tick'},{tab});
   assert.equal(requests.at(-1).body.result.ok,false);
   assert.equal(injections.length,count);
+});
+
+test('bound WOS heartbeats keep the primary client and cannot claim while busy',async()=>{
+  const primary={id:7,url:'http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list'};
+  const wos={id:8,url:'https://webofscience.clarivate.cn/wos/woscc/basic-search'};
+  const state={token:'a'.repeat(43),tabId:7,wosTabId:8,mode:'sa'};
+  const requests=[],injections=[];
+  let listener,finish,start;
+  const started=new Promise(resolve=>start=resolve);
+  const executing=new Promise(resolve=>finish=resolve);
+  const chrome={
+    runtime:{id:'test',getURL:p=>'chrome-extension://test/'+p,getManifest:()=>({version:'test'}),onMessage:{addListener:fn=>listener=fn}},
+    storage:{session:{get:async()=>({...state})}},
+    tabs:{get:async id=>{assert.equal(id,7);return primary;}},
+    scripting:{executeScript:async options=>{injections.push(options);start();await executing;return [{result:{ok:true,data:{}}}];}}
+  };
+  const context=vm.createContext({chrome,URL,Date,AbortSignal,importScripts:()=>{},runSACommand:()=>{},fetch:async(url,opts)=>{
+    requests.push({url,body:JSON.parse(opts.body)});
+    return {ok:true,json:async()=>url.endsWith('/poll')?{command:{id:'one',action:'observe',expires:Date.now()+60000}}:{}};
+  },setTimeout});
+  vm.runInContext(fs.readFileSync(path.join(root,'workflow-background.js'),'utf8'),context);
+  vm.runInContext(fs.readFileSync(path.join(root,'background.js'),'utf8'),context);
+  const send=(message,sender)=>new Promise(resolve=>listener(message,sender,resolve));
+  const first=send({type:'tick'},{tab:wos});
+  await started;
+  assert.equal(requests[0].body.client,'7');
+  assert.equal(injections[0].target.tabId,7);
+  await send({type:'tick'},{tab:wos});
+  assert.equal(requests.length,1);
+  const blocked=await send({type:'bind_workflow',tabId:8,role:'wosTabId'},
+    {id:'test',url:'chrome-extension://test/popup.html'});
+  assert.equal(blocked.ok,false);assert.match(blocked.error,/正在执行命令/);
+  finish();assert.equal((await first).ok,true);
+  assert.equal(requests.at(-1).body.client,'7');
+  const count=requests.length;
+  await send({type:'tick'},{tab:{...wos,id:9}});
+  await send({type:'tick'},{tab:{...wos,url:'https://example.invalid/'}});
+  assert.equal(requests.length,count);
+  primary.url='http://admin.ir.lib.sjtu.edu.cn/#/wel/index';
+  await send({type:'tick'},{tab:wos});
+  assert.equal(requests.length,count);
+});
+
+test('refreshed backend pages retain heartbeat injection without wider permissions',()=>{
+  const manifest=JSON.parse(fs.readFileSync(path.join(root,'manifest.json'),'utf8'));
+  const matches=manifest.content_scripts.flatMap(item=>item.matches);
+  assert.ok(matches.includes('http://admin.ir.lib.sjtu.edu.cn/*'));
+  assert.ok(matches.includes('https://admin.ir.lib.sjtu.edu.cn/*'));
+  assert.ok(!manifest.host_permissions.includes('<all_urls>'));
+});
+
+test('binding waits for an idle heartbeat but never overlaps a claimed command',async()=>{
+  const primary={id:7,url:'http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list'};
+  const wos={id:8,url:'https://webofscience.clarivate.cn/wos/woscc/basic-search'};
+  const state={token:'a'.repeat(43),tabId:7,mode:'sa'};
+  let listener,finishPoll,startPoll,polls=0;
+  const started=new Promise(resolve=>startPoll=resolve);
+  const waiting=new Promise(resolve=>finishPoll=resolve);
+  const chrome={
+    runtime:{id:'test',getURL:p=>'chrome-extension://test/'+p,getManifest:()=>({version:'test'}),onMessage:{addListener:fn=>listener=fn}},
+    storage:{session:{get:async()=>({...state}),set:async values=>Object.assign(state,values)}},
+    tabs:{get:async id=>id===7?primary:wos}
+  };
+  const context=vm.createContext({chrome,URL,Date,AbortSignal,importScripts:()=>{},fetch:async()=>{
+    polls++;startPoll();await waiting;return {ok:true,json:async()=>({command:null})};
+  },setTimeout});
+  vm.runInContext(fs.readFileSync(path.join(root,'workflow-background.js'),'utf8'),context);
+  vm.runInContext(fs.readFileSync(path.join(root,'background.js'),'utf8'),context);
+  const send=(message,sender)=>new Promise(resolve=>listener(message,sender,resolve));
+  const tick=send({type:'tick'},{tab:primary});await started;
+  const bind=send({type:'bind_workflow',tabId:8,role:'wosTabId'},
+    {id:'test',url:'chrome-extension://test/popup.html'});
+  await send({type:'tick'},{tab:primary});assert.equal(polls,1);
+  assert.equal(state.wosTabId,undefined);
+  finishPoll();await tick;
+  assert.equal((await bind).ok,true);assert.equal(state.wosTabId,8);
 });

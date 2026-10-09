@@ -201,7 +201,7 @@ class ClassifyApp:
             return
         self.batch_scope.set(
             f'批量范围：{owner}的未完成、零匹配记录；不受表格筛选或选中行影响。\n'
-            '待补下载：未跳过的论文（不限 AI 推荐数据库）；重试下载：备注为 2 的论文。')
+            '待补下载：未跳过的论文（不限 AI 推荐数据库）；重试下载：“是否识别”为 2 的论文。')
 
     def reload(self):
         try:

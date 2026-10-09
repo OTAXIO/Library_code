@@ -136,7 +136,7 @@ class AutomationPanel:
 
         def finished(result):
             app.roster = result.roster
-            app.skipped = {record.sa_id: "Excel 备注为数字 2，已持久标记为跳过。"
+            app.skipped = {record.sa_id: record.remark or "是否识别为 2，已标记为跳过。"
                            for record in result.roster.records if record.skipped and not record.done}
             app.skipped.update(result.skipped)
             app.clear_selection()

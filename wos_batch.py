@@ -8,6 +8,7 @@ those write to the production library and stay single-record with human confirma
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from automation import ImportStore, MAX_TXT, doi, wos, norm, parse_wos
@@ -57,17 +58,90 @@ def preflight(bridge):
         result=bridge.call('wos_diagnose',{},timeout=15)
     except SafetyStop as exc:
         if '未知 WOS 调度命令' in str(exc):
-            raise SafetyStop('当前运行的插件仍是旧版本。请在 Edge 扩展管理页重载到 0.3.27 或更新版本，'
+            raise SafetyStop('当前运行的插件仍是旧版本。请在 Edge 扩展管理页重载到 0.3.28 或更新版本，'
                              '刷新 WOS 页并重新连接；本轮未提交检索或下载。') from exc
         raise
     if (not isinstance(result,dict) or type(result.get('wos_download_protocol')) is not int
             or result.get('wos_download_protocol')!=1
             or result.get('result_reader')!='shared-diagnostic'
             or result.get('read_results_world')!='ISOLATED'
-            or not re.fullmatch(r'\d+\.\d+\.\d+',str(result.get('extension_version','')))):
-        raise SafetyStop('插件下载接口不兼容。请重载 0.3.27 或更新版本、刷新 WOS 页并重新连接；'
+            or not re.fullmatch(r'\d+\.\d+\.\d+',str(result.get('extension_version','')))
+            or tuple(map(int,result['extension_version'].split('.'))) < (0,3,28)):
+        raise SafetyStop('插件下载接口不兼容或版本过旧。请重载 0.3.28 或更新版本、刷新 WOS 页并重新连接；'
                          '本轮未提交检索或下载。')
     return {'extension_version':result['extension_version']}
+
+
+@dataclass
+class DownloadRosterUpdate:
+    roster: object
+    source_count: int = 0
+    skipped_count: int = 0
+    source_error: str = ''
+    workflow_error: str = ''
+
+
+def persist_download_outcomes(roster, targets, result):
+    """Persist only proven downloads and the exact attempted failures.
+
+    Never mark a download complete or mark the unattempted tail as skipped.
+    Each underlying writer backs up and verifies its own narrow XML transaction;
+    a failed second transaction must not discard the first transaction's roster.
+    """
+    from roster_write import mark_skipped_many, record_data_sources
+    targets = list(targets)
+    roster.assert_unchanged()
+    selected = {record.sa_id: record for record in targets}
+    if (len(selected) != len(targets) or len({r.owner for r in targets}) > 1
+            or any(r not in roster.records or r.done or r.matches != 0 for r in targets)):
+        raise SafetyStop('下载回写范围与当前负责人名单不一致，未修改名单。')
+    attempted = result.get('attempted')
+    if type(attempted) is not int or not 0 <= attempted <= len(targets):
+        raise SafetyStop('无法确认实际尝试条数，未修改名单。')
+    seen, successful, reasons = set(), set(), {}
+    outcomes = [('exported', entry.get('sa_id'), entry) for entry in result.get('exported', [])]
+    outcomes += [('unconfirmed', entry.get('sa_id'), entry) for entry in result.get('unconfirmed', [])]
+    outcomes += [('failed', sa_id, entry) for sa_id, entry in result.get('failed', {}).items()]
+    attempted_ids = {record.sa_id for record in targets[:attempted]}
+    for kind, sa_id, entry in outcomes:
+        if (sa_id not in attempted_ids or sa_id in seen or entry.get('row') != selected[sa_id].row):
+            raise SafetyStop('下载结果未能对应实际尝试的唯一名单行，未修改名单。')
+        seen.add(sa_id)
+        if kind == 'exported':
+            successful.add(sa_id)
+        elif kind == 'unconfirmed':
+            reasons[sa_id] = 'WOS TXT 已下载，但文献身份待核验；未上传或导入，待人工核对。'
+        else:
+            error = entry.get('error')
+            if not isinstance(error, str) or not error.strip():
+                raise SafetyStop('失败原因缺失，未修改名单。')
+            error = re.sub(r'\bsk-[A-Za-z0-9_-]{10,}\b|Bearer\s+[A-Za-z0-9._~-]+', '[已隐藏凭据]', error)
+            error = re.sub(r'[\x00-\x1f]', ' ', error).strip()
+            reasons[sa_id] = ('WOS 下载未完成：' + error)[:2000]
+    if len(seen) != attempted:
+        raise SafetyStop('下载结果不完整，未修改名单；请核对完整报告。')
+    update = DownloadRosterUpdate(roster)
+    if successful:
+        # Duplicated SA rows share provenance only when ALL supplied paper facts
+        # agree, including WOS ID. A different owner/identifier is never borrowed.
+        keys = {(r.owner, r.title, r.doi, r.wos, r.skipped) for r in targets if r.sa_id in successful}
+        rows = [r for r in roster.records if not r.done and r.matches == 0
+                and (r.owner, r.title, r.doi, r.wos, r.skipped) in keys]
+        try:
+            saved = record_data_sources(update.roster, rows, 'WOS')
+            update.roster, update.source_count = saved.roster, len(saved.rows)
+        except (SafetyStop, OSError) as exc:
+            update.source_error = str(exc)
+    if reasons:
+        try:
+            if not update.roster.status_separate:
+                raise SafetyStop('请重新读取名单，先建立末尾“是否识别”列；不在备注写入数字状态。')
+            rows = [r for r in update.roster.records if r.sa_id in reasons]
+            saved = mark_skipped_many(update.roster, rows, reasons=reasons)
+            update.roster, update.skipped_count = saved.roster, len(rows)
+        except (SafetyStop, OSError) as exc:
+            update.workflow_error = str(exc)
+    return update
 
 
 def wos_targets(roster, classification, papers, owner=None):

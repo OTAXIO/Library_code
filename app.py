@@ -28,6 +28,14 @@ YELLOW = P.amber_soft
 GREEN = P.green_soft
 
 
+def load_workflow_roster():
+    roster = migrate_status_column(read_roster(fixed_roster_path(BASE)))
+    from paper_classify import rebind_current_classification_sources
+    rebind_current_classification_sources(roster.path)
+    roster.assert_unchanged()
+    return roster
+
+
 class App:
     def __init__(self, root, journal=None, auto_load=True, bridge=None, model_client=None, operation_log=None, unified=False, initial_tab=None):
         self.root = root
@@ -254,7 +262,7 @@ class App:
         if not targets:
             messagebox.showinfo('没有待导出的记录',
                 '当前负责人在所选范围内没有未完成的零匹配论文。\n'
-                '备注为 2 的论文请点“重试跳过论文（WOS）”。已有 TXT 可点“检查 TXT 并导入”。',parent=self.root)
+                '“是否识别”为 2 的论文请点“重试跳过论文（WOS）”。已有 TXT 可点“检查 TXT 并导入”。',parent=self.root)
             return
         from wos_batch import default_inbox, export as export_batch
         roster=self.roster
@@ -285,29 +293,24 @@ class App:
                                 stop=self.classifier.stop,unchanged=roster.assert_unchanged,
                                 progress=report, audit=audit)
             result.update(connection)
-            # Provenance is recorded only for files that passed the existing strong
-            # identity check and were actually copied into the intake directory.
-            # Zero results, ambiguous results and archived weak matches stay blank.
-            if result.get('exported'):
-                successful={entry['sa_id'] for entry in result['exported']}
-                keys={(record.owner,record.title,record.doi,record.skipped)
-                      for record in targets if record.sa_id in successful}
-                source_rows=[record for record in roster.records
-                             if (record.owner,record.title,record.doi,record.skipped) in keys
-                             and record.matches==0 and not record.done]
-                try:
-                    from roster_write import record_data_sources
-                    update=record_data_sources(roster,source_rows,'WOS')
-                    result['_source_update']=update
-                    if update.roster.sha256!=roster.sha256:
-                        try:
-                            from paper_classify import rebind_classification_sources
-                            result['classification_rebound']=rebind_classification_sources(
-                                roster.sha256,update.roster.sha256)
-                        except Exception as exc:
-                            result['classification_rebind_error']=str(exc)
-                except Exception as exc:
-                    result['source_error']=str(exc)
+            try:
+                from wos_batch import persist_download_outcomes
+                update=persist_download_outcomes(roster,targets,result)
+                result['_roster_update']=update
+                result['skipped_saved']=update.skipped_count
+                if update.source_error:
+                    result['source_error']=update.source_error
+                if update.workflow_error:
+                    result['workflow_error']=update.workflow_error
+                if update.roster.sha256!=roster.sha256:
+                    audit(f'WOS 下载回写（来源 {update.source_count} 行；跳过 {update.skipped_count} 行）','已执行', '')
+                    try:
+                        from paper_classify import rebind_current_classification_sources
+                        result['classification_rebound']=rebind_current_classification_sources(update.roster.path)
+                    except Exception as exc:
+                        result['classification_rebind_error']=str(exc)
+            except Exception as exc:
+                result['workflow_error']=str(exc)
             try:
                 from wos_reports import save_download_report
                 result['report_path'] = str(save_download_report(
@@ -318,26 +321,32 @@ class App:
             return result
         def done(result):
             detail=''
-            source_update=result.pop('_source_update',None)
-            if source_update is not None:
-                self.roster=source_update.roster
-                self.skipped={record.sa_id:"Excel 备注为数字 2，已持久标记为跳过。"
+            roster_update=result.pop('_roster_update',None)
+            if roster_update is not None:
+                self.roster=roster_update.roster
+                self.skipped={record.sa_id:record.remark or "是否识别为 2，已标记为跳过。"
                               for record in self.roster.records if record.skipped and not record.done}
                 self.owner_box['values']=sorted({record.owner for record in self.roster.records})
+                self.clear_selection()
                 if self.owner.get():
                     self.populate()
                 if self.classifier:
                     self.classifier.reload()
                     self.classifier.load_results()
-                if source_update.rows:
+                if roster_update.source_count:
                     detail+=(f'\n\n已在 list.xlsx 的“数据来源”列为 '
-                             f'{len(source_update.rows)} 行记录 WOS。')
+                             f'{roster_update.source_count} 行记录 WOS。')
+                if roster_update.skipped_count:
+                    detail+=(f'\n\n已为实际尝试但未能采纳的 {roster_update.skipped_count} 行写入“是否识别”=2及真实原因；'
+                             '未执行项保持原样，重试请使用“重试跳过论文（WOS）”。')
             if result.get('source_error'):
                 detail+=('\n\nTXT 已成功导出，但“数据来源”尚未写入：'
                          +result['source_error'])
             if result.get('classification_rebind_error'):
-                detail+=('\n\n数据来源已写入；旧分类结果索引刷新失败，请重新打开分类页：'
+                detail+=('\n\n名单已回写；旧分类结果索引刷新失败，请重新打开分类页：'
                          +result['classification_rebind_error'])
+            if result.get('workflow_error'):
+                detail+=('\n\n跳过状态/原因未能回写（未假定写入成功）：'+result['workflow_error'])
             if result.get('report_path'):
                 self.wos_import_panel.download_report = result['report_path']
                 detail += '\n\n每篇的结果和文件位置已完整保存：\n' + result['report_path']
@@ -362,7 +371,11 @@ class App:
                 '下载不会入库，也不会把 Excel 标为完成。'+detail,parent=self.root)
             from pilot import OWNER
             if targets[0].owner == OWNER and (result.get('exported') or result.get('unconfirmed')):
-                self.wos_import_panel.receive_downloads(targets[0].owner, 'skipped' if targets[0].skipped else 'pending')
+                # A weak download is now persistently skipped; offer its archive
+                # in the skipped scope instead of silently hiding it in pending.
+                import_scope='skipped' if targets[0].skipped or (
+                    not result.get('exported') and result.get('skipped_saved')) else 'pending'
+                self.wos_import_panel.receive_downloads(targets[0].owner,import_scope)
                 self.tabs.select(self.wos_import_page)
                 self.wos_import_panel.preview()
         self.run(job,done,f'正在{label}…共 {total} 条',log_action=label)
@@ -648,12 +661,12 @@ class App:
         self.clear_selection()
         self.pending_count.set("未完成 —")
         self.done_count.set("已完成 —")
-        self.run(lambda: migrate_status_column(read_roster(fixed_roster_path(BASE))), self.loaded, "读取 list.xlsx…",
+        self.run(load_workflow_roster, self.loaded, "读取 list.xlsx…",
                  log_action="重读名单")
 
     def loaded(self, roster):
         self.roster = roster
-        self.skipped = {record.sa_id: "Excel 备注为数字 2，已持久标记为跳过。"
+        self.skipped = {record.sa_id: record.remark or "是否识别为 2，已标记为跳过。"
                         for record in roster.records if record.skipped and not record.done}
         self.owner_box["values"] = sorted({record.owner for record in roster.records})
         self.update_counts(roster.records)
@@ -710,7 +723,7 @@ class App:
         self.current_id.set(f"ID：{record.sa_id}")
         skipped = self.skipped.get(record.sa_id)
         if record.skipped and not skipped:
-            skipped = "Excel 备注为数字 2，已持久标记为跳过。"
+            skipped = record.remark or "是否识别为 2，已标记为跳过。"
         self.show_text(f"{record.title}\n\n工号 {record.staff_id or '—'}    匹配 {record.matches}\n"
                        f"{record.reason or '未提供差异原因'}" +
                        (f"\n\n自动认领已跳过：{skipped}" if skipped else ""))
@@ -890,7 +903,7 @@ class App:
                               self.note.get("1.0", "end").strip() in ("", "已认领") and
                               snapshot.get("remark", "") in ("", "已认领"))
             consequence = ("\n认领核验成功后，将自动保存网页批注“已认领”和已处理状态，\n"
-                           "回读成功后备份并将 Excel 完成备注写为 1。\n"
+                           "回读成功后备份，并写入完成备注及是否识别=1。\n"
                            "请同时确认本条没有其他待处理问题；信息变化时停止。" if auto_close else
                            "\n本条不自动结案，Excel 保持未完成；核验后需单独审批。")
             question = (f"名单：{record.sa_id}\n{record.title[:100]}\n\n人员：{person['name']}（{person['wno']}）"
@@ -1010,7 +1023,7 @@ class App:
             snapshot, comparison = self.snapshot, self.comparison
             if not messagebox.askyesno("确认网页认领结案", f"名单：{record.sa_id}\n{record.title[:120]}\n\n"
                     "先重新核验已认领，再保存网页备注“已认领”并标为已处理。\n"
-                    "后台回读成功后，备份 list.xlsx 并把本行完成备注写为数字 1。\n"
+                    "后台回读成功后，备份 list.xlsx，填写完成备注及是否识别=1。\n"
                     "如果后台已处理，只同步 Excel，不重复提交。是否继续？", parent=self.root):
                 return
             self.journal.save(record, "认领结案待核验", "已认领", {"mode": "reviewed_claim_completion"})
