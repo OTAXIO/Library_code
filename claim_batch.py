@@ -87,12 +87,16 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
             item = next((candidate for candidate in current_roster.records
                          if candidate.sa_id == sa_id), None)
             # Never modify another owner's row. A retry row already contains 2.
-            if item and item.owner == "谭勋策" and not item.done and not item.skipped:
+            if item and item.owner == "谭勋策" and not item.done and (not item.skipped or getattr(current_roster,'status_separate',False)):
                 targets.append(item)
         if targets:
             writer = skip_writer or mark_skipped_many
             try:
-                update = writer(current_roster, targets)
+                if skip_writer:
+                    update = writer(current_roster, targets)
+                else:
+                    update = writer(current_roster, targets,
+                                    reasons={item.sa_id: skipped[item.sa_id][:2000] for item in targets})
                 current_roster = update.roster
                 for item in targets:
                     note("写入跳过标记", "已执行", item.sa_id)

@@ -22,6 +22,7 @@ HEADERS = {
 }
 QUERY_HEADER = "查询方式（DOI和WOS_ID：1   题名： 2）"
 SOURCE_HEADER = "数据来源"
+STATUS_HEADER = "是否识别"
 ROSTER_FILENAME = "list.xlsx"
 
 
@@ -83,6 +84,8 @@ class Roster:
     completion_column: int = 0
     source_column: int = 0
     header_column_count: int = 0
+    remark_column: int = 0
+    status_separate: bool = False
 
     def assert_unchanged(self):
         if self.path.stat().st_mtime_ns != self.mtime_ns or file_hash(self.path) != self.sha256:
@@ -99,7 +102,16 @@ def fixed_roster_path(folder=None):
 
 
 def completion_column(labels):
-    """The supplied export has a leading workflow remark and a website remark."""
+    """Prefer the separate status column; read old exports without losing history."""
+    if labels.count(STATUS_HEADER) > 1:
+        raise SafetyStop(f"重复表头：{STATUS_HEADER}")
+    if STATUS_HEADER in labels:
+        return labels.index(STATUS_HEADER)
+    return remark_column(labels)
+
+
+def remark_column(labels):
+    """Locate the local note, never the backend's similarly named export column."""
     columns = [i for i, label in enumerate(labels) if label == "备注"]
     if len(columns) == 1:
         return columns[0]
@@ -124,6 +136,8 @@ def read_roster(path):
             raise SafetyStop("应恰好有一个包含 sa_lzk表ID 表头的工作表。")
         sheet, labels = choices[0]
         done_column = completion_column(labels)
+        note_column = remark_column(labels)
+        separate = STATUS_HEADER in labels
         source_columns = [i for i, label in enumerate(labels) if label == SOURCE_HEADER]
         if len(source_columns) > 1:
             raise SafetyStop(f"重复表头：{SOURCE_HEADER}")
@@ -145,7 +159,13 @@ def read_roster(path):
             values = {}
             flag = cells[done_column]
             if flag.data_type == "f":
-                raise SafetyStop(f"第 {number} 行完成备注是公式，不能自动判断或覆盖。")
+                raise SafetyStop(f"第 {number} 行是否识别是公式，不能自动判断或覆盖。")
+            note_cell = cells[note_column]
+            if separate and note_cell.data_type == "f":
+                raise SafetyStop(f"第 {number} 行备注是公式，不能自动读取或覆盖。")
+            if separate and flag.value is not None and not (
+                    flag.data_type == 'n' and type(flag.value) in (int, float) and flag.value in (1, 2)):
+                raise SafetyStop(f"第 {number} 行是否识别只能为空、数字 1 或数字 2。")
             # Numeric 1 is complete and numeric 2 is skipped. Text values,
             # booleans and formulas never silently become workflow states.
             done = flag.data_type == "n" and type(flag.value) in (int, float) and flag.value == 1
@@ -180,14 +200,14 @@ def read_roster(path):
                 values["owner"] = "（未分配）"
             values["matches"] = count
             records.append(Record(row=number, done=done, skipped=skipped,
-                                  remark=text(flag.value), source=source, **values))
+                                  remark=text(note_cell.value), source=source, **values))
         if not records:
             raise SafetyStop("名单没有记录。")
     finally:
         book.close()
     result = Roster(path, checksum, records, stamp, sheet.title, done_column + 1,
                     (source_column + 1) if source_column is not None else 0,
-                    header_column_count)
+                    header_column_count, note_column + 1, separate)
     result.assert_unchanged()
     return result
 

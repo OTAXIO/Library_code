@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from core import Record, Roster, SOURCE_HEADER, SafetyStop, file_hash, read_roster
+from core import Record, Roster, SOURCE_HEADER, STATUS_HEADER, SafetyStop, file_hash, read_roster
 
 NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -156,8 +156,8 @@ def patch_text_cell(data, reference, row_number, value, expand_dimension=False):
     from html import escape
     from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
 
-    if not isinstance(value, str) or not value or len(value) > 200 or re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", value):
-        raise SafetyStop("数据来源文本无效，停止回写。")
+    if not isinstance(value, str) or not value or len(value) > 2000 or re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", value):
+        raise SafetyStop("备注或数据来源文本无效，停止回写。")
     document = ET.fromstring(data)
     protection = document.find(f"{{{NS}}}sheetProtection")
     if document.tag != f"{{{NS}}}worksheet" or (protection is not None and protection.get("sheet", "1") not in {"0", "false"}):
@@ -337,12 +337,13 @@ def record_data_sources(roster, records=(), source="WOS", backup_dir=None):
             temporary.unlink(missing_ok=True)
 
 
-def _mark_values(roster, updates, backup_dir=None):
+def _mark_values(roster, updates, backup_dir=None, notes=None):
     """Atomically write one or more workflow states after full-file verification."""
     path = roster.path
     if path.name.lower() != "list.xlsx" or not roster.completion_column:
         raise SafetyStop("只允许回写当前 list.xlsx 的完成备注列。")
     updates = list(updates)
+    notes = dict(notes or {})
     if not updates:
         raise SafetyStop("没有需要写入的名单状态。")
     rows = set()
@@ -350,9 +351,15 @@ def _mark_values(roster, updates, backup_dir=None):
         valid_value = value is None or (type(value) is int and value in (1, 2))
         if record not in roster.records or record.done or not valid_value:
             raise SafetyStop("任务已完成、状态无效或不属于当前名单，请重新读取。")
-        if record.row in rows or (value == 2 and record.skipped) or (value is None and not record.skipped):
+        if record.row in rows or (value == 2 and record.skipped and record.sa_id not in notes) or (value is None and not record.skipped):
             raise SafetyStop("跳过任务已标记或目标行重复，请重新读取。")
+        if roster.status_separate and value in (1, 2):
+            note = notes.get(record.sa_id)
+            if not isinstance(note, str) or not note.strip() or len(note) > 2000:
+                raise SafetyStop("请填写本次完成备注或跳过原因，再写入是否识别。")
         rows.add(record.row)
+    if set(notes) - {record.sa_id for record, _ in updates}:
+        raise SafetyStop("备注不属于本次目标行，未回写。")
     temporary = None
     try:
         with write_lock(path):
@@ -370,6 +377,10 @@ def _mark_values(roster, updates, backup_dir=None):
                     reference = f"{column_name(roster.completion_column)}{record.row}"
                     references.append(reference)
                     changed = patch_cell(changed, reference, record.row, value)
+                    if roster.status_separate and record.sa_id in notes:
+                        note_ref = f"{column_name(roster.remark_column)}{record.row}"
+                        changed = patch_text_cell(changed, note_ref, record.row, notes[record.sa_id].strip())
+                        references.append(note_ref)
                 output.comment = source.comment
                 for entry in source.infolist():
                     output.writestr(copy.copy(entry), changed if entry.filename == member else source.read(entry))
@@ -380,15 +391,15 @@ def _mark_values(roster, updates, backup_dir=None):
                 state_ok = (value == 1 and expected and expected[0].done and not expected[0].skipped) or \
                            (value == 2 and expected and expected[0].skipped and not expected[0].done) or \
                            (value is None and expected and not expected[0].done and
-                            not expected[0].skipped and expected[0].remark == "")
+                            not expected[0].skipped and (roster.status_separate or expected[0].remark == ""))
                 if len(expected) != 1 or not state_ok or expected[0].key != record.key:
                     fields = "目标行或 ID" if len(expected) != 1 else ("状态标记类型" if not state_ok else "其他任务字段")
                     raise SafetyStop(f"第 {row_number} 行回读失败（{fields}），原名单未修改。请重启最新版助手并重读名单；若仍失败，请反馈此行号。")
             from dataclasses import replace
             intended = [replace(r, done=target_values[r.row][1] == 1,
                                 skipped=target_values[r.row][1] == 2,
-                                remark="" if target_values[r.row][1] is None else
-                                str(target_values[r.row][1]))
+                                remark=(notes.get(r.sa_id, r.remark).strip() if roster.status_separate else
+                                        "" if target_values[r.row][1] is None else str(target_values[r.row][1])))
                         if r.row in target_values else r for r in roster.records]
             if verified.records != intended:
                 raise SafetyStop("回读发现非目标行发生变化，原名单未修改。")
@@ -423,15 +434,82 @@ def _mark_values(roster, updates, backup_dir=None):
             temporary.unlink(missing_ok=True)
 
 
-def mark_complete(roster, record, backup_dir=None):
+def mark_complete(roster, record, backup_dir=None, note=None):
     """Back up and mark one verified record complete in the local roster."""
-    result = _mark_values(roster, [(record, 1)], backup_dir)
+    result = _mark_values(roster, [(record, 1)], backup_dir,
+                          {record.sa_id: note} if note is not None else None)
     return Completion(result.roster, result.backup, result.cells[0], result.previous[record.sa_id])
 
 
-def mark_skipped_many(roster, records, backup_dir=None):
+def migrate_status_column(roster):
+    """One-time schema migration, not a business action on any owner's task.
+
+    Preserve numeric 1/2 history; retain nonnumeric local notes and the separate
+    backend remark. No claim/import/completion conclusion is invented here.
+    All ZIP members except the roster sheet are kept byte-for-byte unchanged.
+    """
+    if roster.status_separate:
+        return roster
+    path=roster.path
+    if path.name.lower()!='list.xlsx' or not roster.sheet_name:
+        raise SafetyStop('只允许迁移 code/list.xlsx 的状态列。')
+    destination=roster.header_column_count+1
+    temporary=None
+    try:
+        with write_lock(path):
+            if path.with_name('~$'+path.name).exists():
+                raise SafetyStop('请保存并关闭 Excel，再迁移是否识别列。')
+            roster.assert_unchanged()
+            descriptor,name=tempfile.mkstemp(prefix='.list-status-',suffix='.xlsx',dir=path.parent)
+            os.close(descriptor)
+            temporary=Path(name)
+            with zipfile.ZipFile(path) as original, zipfile.ZipFile(temporary,'w') as output:
+                member=worksheet_member(original,roster.sheet_name)
+                changed=patch_text_cell(original.read(member),f'{column_name(destination)}1',1,
+                                        STATUS_HEADER,expand_dimension=True)
+                for record in roster.records:
+                    if record.done or record.skipped:
+                        changed=patch_cell(changed,f'{column_name(destination)}{record.row}',record.row,
+                                           1 if record.done else 2)
+                        changed=patch_cell(changed,f'{column_name(roster.completion_column)}{record.row}',record.row,None)
+                output.comment=original.comment
+                for entry in original.infolist():
+                    output.writestr(copy.copy(entry),changed if entry.filename==member else original.read(entry))
+            verified=read_roster(temporary)
+            from dataclasses import replace
+            intended=[replace(record,remark='') if record.done or record.skipped else record
+                      for record in roster.records]
+            if verified.records!=intended or not verified.status_separate or verified.completion_column!=destination:
+                raise SafetyStop('状态迁移回读不一致，原名单未修改。')
+            backups=path.parent/'runtime'/'backups'
+            backups.mkdir(parents=True,exist_ok=True)
+            backup=backups/f'list-{roster.sha256}.xlsx'
+            if not backup.exists():
+                import shutil
+                with path.open('rb') as source,backup.open('xb') as target:
+                    shutil.copyfileobj(source,target)
+                    target.flush()
+                    os.fsync(target.fileno())
+            if file_hash(backup)!=roster.sha256:
+                raise SafetyStop('迁移备份校验失败，原名单未修改。')
+            roster.assert_unchanged()
+            if path.with_name('~$'+path.name).exists():
+                raise SafetyStop('名单已被 Excel 打开，迁移未提交。')
+            with temporary.open('rb+') as stream:
+                os.fsync(stream.fileno())
+            os.replace(temporary,path)
+            temporary=None
+            return read_roster(path)
+    except PermissionError as exc:
+        raise SafetyStop('名单被占用或无写入权限，是否识别列尚未迁移。') from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def mark_skipped_many(roster, records, backup_dir=None, reasons=None):
     """Back up and mark several safely skipped records with numeric 2."""
-    return _mark_values(roster, [(record, 2) for record in records], backup_dir)
+    return _mark_values(roster, [(record, 2) for record in records], backup_dir, reasons)
 
 
 def clear_skipped_many(roster, records, backup_dir=None):
@@ -457,4 +535,11 @@ def reconcile_processed(roster, record, remote_row, owner="谭勋策"):
     roster.assert_unchanged()
     if status == "待处理":
         return None
+    # Existing backend notes are evidence, not a guessed preset. If they are
+    # blank, record only the verified processed state, without inventing a claim.
+    remote_note = remote_row.get("remark", "")
+    if not isinstance(remote_note, str):
+        raise SafetyStop("后台备注格式未知，禁止同步。")
+    if getattr(roster,'status_separate',False):
+        return mark_complete(roster, record, note=remote_note.strip() or "后台已处理（只读核验同步）")
     return mark_complete(roster, record)

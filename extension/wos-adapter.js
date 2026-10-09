@@ -326,7 +326,12 @@ async function runWOSCommand(command) {
       click(one(all('[role="menuitem"],button,a,mat-option').filter(el=>["Tab delimited file","Tab-delimited file","Tab delimited","制表符分隔文件","制表符分隔","制表符"].includes(actionLabel(el))),"Tab delimited"));
       await wait(()=>all('mat-dialog-container,[role="dialog"]').length,"导出设置",5000);
       const dialogs=all('mat-dialog-container,[role="dialog"]');
-      const dialog=one(dialogs.filter(el=>!dialogs.some(other=>other!==el&&el.contains(other))),"导出设置窗口");
+      // WOS now uses a nested role=dialog around Record Content alone. Choose
+      // the smallest complete export panel, not the smallest arbitrary dialog.
+      const panels=dialogs.filter(el=>
+        all('select,[role="combobox"]',el).length===1 &&
+        all('button,[role="button"],a',el).filter(control=>["Export","导出"].includes(actionLabel(control))).length===1);
+      const dialog=one(panels.filter(el=>!panels.some(other=>other!==el&&el.contains(other))),"导出设置窗口");
       const selectors=all('select,[role="combobox"]',dialog);
       const select=one(selectors,"记录内容选择器");
       const full=["Full Record","全记录","完整记录"];

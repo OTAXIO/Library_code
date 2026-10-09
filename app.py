@@ -21,7 +21,7 @@ from ui_theme import FONT, P, install_theme, style_text
 
 from core import Journal, SafetyStop, fixed_roster_path, guide, read_roster
 from remarks import PRESETS, append_remark
-from roster_write import mark_complete
+from roster_write import mark_complete, migrate_status_column
 
 BASE = Path(__file__).resolve().parent
 YELLOW = P.amber_soft
@@ -648,7 +648,7 @@ class App:
         self.clear_selection()
         self.pending_count.set("未完成 —")
         self.done_count.set("已完成 —")
-        self.run(lambda: read_roster(fixed_roster_path(BASE)), self.loaded, "读取 list.xlsx…",
+        self.run(lambda: migrate_status_column(read_roster(fixed_roster_path(BASE))), self.loaded, "读取 list.xlsx…",
                  log_action="重读名单")
 
     def loaded(self, roster):
@@ -961,9 +961,11 @@ class App:
                 raise SafetyStop("请先完成人工审批，并勾选已核对。")
             roster.assert_unchanged()
             note = self.note.get("1.0", "end").strip()
-            question = f"名单 ID：{record.sa_id}\n{record.title[:100]}\n\n确认这条记录已处理完成？\n仅将 list.xlsx 第 {record.row} 行完成备注写为数字 1。\n此批准按钮不会修改网页。"
+            if not note:
+                raise SafetyStop("请选择已核验的完成备注，或填写本次完成说明。")
+            question = f"名单 ID：{record.sa_id}\n{record.title[:100]}\n\n确认这条记录已处理完成？\n将是否识别写为 1，前面备注填写：{note}\n此批准按钮不会修改网页。"
             if record.remark:
-                question += f"\n\n原完成备注：{record.remark[:200]}\n将替换为 1，原值保存在备份中。"
+                question += f"\n\n原备注：{record.remark[:200]}\n旧值保存在备份中。"
             if not messagebox.askyesno("人工确认完成", question, parent=self.root):
                 return
             self.journal.save(record, "人工批准待回写", note, {"row": record.row, "previous": record.remark})
@@ -977,14 +979,14 @@ class App:
             self.populate()
             self.set_approval(True)
             self.model_panel.clear()
-            self.status.set("已完成：备注已写为数字 1，已从待办移除。")
+            self.status.set("已完成：是否识别=1，完成备注已保存。")
             try:
                 self.journal.save(record, "已完成", note, {"cell": result.cell, "backup": str(result.backup),
                                                           "previous": result.previous, "mode": "manual"})
             except Exception as exc:
                 self.status.set("名单已写为 1，但日志保存失败。请检查磁盘，勿重复确认。")
                 messagebox.showwarning("名单已完成，日志异常", str(exc), parent=self.root)
-        self.run(lambda: mark_complete(roster, record), saved, "正在备份并回写完成标记…",
+        self.run(lambda: mark_complete(roster, record, note=note), saved, "正在备份并回写完成标记…",
                  log_action="人工批准完成")
 
     def confirm_claim_done(self):
