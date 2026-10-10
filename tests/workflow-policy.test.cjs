@@ -100,6 +100,7 @@ for (const origin of origins) {
     const sandbox = {URL, Date, setTimeout, runWOSCommand(){}, chrome:{
       tabs:{get:async()=>tab, update:async(id, change)=>{navigations.push(change.url);tab={...tab,...change};}},
       scripting:{executeScript:async input=>{executions.push(input);const action=input.args[0].action;
+        if(action==='wos_diagnose')return [{result:{dialog_count:0,login_required:false,wos_error:false,site_timeout:false}}];
         if(prepared(input))return prepared(input);
         if(action==='wos_start_search'){assert.equal(input.args[0].require_prepared,true);tab={...tab,url:origin+recordPath,status:'complete'};return [{result:{ok:true,data:{submitted:true}}}];}
         return [{result:{ok:true,data:{state:'record',record_url:origin+recordPath}}}];}},
@@ -108,14 +109,16 @@ for (const origin of origins) {
     const result = await sandbox.dispatchWorkflow({action:'wos_search', expires:Date.now()+30000}, {tabId:1,wosTabId:2});
     assert.equal(result.ok, true);
     assert.deepEqual(navigations, [origin + '/wos/woscc/basic-search']);
-    assert.equal(executions.length, 3);
+    assert.equal(executions.length, 4);
     assert.equal(executions[0].target.tabId, 2);
-    assert.equal(executions[0].args[0].action, 'wos_prepare_search');
-    assert.equal(executions[1].args[0].action, 'wos_start_search');
-    assert.equal(executions[2].args[0].action, 'wos_read_results');
-    assert.equal(executions[0].world, 'MAIN');
+    assert.equal(executions[0].args[0].action, 'wos_diagnose');
+    assert.equal(executions[1].args[0].action, 'wos_prepare_search');
+    assert.equal(executions[2].args[0].action, 'wos_start_search');
+    assert.equal(executions[3].args[0].action, 'wos_read_results');
+    assert.equal(executions[0].world, 'ISOLATED');
     assert.equal(executions[1].world, 'MAIN');
-    assert.equal(executions[2].world, 'ISOLATED');
+    assert.equal(executions[2].world, 'MAIN');
+    assert.equal(executions[3].world, 'ISOLATED');
   });
 }
 
@@ -239,11 +242,17 @@ test('binding errors distinguish SA reuse, wrong role, and wrong backend menu wi
   assert.equal(policy.validRolePage('not a URL', 'wosTabId'), false);
 });
 
-test('a redirect to the other WOS origin stops before page execution', async () => {
+test('a redirect to the other WOS origin stops before Search after a read-only access check', async () => {
   let tab={id:2,url:origins[1]+'/wos/author/author-search',status:'complete'}, executed=false;
   const sandbox={URL,Date,setTimeout,runWOSCommand(){},chrome:{
     tabs:{get:async()=>tab,update:async()=>{tab={...tab,url:origins[0]+'/wos/woscc/basic-search'};}},
-    scripting:{executeScript:async()=>{executed=true;return [];}}
+    scripting:{executeScript:async input=>{
+      if(input.args[0].action==='wos_diagnose'){
+        assert.equal(input.world,'ISOLATED');
+        return [{result:{dialog_count:0,login_required:false,wos_error:false,site_timeout:false}}];
+      }
+      executed=true;return [];
+    }}
   }};
   loadPolicy(sandbox);
   await assert.rejects(sandbox.dispatchWorkflow({action:'wos_search',expires:Date.now()+30000},{tabId:1,wosTabId:2}), /域名/);
@@ -264,6 +273,7 @@ test('WOS probes read a rendered loading tab immediately instead of waiting for 
     tabs:{get:async()=>tab,update:async(id,change)=>{navigations.push(change.url);tab={...tab,...change,status:'loading'};}},
     scripting:{executeScript:async options=>{
       calls.push(options);
+      if(options.args[0].action==='wos_diagnose')return [{result:{dialog_count:0,login_required:false,wos_error:false,site_timeout:false}}];
       if(prepared(options))return prepared(options);
       if(options.args[0].action==='wos_start_search'){
         tab={...tab,url:origin+'/wos/woscc/summary/new',status:'loading'};
@@ -275,7 +285,7 @@ test('WOS probes read a rendered loading tab immediately instead of waiting for 
   }};
   loadPolicy(sandbox);
   const result=await sandbox.dispatchWorkflow({action:'wos_search',title:'Synthetic',expires:Date.now()+30000},{tabId:1,wosTabId:2});
-  assert.equal(result.ok,true);assert.equal(calls.length,4);
+  assert.equal(result.ok,true);assert.equal(calls.length,5);
   assert.ok(calls.every(call=>call.injectImmediately===true));
   assert.deepEqual(navigations,[origin+'/wos/woscc/basic-search',origin+recordPath]);
 });

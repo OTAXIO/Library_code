@@ -82,7 +82,7 @@ class SerialWOS:
 
     def call(self, action, payload, timeout=120):
         if not self.ready:
-            preflight(self.transport)
+            preflight(self.transport, resume_export=action in ("wos_export_prepare", "wos_export_status", "wos_export"))
             self.ready = True
         if action == "wos_search":
             while time.monotonic() - self.last_search < self.interval:

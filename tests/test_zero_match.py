@@ -103,7 +103,8 @@ class Download:
         self.calls.append(action)
         if payload["sa_id"] in self.fail:
             raise SafetyStop(self.fail[payload["sa_id"]])
-        return {"path": str(self.path), "sa_id": payload["sa_id"]}
+        return {"path": str(self.path), "sa_id": payload["sa_id"], "ready": True,
+                "record_url": "https://www.webofscience.com/wos/woscc/full-record/WOS:000123456789012"}
 
 
 class ZeroMatchTests(unittest.TestCase):

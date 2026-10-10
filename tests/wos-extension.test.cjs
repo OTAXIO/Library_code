@@ -107,7 +107,16 @@ const fixture=fs.readFileSync(path.join(__dirname,'fixtures/wos-navigation.html'
         ['Missing synthetic paper','Missing synthetic paper','10.1234/test'],'exactly one Search per paper despite full-navigation preparation and slow hydration');
       assert.equal(searchPageVisits.get(origin),3,'one clean reload after each zero');
       console.log(`PASS ${origin} real navigation -> isolated record probe despite page DOM hook -> full record`);
-      const exported=await invoke('wos_export',query);
+      query.record_url=searched.data.record_url;
+      const preview=await invoke('wos_export_prepare',query);
+      assert.equal(preview.ok,true,JSON.stringify(preview));assert.equal(preview.data.ready,true);
+      assert.equal(await site.evaluate(()=>exportsMade),0,'preparing Full Record never clicks final Export');
+      const snapshot=await invoke('wos_diagnose',{});
+      assert.equal(snapshot.data.page.export_dialog,true,'a known export modal can pass resume preflight');
+      const pending=await invoke('wos_export_status',query);
+      assert.equal(pending.ok,true,JSON.stringify(pending));assert.equal(pending.data.state,'unsubmitted');
+      console.log(`PASS ${origin} separate prepared Full Record preview + read-only unsubmitted receipt`);
+      const exported=await invoke('wos_export',{...query,prepared:true});
       if(!exported.ok)console.log('Offline download diagnosis',await worker.evaluate(async()=>
         (await chrome.downloads.search({})).map(item=>({state:item.state,error:item.error,size:item.fileSize,txt:/\.txt$/i.test(item.filename)}))));
       assert.equal(exported.ok,true,JSON.stringify(exported));
@@ -121,7 +130,7 @@ const fixture=fs.readFileSync(path.join(__dirname,'fixtures/wos-navigation.html'
       assert.equal(await site.evaluate(()=>exportsMade),1,'a submitted export is not clicked twice');
       console.log(`PASS ${origin} one Full Record TXT download correlated and verified on disk; repeat submission refused`);
     }
-    console.log('WOS extension: 14 end-to-end checks passed across both origins. Navigation-only startup, real Python preflight, synthetic pages/files only.');
+    console.log('WOS extension: 16 end-to-end checks passed across both origins. Separate prepare/final Export, real Python preflight, synthetic pages/files only.');
   }finally{
     if(context)await context.close();
     backend.stdin.end(JSON.stringify({exit:true})+'\n');

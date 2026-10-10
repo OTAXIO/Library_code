@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 
-from automation import ImportStore, MAX_TXT, doi, wos, norm, parse_wos
+from automation import ImportStore, doi, wos, norm
 from core import SafetyStop
+from wos_files import archive_export, find_export, read_export, record_ut
 
 
-def preflight(bridge):
+def preflight(bridge, *, resume_export=False):
     """Read actual extension capabilities before Search or export."""
     # Read-only capability/access handshake, not search-form readiness. The
     # bound tab is activated and prepared by the extension before any Search.
@@ -16,17 +18,19 @@ def preflight(bridge):
         result = bridge.call("wos_diagnose", {}, timeout=25)
     except SafetyStop as exc:
         if "未知 WOS 调度命令" in str(exc):
-            raise SafetyStop("当前插件仍是旧版本，请重载 0.4.3、刷新工作页并重新绑定；尚未提交检索。") from exc
+            raise SafetyStop("当前插件仍是旧版本，请重载 0.4.4、刷新工作页并重新绑定；尚未提交检索。") from exc
         raise
     if (not isinstance(result, dict) or type(result.get("wos_download_protocol")) is not int
             or result.get("wos_download_protocol") != 1
             or type(result.get("search_prepare_protocol")) is not int
             or result.get("search_prepare_protocol") != 1
+            or type(result.get("export_prepare_protocol")) is not int
+            or result.get("export_prepare_protocol") != 1
             or result.get("result_reader") != "shared-diagnostic"
             or result.get("read_results_world") != "ISOLATED"
             or not re.fullmatch(r"\d+\.\d+\.\d+", str(result.get("extension_version", "")))
-            or tuple(map(int, result["extension_version"].split("."))) < (0, 4, 3)):
-        raise SafetyStop("插件下载接口不兼容，请重载 0.4.3、刷新 WOS 页并重新绑定；未提交检索或下载。")
+            or tuple(map(int, result["extension_version"].split("."))) < (0, 4, 4)):
+        raise SafetyStop("插件下载接口不兼容，请重载 0.4.4、刷新 WOS 页并重新绑定；未提交检索或下载。")
     page = result.get("page")
     if (not isinstance(page, dict)
             or any(type(page.get(k)) is not bool for k in ("core_search_route", "wos_error", "site_timeout", "login_required", "busy"))
@@ -38,50 +42,129 @@ def preflight(bridge):
         raise SafetyStop("WOS 网站返回 5xx/连接超时页；名单保持原样，这不是论文零结果。")
     if page["login_required"]:
         raise SafetyStop("WOS 登录或验证码需要人工处理；本轮尚未开始，名单保持原样。")
-    if page["dialog_count"]:
+    if page["dialog_count"] and not (resume_export and page.get("export_dialog") is True):
         raise SafetyStop("WOS 当前存在操作弹窗，请先人工处理；未提交检索。")
     return {"extension_version": result["extension_version"]}
 
 
 class WOSDownload:
     """Download/archive only; the orchestrator validates affiliation and identity."""
-    def __init__(self, bridge, store, unchanged, stop, audit):
+    def __init__(self, bridge, store, unchanged, stop, audit, download_dir=None):
         self.bridge, self.store, self.unchanged, self.stop, self.audit = bridge, store, unchanged, stop, audit
+        self.download_dir = Path(download_dir) if download_dir is not None else Path.home() / "Downloads"
+
+    def _guard(self):
+        self.unchanged()
+        if self.stop is not None and self.stop.is_set():
+            raise SafetyStop("已暂停下载。")
+
+    def _save_file(self, record, path, raw, candidate, expected_url=""):
+        self._guard()
+        for name, expected in (("doi", doi(record.doi)), ("wos", wos(record.wos))):
+            if expected and candidate[name] != expected:
+                raise SafetyStop(f"下载记录的 {name.upper()} 与名单冲突，未采纳。")
+        if norm(record.title) != norm(candidate["title"]):
+            raise SafetyStop("下载 TXT 题名与名单不一致，未建立关联或上传。")
+        if expected_url and candidate["wos"] != record_ut(expected_url):
+            raise SafetyStop("下载 TXT 与本次 WOS 单篇页面入藏号不一致，未采纳。")
+        saved_path = archive_export(self.store, path, raw, candidate, record)
+        state = {"phase": "downloaded", "candidate": candidate,
+                 "identity_confirmed": bool(doi(record.doi) or wos(record.wos)),
+                 "saved_path": saved_path, "original_path": str(path), "record_url": expected_url}
+        self.store.save(record, state)
+        self.audit("核验并存档 WOS TXT", "已执行", record.sa_id)
+        return state
+
+    def _recover_file(self, record, expected_url="", expected_sha=""):
+        self._guard()
+        found = find_export(record, (self.download_dir, self.store.root / "未关联下载"), expected_url)
+        if found and expected_sha and found[2]["sha256"] != expected_sha:
+            raise SafetyStop("下载目录 TXT 与原存档校验码不一致，不替换历史文件。")
+        return self._save_file(record, *found, expected_url) if found else None
 
     def prepare(self, record, progress=lambda _: None):
-        self.unchanged()
+        self._guard()
+        if record.owner != "谭勋策" or record.done or record.matches != 0:
+            raise SafetyStop("TXT 下载仅执行谭勋策的未完成零匹配任务。")
         cached = self.store.get(record)
-        if cached:
+        if cached is not None and not isinstance(cached, dict):
+            raise SafetyStop("TXT 下载日志结构异常，未执行浏览器操作。")
+        if cached and cached.get("phase") == "downloaded":
+            # A journal alone does not prove the file still exists. Restore only
+            # identical original bytes, never replace a historical hash silently.
+            try:
+                self.store.bytes(cached)
+            except OSError:
+                recovered = self._recover_file(record, cached.get("record_url", ""), cached["candidate"]["sha256"])
+                if recovered:
+                    return recovered
+                raise SafetyStop("已存档 TXT 缺失，下载目录也未找到原文件；不重复导出，请检查备份。") from None
             progress("复用已保存的 TXT；不重复检索或下载")
             return cached
+        progress("核查下载目录中已完成的 WOS TXT（按内容匹配，不按最新文件）")
+        expected_url = cached.get("record_url", "") if cached else ""
+        recovered = self._recover_file(record, expected_url)
+        if recovered:
+            progress("已接回下载目录中的同篇 TXT，原件保留；继续核验交大归属")
+            return recovered
         query = {"sa_id": record.sa_id, "title": record.title, "doi": doi(record.doi), "wos": wos(record.wos)}
-        for action in ("wos_search", "wos_export"):
-            if self.stop is not None and self.stop.is_set():
-                raise SafetyStop("已暂停下载。")
-            self.unchanged()
-            timeout = 120 if action == "wos_search" else 75
-            progress("WOS 检索并核验唯一文献（最多 120 秒）" if action == "wos_search"
-                     else "导出完整记录并等待 TXT（最多 75 秒）")
-            result = self.bridge.call(action, query, timeout=timeout)
-            self.audit(action, "已执行", record.sa_id)
+        if cached and cached.get("phase") not in ("export_preparing", "export_intent"):
+            raise SafetyStop("TXT 下载断点结构未知，不重复检索或导出。")
+        if not cached:
+            progress("WOS 检索并核验唯一文献（最多 120 秒）")
+            searched = self.bridge.call("wos_search", query, timeout=120)
+            self.audit("wos_search", "已执行", record.sa_id)
+            self._guard()
+            if not isinstance(searched, dict):
+                raise SafetyStop("WOS 检索没有返回唯一单篇记录。")
+            expected_url = searched.get("record_url", "")
+            record_ut(expected_url)
+            cached = {"phase": "export_preparing", "record_url": expected_url}
+            self.store.save(record, cached)
+        query["record_url"] = expected_url
+        if cached["phase"] == "export_intent":
+            # A lost ACK must never trigger another Export. Only the same page's
+            # unsubmitted owned preview can prove the old command never clicked.
+            progress("续查上一轮导出：只读确认，不重复点击 Export")
+            status = self.bridge.call("wos_export_status", query, timeout=25)
+            if not isinstance(status, dict) or status.get("state") != "unsubmitted":
+                raise SafetyStop("上一轮 Export 已提交或结果不明；尚未找到对应 TXT。请等待下载或人工导出后再继续，不重复导出。")
+        else:
+            self._guard()
+            progress("准备 Tab delimited / Full Record；白屏时仅在导出前恢复一次")
+            prepared = self.bridge.call("wos_export_prepare", query, timeout=75)
+            if (not isinstance(prepared, dict) or prepared.get("ready") is not True
+                    or record_ut(prepared.get("record_url", "")) != record_ut(expected_url)):
+                raise SafetyStop("未确认完整记录导出预览，未点击最终 Export。")
+        self._guard()
+        self.store.save(record, {"phase": "export_intent", "record_url": expected_url})
+        progress("点击弹窗最终 Export 并等待 TXT；不会重复提交")
+        try:
+            result = self.bridge.call("wos_export", {**query, "prepared": True}, timeout=75)
+        except SafetyStop:
+            # Some genuine HTTPS downloads have no full-record referrer. Keep
+            # the browser boundary strict; adopt local bytes only by exact
+            # title + supplied identifier + the searched UT, never by recency.
+            progress("导出回执未完成，核查本地对应 TXT（不重新点击 Export）")
+            for _ in range(6):
+                recovered = self._recover_file(record, expected_url)
+                if recovered:
+                    return recovered
+                if self.stop is not None:
+                    if self.stop.wait(1):
+                        raise SafetyStop("已暂停；导出断点保留，未重复提交。")
+                else:
+                    time.sleep(1)
+            raise
+        self.audit("wos_export", "已执行", record.sa_id)
         progress("核验下载文件的题名、DOI 和 WOS 号")
         if not isinstance(result, dict):
             raise SafetyStop("插件未返回完整的 TXT 下载结果。")
         path = Path(result.get("path", ""))
-        if result.get("sa_id") != record.sa_id or not path.is_absolute() or path.suffix.lower() != ".txt" or path.is_symlink():
+        if result.get("sa_id") != record.sa_id:
             raise SafetyStop("无法确定本次导出的 TXT 文件。")
-        if not path.is_file() or not 1 <= path.stat().st_size <= MAX_TXT:
-            raise SafetyStop("下载未完成或文件大小异常。")
-        raw = path.read_bytes()
-        candidate = parse_wos(raw)
-        for name in ("doi", "wos"):
-            if query[name] and query[name] != candidate[name]:
-                raise SafetyStop(f"下载记录的 {name.upper()} 与名单冲突，未采纳。")
-        confirmed = bool((query["doi"] or query["wos"]) and norm(record.title) == norm(candidate["title"]))
-        self.store.archive(raw)
-        state = {"phase": "downloaded", "candidate": candidate, "identity_confirmed": confirmed}
-        self.store.save(record, state)
-        return state
+        raw, candidate = read_export(path)
+        return self._save_file(record, path, raw, candidate, expected_url)
 
 
 def default_store(base=None):

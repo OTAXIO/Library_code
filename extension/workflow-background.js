@@ -100,7 +100,7 @@ async function dispatchWorkflow(command,pair) {
     // inspectWorkPage so the site's overridden globals/DOM prototypes cannot
     // make a visible record readable in diagnostics but absent during a run.
     // Search/export/import interactions retain their existing MAIN environment.
-    const readOnly=["wos_read_results","wos_diagnose"].includes(cmd.action);
+    const readOnly=["wos_read_results","wos_diagnose","wos_export_probe"].includes(cmd.action);
     const world=readOnly?"ISOLATED":"MAIN";
     const pending=chrome.scripting.executeScript({target:{tabId:id},world,func:fn,args:[cmd],
       ...(role==="wosTabId"?{injectImmediately:true}:{})});
@@ -121,9 +121,11 @@ async function dispatchWorkflow(command,pair) {
        counts.some(key=>!Number.isInteger(observed[key])||observed[key]<0||observed[key]>99999))
       throw new Error('WOS 页面就绪检查未返回完整结果；本轮未提交检索');
     const page=Object.fromEntries([...flags,...counts].map(key=>[key,observed[key]]));
+    page.export_dialog=observed.export_dialog===true;
     if(['login','verification',''].includes(observed.access_gate))page.access_gate=observed.access_gate;
     return {ok:true,data:{extension_version:chrome.runtime.getManifest().version,
-      wos_download_protocol:1,search_prepare_protocol:1,result_reader:'shared-diagnostic',read_results_world:'ISOLATED',page}};
+      wos_download_protocol:1,search_prepare_protocol:1,export_prepare_protocol:1,
+      result_reader:'shared-diagnostic',read_results_world:'ISOLATED',page}};
   }
   if(role==="importTabId") {
     if(command.action==='import_resolve')return execute(resolveLibraryRecord,command);
@@ -145,6 +147,19 @@ async function dispatchWorkflow(command,pair) {
       const path=new URL(tab.url).pathname;
       const alreadySearch=/^\/wos\/woscc\/(?:basic-search|advanced-search|fielded-search)\/?$/.test(path);
       if(!force&&alreadySearch)return;
+      if(!force){
+        // Do not destroy a user's open export/other dialog by navigating away
+        // from a record page for the next task. Only a journalled export resume
+        // can operate on the known Tab Delimited panel.
+        const observed=await execute(inspectWorkPage,{...command,action:'wos_diagnose'});
+        if(observed.error)throw new Error(observed.error);
+        if(!Number.isInteger(observed.dialog_count)||observed.dialog_count<0||observed.dialog_count>99999||
+            ['login_required','wos_error','site_timeout'].some(key=>typeof observed[key]!=='boolean'))
+          throw new Error('WOS 切换前的访问检查不完整，未开始下一篇检索');
+        if(observed.dialog_count>0)throw new Error('WOS 当前存在导出或其他操作弹窗，未切换到下一篇检索');
+        if(observed.login_required)throw new Error('WOS 当前需登录或人工验证，未切换检索页');
+        if(observed.wos_error||observed.site_timeout)throw new Error('WOS 当前网站报错，未切换检索页');
+      }
       if(force&&new URL(tab.url).origin===workOrigin&&path==="/wos/woscc/basic-search"){
         await chrome.tabs.reload(id);
       } else await chrome.tabs.update(id,{url:workOrigin+"/wos/woscc/basic-search"});
@@ -248,6 +263,14 @@ async function dispatchWorkflow(command,pair) {
         // tabs.update resolves before the new document necessarily commits. A
         // read-only probe may still see the previous record; never accept it.
       }
+      if(state==='loading'&&navigated&&lastDiagnostic?.blank_record===true&&
+          isWOSRecordPage(tab.url,workOrigin)&&
+          decodedWOSPath(tab.url).replace(/\/$/,'')===decodedWOSPath(navigationTarget).replace(/\/$/,'')){
+        // The result list already proved exactly one canonical UT. Hand that
+        // target to the separately journalled export preparation, which may
+        // reload it once before any final Export, instead of timing out Search.
+        return {ok:true,data:{state:'record_needs_preparation',record_url:workOrigin+new URL(tab.url).pathname}};
+      }
       if(state==="single"){
         const target=probe.data?.navigate_url;
         if(!isWOSRecordPage(target,workOrigin))throw new Error("WOS 唯一结果链接未通过安全校验，未打开");
@@ -265,9 +288,57 @@ async function dispatchWorkflow(command,pair) {
     }
     return {ok:false,error:wosSearchTimeout(lastDiagnostic)};
   }
-  if(command.action!=="wos_export")throw new Error("未知 WOS 调度命令");
-  const prepared=await execute(runWOSCommand,{...command,action:"wos_prepare_export"});
+  if(command.action==='wos_export_status')
+    return execute(runWOSCommand,{...command,action:'wos_export_status'});
+  if(!['wos_export','wos_export_prepare'].includes(command.action))throw new Error("未知 WOS 调度命令");
+  const prepareExport=async()=>{
+    // Only export PREPARATION can recover a blank document. The final Export
+    // is a separate short submission and is never refreshed/retried below.
+    const end=Math.min(Date.now()+45000,command.expires-12000);
+    let reloaded=false,blankSince=0;
+    while(Date.now()<end){
+      let probe;
+      try{probe=await execute(runWOSCommand,{...command,action:'wos_export_probe'});}
+      catch(error){
+        if(transientInjectionError(error)){await new Promise(r=>setTimeout(r,200));continue;}
+        throw error;
+      }
+      if(!probe.ok)return probe;
+      const state=probe.data?.state;
+      if(state==='blank'){
+        blankSince=blankSince||Date.now();
+        if(!reloaded&&Date.now()-blankSince>=1500){
+          const current=await chrome.tabs.get(id);
+          if(!isWOSRecordPage(current.url,workOrigin)||
+              command.record_url&&decodedWOSPath(current.url).replace(/\/$/,'')!==decodedWOSPath(command.record_url).replace(/\/$/,''))
+            throw new Error('白屏恢复目标与已核验的 WOS 单篇记录不一致，未刷新');
+          reloaded=true;await chrome.tabs.reload(id);
+        }
+      }else if(['ready','dialog'].includes(state)){
+        blankSince=0;
+        let prepared;
+        try{prepared=await execute(runWOSCommand,{...command,action:'wos_prepare_export'});}
+        catch(error){
+          if(transientInjectionError(error)){await new Promise(r=>setTimeout(r,200));continue;}
+          throw error;
+        }
+        if(prepared.ok)return prepared;
+        // Opening the format/preview can leave WOS blank. Observe once; no
+        // final Export has run here. Unknown popups and other errors stay put.
+        const after=await execute(runWOSCommand,{...command,action:'wos_export_probe'});
+        if(after.ok&&after.data?.state==='blank'&&!reloaded){
+          blankSince=Date.now()-1500;continue;
+        }
+        return prepared;
+      }else if(state!=='loading')throw new Error('WOS 返回未知导出准备状态，未点击最终 Export');
+      await new Promise(r=>setTimeout(r,200));
+    }
+    return {ok:false,error:'[WOS 已暂停] WOS 单篇导出页仍未恢复；仅在导出前刷新过至多一次，未点击最终 Export'};
+  };
+  const prepared=command.action==='wos_export'&&command.prepared===true?
+    await execute(runWOSCommand,{...command,action:'wos_check_export'}):await prepareExport();
   if(!prepared.ok)return prepared;
+  if(command.action==='wos_export_prepare')return prepared;
   const recordURL=prepared.data.record_url;
   if(!isWOSPage(recordURL) || new URL(recordURL).origin!==workOrigin)throw new Error("WOS 导出记录域名与绑定页面不一致，未开始下载");
   // Listen only during this single export. Download origin/referrer must bind it
@@ -281,6 +352,7 @@ async function dispatchWorkflow(command,pair) {
   try {
     const clicked=await execute(runWOSCommand,{...command,action:"wos_download"});
     if(!clicked.ok)return clicked;
+    if(clicked.data?.submitted!==true)throw new Error('WOS 未返回最终 Export 提交回执，不重复提交');
     // Leave the same result-delivery margin used by the page adapter. The
     // authenticated /result POST has its own eight-second timeout.
     const end=Math.min(Date.now()+35000,command.expires-12000);

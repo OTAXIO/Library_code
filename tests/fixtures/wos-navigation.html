@@ -26,7 +26,7 @@ if(location.pathname.includes('/summary/')){
     format.innerHTML='<mat-icon>description</mat-icon>'+(cn?'制表符分隔文件':'Tab delimited file');main.append(format);
     format.onclick=()=>{
       format.remove();const dialog=document.createElement('section');dialog.setAttribute('role','dialog');
-      dialog.innerHTML='<select aria-label="Record Content"><option>Author, Title, Source</option><option>'+(cn?'完整记录':'Full Record')+'</option></select><input type="number" value="4"><input type="number" value="7"><button><mat-icon>download</mat-icon>'+(cn?'导出':'Export')+'</button>';
+      dialog.innerHTML='<h2>Export Records to Tab Delimited File</h2><select aria-label="Record Content"><option>Author, Title, Source</option><option>'+(cn?'完整记录':'Full Record')+'</option></select><input type="number" value="4"><input type="number" value="7"><button><mat-icon>download</mat-icon>'+(cn?'导出':'Export')+'</button>';
       main.append(dialog);
       dialog.querySelector('button').onclick=()=>{
         // A partial content/range never produces a successful fixture download.

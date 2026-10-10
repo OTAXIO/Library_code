@@ -64,6 +64,21 @@ async function runWOSCommand(command) {
     visit(el);return norm(parts.join(''));
   };
   const actionLabel=el=>searchText(el)||norm(el.getAttribute('aria-label'));
+  const exportFormats=["Tab delimited file","Tab-delimited file","Tab delimited","制表符分隔文件","制表符分隔","制表符"];
+  const fullContent=["Full Record","全记录","完整记录"];
+  const exportSelectors=root=>{
+    const matches=all('select,[role="combobox"],[aria-haspopup="listbox"]',root);
+    return matches.filter(el=>!matches.some(other=>other!==el&&el.contains(other)));
+  };
+  const exportPanels=()=>{
+    const dialogs=all('mat-dialog-container,[role="dialog"]');
+    const panels=dialogs.filter(el=>exportSelectors(el).length===1&&
+      all('button,[role="button"],a',el).filter(control=>["Export","导出"].includes(actionLabel(control))).length===1);
+    return panels.filter(el=>!panels.some(other=>other!==el&&el.contains(other)));
+  };
+  const isTabExportPanel=panel=>all('h1,h2,h3,[role="heading"],.mat-dialog-title,.mat-mdc-dialog-title',panel)
+    .some(el=>["Export Records to Tab Delimited File","将记录导出到制表符分隔文件","导出记录至制表符分隔文件",
+      "导出记录到制表符分隔文件","导出记录到制表符分隔的文件"].includes(actionLabel(el)));
   const searchButton=(field,input)=>{
     if(!field.isConnected||!input.isConnected)fail("文献检索区域已变化，请重新核验页面");
     const short=['search','检索','搜索','檢索','搜尋'];
@@ -198,6 +213,12 @@ async function runWOSCommand(command) {
     if(!fullRecord())fail("未处于 WOS 核心合集单篇完整记录页");
     const ut=decodedPath(location.pathname).match(/WOS:\d{15}/)[0];
     if(command.wos && command.wos!==ut)fail("WOS 页面入藏号与名单不一致");
+    if(command.record_url){
+      let expected;try{expected=new URL(command.record_url);}catch{fail("待导出单篇网址无效");}
+      if(expected.origin!==location.origin||expected.search||expected.hash||
+          !fullRecordPath(expected.pathname)||decodedPath(expected.pathname).replace(/\/$/,'')!==decodedPath(location.pathname).replace(/\/$/,''))
+        fail("WOS 页面已不是本次检索确认的单篇记录，未导出");
+    }
     return location.origin+location.pathname;
   };
   const resultState = () => {
@@ -227,8 +248,32 @@ async function runWOSCommand(command) {
   };
   try {
     check();
-    if(!["wos_prepare_search","wos_search","wos_start_search","wos_read_results","wos_verify_record","wos_prepare_export","wos_check_export","wos_download"].includes(command.action))fail("未知 WOS 命令");
+    if(!["wos_prepare_search","wos_search","wos_start_search","wos_read_results","wos_verify_record","wos_export_probe","wos_export_status","wos_prepare_export","wos_check_export","wos_download"].includes(command.action))fail("未知 WOS 命令");
     if(typeof command.title!=="string" || !command.title.trim() || command.title.length>1500)fail("题名缺失或过长");
+    if(command.action==='wos_export_probe'){
+      const recordURL=fingerprint();
+      const dialogs=all('mat-dialog-container,[role="dialog"]');
+      if(dialogs.length){
+        const panels=exportPanels();
+        if(panels.length!==1||!isTabExportPanel(panels[0])||
+            dialogs.some(el=>!el.contains(panels[0])&&!panels[0].contains(el)))fail("WOS 存在非制表符导出弹窗，请人工处理");
+        return {ok:true,data:{state:'dialog',record_url:recordURL}};
+      }
+      const busy=all('[aria-busy="true"],[role="progressbar"],mat-spinner,mat-progress-bar,.mat-mdc-progress-spinner').length>0;
+      const exports=all('button,[role="button"],a').filter(el=>["Export","导出"].includes(actionLabel(el)));
+      if(exports.length>1)fail("单篇页 Export 按钮不唯一，未开始导出");
+      return {ok:true,data:{state:!busy&&exports.length===1?'ready':
+        !busy&&!norm(document.body?.innerText)?'blank':'loading',record_url:recordURL}};
+    }
+    if(command.action==='wos_export_status'){
+      const recordURL=fingerprint(),state=window.__saWOSExport;
+      if(!state||state.id!==command.sa_id||state.url!==recordURL)return {ok:true,data:{state:'unknown',record_url:recordURL}};
+      if(state.submitted)return {ok:true,data:{state:'submitted',record_url:recordURL}};
+      if(!state.dialog.isConnected||!state.select.isConnected||!visible(state.dialog)||
+          !fullContent.includes(selection(state.select))||state.ranges.some(el=>!el.isConnected||el.value!=='1'))
+        return {ok:true,data:{state:'unknown',record_url:recordURL}};
+      return {ok:true,data:{state:'unsubmitted',record_url:recordURL}};
+    }
     if(command.action==="wos_read_results") {
       if(all('[role="dialog"],mat-dialog-container').length)fail("WOS 有弹窗，请人工处理");
       return {ok:true,data:resultState()};
@@ -365,22 +410,35 @@ async function runWOSCommand(command) {
     }
     const recordURL=fingerprint();
     if(command.action==="wos_prepare_export") {
-      if(all('[role="dialog"],mat-dialog-container').length)fail("已有 WOS 弹窗，请人工关闭后再导出");
-      click(button(["Export","导出"]));
-      await wait(()=>all('[role="menuitem"],button,a,mat-option').some(el=>["Tab delimited file","Tab-delimited file","Tab delimited","制表符分隔文件","制表符分隔","制表符"].includes(actionLabel(el))),"导出格式",5000);
-      click(one(all('[role="menuitem"],button,a,mat-option').filter(el=>["Tab delimited file","Tab-delimited file","Tab delimited","制表符分隔文件","制表符分隔","制表符"].includes(actionLabel(el))),"Tab delimited"));
-      await wait(()=>all('mat-dialog-container,[role="dialog"]').length,"导出设置",5000);
+      const previous=window.__saWOSExport;
+      if(previous?.submitted&&previous.url===recordURL)fail("该单篇 Export 已提交；不重复导出，请检查下载文件");
+      const existing=all('[role="dialog"],mat-dialog-container');
+      if(existing.length){
+        const panels=exportPanels();
+        // A recovered modal needs its exact format heading and the searched
+        // record URL, not merely a button named Export. Foreign dialogs stay put.
+        if(!command.record_url||panels.length!==1||!isTabExportPanel(panels[0])||
+            existing.some(el=>!el.contains(panels[0])&&!panels[0].contains(el)))
+          fail("已有不明 WOS 弹窗，未自动关闭或提交");
+      }else{
+        const formats=()=>all('[role="menuitem"],button,a,mat-option').filter(el=>exportFormats.includes(actionLabel(el)));
+        if(!formats().length)click(button(["Export","导出"]));
+        await wait(()=>formats().length,"导出格式",12000);
+        click(one(formats(),"Tab delimited"));
+        await wait(()=>all('mat-dialog-container,[role="dialog"]').length,"导出设置",12000);
+      }
       const dialogs=all('mat-dialog-container,[role="dialog"]');
       // WOS now uses a nested role=dialog around Record Content alone. Choose
       // the smallest complete export panel, not the smallest arbitrary dialog.
-      const panels=dialogs.filter(el=>
-        all('select,[role="combobox"]',el).length===1 &&
-        all('button,[role="button"],a',el).filter(control=>["Export","导出"].includes(actionLabel(control))).length===1);
-      const dialog=one(panels.filter(el=>!panels.some(other=>other!==el&&el.contains(other))),"导出设置窗口");
-      const selectors=all('select,[role="combobox"]',dialog);
+      const dialog=one(exportPanels(),"导出设置窗口");
+      if(dialogs.some(el=>!el.contains(dialog)&&!dialog.contains(el)))fail("存在无关操作弹窗，未导出");
+      const selectors=exportSelectors(dialog);
       const select=one(selectors,"记录内容选择器");
-      const full=["Full Record","全记录","完整记录"];
-      if(select.tagName==="SELECT"){
+      const full=fullContent;
+      if(full.includes(selection(select))){
+        // Full Record is already selected in the user's shown modal. Do not
+        // reopen a dropdown and wait for an option that need not be mounted.
+      }else if(select.tagName==="SELECT"){
         select.value=one([...select.options].filter(o=>full.includes(norm(o.textContent))),"Full Record").value;
         select.dispatchEvent(new Event("change",{bubbles:true}));
       }else{
@@ -396,16 +454,31 @@ async function runWOSCommand(command) {
       const selected=selection(select);
       if(!full.includes(selected))fail("未确认 Full Record 选项");
       window.__saWOSExport={id:command.sa_id,url:recordURL,dialog,select,ranges,submitted:false};
+      const owned=window.__saWOSExport;
+      // A user may finish the shown modal while the desktop is paused. Count
+      // that actual button click too, so a later resume cannot export it twice.
+      button(["Export","导出"],dialog).addEventListener('click',()=>{owned.submitted=true;},{capture:true,once:true});
       return {ok:true,data:{ready:true,record_url:recordURL}};
     }
     const state=window.__saWOSExport;
-    if(!state || state.id!==command.sa_id || state.url!==recordURL || state.submitted || !visible(state.dialog))fail("导出预览失效或已提交");
+    if(!state || state.id!==command.sa_id || state.url!==recordURL || state.submitted ||
+        !state.dialog.isConnected||!state.select.isConnected||!visible(state.dialog))fail("导出预览失效或已提交");
     const selected=selection(state.select);
-    if(!["Full Record","全记录","完整记录"].includes(selected) || state.ranges.some(el=>el.value!=="1"))fail("导出选项被修改");
+    if(!fullContent.includes(selected) || state.ranges.some(el=>!el.isConnected||el.value!=="1"))fail("导出选项被修改");
     // Read-only preview validation never submits the prepared export twice.
     if(command.action==="wos_check_export")return {ok:true,data:{ready:true,record_url:recordURL}};
+    const submit=button(["Export","导出"],state.dialog);
+    if(submit.disabled||submit.getAttribute('aria-disabled')==='true')fail("最终 Export 尚不可用");
     state.submitted=true;
-    click(button(["Export","导出"],state.dialog));
+    // Return the at-most-once receipt before WOS can unload this JS context.
+    // A late failure is unknown, never permission to click a second time.
+    setTimeout(()=>{
+      try{
+        if(fingerprint()!==recordURL||!state.dialog.isConnected||!state.select.isConnected||
+            !fullContent.includes(selection(state.select))||state.ranges.some(el=>!el.isConnected||el.value!=='1'))return;
+        click(submit);
+      }catch{/* The durable desktop intent preserves the uncertain outcome. */}
+    },0);
     return {ok:true,data:{submitted:true,record_url:recordURL}};
   } catch(error){return {ok:false,error:"[WOS 已暂停] "+error.message};}
 }

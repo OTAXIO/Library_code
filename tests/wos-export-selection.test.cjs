@@ -36,7 +36,7 @@ const command=action=>({action,sa_id:'offline-material-export',title:'Synthetic 
             format.remove();
             const panel=document.createElement('mat-dialog-container');
             panel.setAttribute('role','dialog');
-            panel.innerHTML='<mat-select role="combobox" aria-label="Record Content" tabindex="0">'+
+            panel.innerHTML='<h2>Export Records to Tab Delimited File</h2><mat-select role="combobox" aria-label="Record Content" tabindex="0">'+
               '<span class="selected-content">Author, Title, Source</span><mat-icon>'+icon+'</mat-icon></mat-select>'+
               '<input type="number" value="4"><input type="number" value="7">'+
               '<button type="button"><mat-icon>download</mat-icon><span>Export</span></button>';
@@ -78,6 +78,54 @@ const command=action=>({action,sa_id:'offline-material-export',title:'Synthetic 
       assert.equal(observedDownloads,0,'unsafe content must never generate any download');
     };
     for(const origin of origins){
+      const expected=origin+recordPath;
+      await reset(origin);
+      assert.equal((await prepare()).ok,true);
+      // Reproduce the user's shown state: the modal exists and Full Record is
+      // already selected. The selector is a listbox button, not a combobox.
+      await page.evaluate(()=>{
+        const selector=document.querySelector('mat-select');
+        selector.setAttribute('role','button');selector.setAttribute('aria-haspopup','listbox');
+        const inner=document.createElement('span');inner.setAttribute('role','combobox');
+        inner.tabIndex=0;while(selector.firstChild)inner.append(selector.firstChild);
+        selector.append(inner);
+        // A nested role=dialog around Record Content alone is not the complete panel.
+        const small=document.createElement('div');small.setAttribute('role','dialog');
+        selector.replaceWith(small);small.append(selector);
+      });
+      const resumed=await page.evaluate(runWOSCommand,{...command('wos_prepare_export'),record_url:expected});
+      assert.equal(resumed.ok,true,JSON.stringify(resumed));
+      assert.equal(await page.evaluate(()=>contentSelections),1,'an already selected Full Record is not reopened');
+      assert.equal((await page.evaluate(runWOSCommand,{...command('wos_export_status'),record_url:expected})).data.state,'unsubmitted');
+      const resumedDownload=page.waitForEvent('download');
+      assert.equal((await page.evaluate(runWOSCommand,{...command('wos_download'),record_url:expected})).ok,true);
+      await resumedDownload;
+      assert.equal(await page.evaluate(()=>exportsMade),1);
+      assert.equal((await page.evaluate(runWOSCommand,{...command('wos_export_status'),record_url:expected})).data.state,'submitted');
+      const repeated=await page.evaluate(runWOSCommand,{...command('wos_prepare_export'),record_url:expected});
+      assert.equal(repeated.ok,false);assert.equal(await page.evaluate(()=>exportsMade),1);
+      console.log(`PASS ${new URL(origin).hostname} existing Tab Delimited / Full Record modal resumes exactly once`);checks++;
+
+      await reset(origin);assert.equal((await prepare()).ok,true);
+      await page.locator('mat-dialog-container h2').evaluate(el=>el.textContent='Export Records to Excel');
+      const foreign=await page.evaluate(runWOSCommand,{...command('wos_prepare_export'),record_url:expected});
+      assert.equal(foreign.ok,false);assert.equal(await page.evaluate(()=>exportsMade),0);
+      console.log(`PASS ${new URL(origin).hostname} another export format is not adopted`);checks++;
+
+      await reset(origin);assert.equal((await prepare()).ok,true);
+      const wrong=await page.evaluate(runWOSCommand,{...command('wos_prepare_export'),record_url:expected.replace('000123456789012','000999999999999')});
+      assert.equal(wrong.ok,false);assert.equal(await page.evaluate(()=>exportsMade),0);
+      console.log(`PASS ${new URL(origin).hostname} a different searched UT cannot authorize the open modal`);checks++;
+
+      await reset(origin);assert.equal((await prepare()).ok,true);
+      const manualDownload=page.waitForEvent('download');
+      await page.locator('mat-dialog-container > button').click();await manualDownload;
+      const manualState=await page.evaluate(runWOSCommand,{...command('wos_export_status'),record_url:expected});
+      assert.equal(manualState.data.state,'submitted');
+      assert.equal((await page.evaluate(runWOSCommand,{...command('wos_prepare_export'),record_url:expected})).ok,false);
+      assert.equal(await page.evaluate(()=>exportsMade),1);
+      console.log(`PASS ${new URL(origin).hostname} a user's manual final Export also blocks duplicate resume`);checks++;
+
       for(const [full,icon] of [['Full Record','arrow_drop_down'],['完整记录','expand_more'],['全记录','arrow_drop_down']]){
         await reset(origin,{full,icon});
         const ready=await prepare();assert.equal(ready.ok,true,JSON.stringify(ready));

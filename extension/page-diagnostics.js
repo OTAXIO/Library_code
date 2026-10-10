@@ -114,6 +114,19 @@ function inspectWorkPage(command) {
     .filter(el=>visible(el)&&!el.closest('[hidden],[inert],[aria-hidden="true"]')).length;
   let recordRoute=false;
   try{recordRoute=!/%(?:2f|5c)/i.test(u.pathname)&&/^\/wos\/woscc\/full-record\/WOS:\d{15}\/?$/.test(decodeURIComponent(u.pathname));}catch{}
+  const dialogs=[...document.querySelectorAll('[role="dialog"],mat-dialog-container')].filter(visible);
+  const exportHeadings=['Export Records to Tab Delimited File','将记录导出到制表符分隔文件','导出记录至制表符分隔文件',
+    '导出记录到制表符分隔文件','导出记录到制表符分隔的文件'];
+  const exportPanels=dialogs.filter(panel=>{
+    const selectors=[...panel.querySelectorAll('select,[role="combobox"],[aria-haspopup="listbox"]')].filter(visible);
+    const unique=selectors.filter(el=>!selectors.some(other=>other!==el&&el.contains(other)));
+    const actions=[...panel.querySelectorAll('button,[role="button"],a')].filter(el=>visible(el)&&
+      ['Export','导出'].includes(cleanText(el)||normal(el.getAttribute('aria-label'))));
+    return unique.length===1&&actions.length===1&&[...panel.querySelectorAll('h1,h2,h3,[role="heading"],.mat-dialog-title,.mat-mdc-dialog-title')]
+      .some(el=>visible(el)&&exportHeadings.includes(cleanText(el)));
+  }).filter(panel=>!dialogs.some(other=>other!==panel&&panel.contains(other)&&
+      [...other.querySelectorAll('h1,h2,h3,[role="heading"]')].some(el=>exportHeadings.includes(cleanText(el)))));
+  const exportDialog=recordRoute&&exportPanels.length===1&&dialogs.every(el=>el.contains(exportPanels[0])||exportPanels[0].contains(el));
   const errorHeadings=[document.title,...[...document.querySelectorAll('h1,h2,[role="alert"]')]
     .filter(visible).map(el=>el.innerText)].map(normal);
   const siteTimeout=errorHeadings.some(label=>/\b(?:Error\s+(?:code\s*)?|HTTP\s+)(?:500|502|503|504|520|521|522|523|524)\b|\b524\s*:\s*A timeout occurred\b/i.test(label)
@@ -122,7 +135,7 @@ function inspectWorkPage(command) {
     wos_error:/Oops,?\s*something went wrong!?/i.test(text),
     site_timeout:siteTimeout,
     core_search_route:/^\/wos\/woscc\/(?:basic-search|advanced-search|fielded-search)\/?$/.test(u.pathname),
-    query_input_count:queryInputs.length,login_required:loginRequired,access_gate:gateKind,dialog_count:dialogCount,
+    query_input_count:queryInputs.length,login_required:loginRequired,access_gate:gateKind,dialog_count:dialogCount,export_dialog:exportDialog,
     summary_route:summary,record_route:recordRoute,
     zero_result:noResult||(summary&&totals.size===1&&totals.has(0)&&!recordLinks.size&&!busy),busy,
     result_total:totals.size===1?[...totals][0]:null,result_total_conflict:totals.size>1,
@@ -140,6 +153,7 @@ function inspectWorkPage(command) {
   if(dialogCount)
     return fail('WOS 有弹窗，请人工处理');
   const diagnostic={summary_route:summary,record_route:recordRoute,busy,
+    blank_record:recordRoute&&!busy&&!text.trim(),
     result_total:data.result_total,result_total_conflict:data.result_total_conflict,
     canonical_record_link_count:recordLinks.size};
   const result=(state,more={})=>({ok:true,data:{state,diagnostic,...more}});
