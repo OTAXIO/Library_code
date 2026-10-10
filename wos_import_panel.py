@@ -12,7 +12,7 @@ from ui_theme import P, style_text
 from wos_import import build_plan, require_owner, run_import_plan
 
 LABELS = {"ready": "本轮可入库", "resume": "本轮续验", "deferred": "需人工核验", "pushed": "已入库·待关联",
-          "synced": "原已处理", "halted": "已暂停", "queued": "下轮可入库"}
+          "synced": "原已处理", "halted": "已暂停", "queued": "下轮再核验", "skip": "本轮只记跳过"}
 SCOPES = {"待补论文（不含跳过项）": "pending", "已跳过论文（是否识别为 2）": "skipped"}
 
 
@@ -83,7 +83,7 @@ class WOSImportPanel:
         self.tree.heading("state", text="导入状态")
         self.tree.column("title", width=280, minwidth=140)
         self.tree.column("state", width=140, minwidth=125, stretch=False)
-        for tag, color in (("ready", P.amber), ("resume", P.amber), ("deferred", P.red),
+        for tag, color in (("ready", P.amber), ("resume", P.amber), ("deferred", P.red), ("skip", P.red),
                            ("halted", P.red), ("pushed", P.green), ("synced", P.green)):
             self.tree.tag_configure(tag, foreground=color)
         scrollbar = ttk.Scrollbar(listing, command=self.tree.yview)
@@ -189,7 +189,7 @@ class WOSImportPanel:
                 for i in (*plan.items, *plan.excluded)}
             self.render()
             counts = {s: sum(i.status == s for i in plan.items) for s in LABELS}
-            self.status.set(f"本轮入库 {counts['ready']} 篇 · 续验 {counts['resume']} 篇 · 另列 {len(plan.excluded)} 条（不占本轮名额）"
+            self.status.set(f"可入库 {counts['ready']} 篇 · 续验 {counts['resume']} 篇 · 只记跳过 {counts['skip']} 条 · 另列 {len(plan.excluded)} 条"
                             + (f" · {len(plan.file_errors)} 个文件格式不适用。" if plan.file_errors else ""))
             if not plan.items:
                 self.status.set("本轮没有可直接入库的文件。可选中下表论文查看原因，再点“核验所选论文”。" if plan.excluded else
@@ -214,7 +214,9 @@ class WOSImportPanel:
             if not self.reviewed.get():
                 raise SafetyStop("请逐条核验预检列表的文献身份及本库缺失，再勾选确认。")
             count = sum(i.status in ("ready", "resume") for i in self.plan.items)
+            skipped = sum(i.status == 'skip' for i in self.plan.items)
             if not messagebox.askyesno("确认本轮论文入库", f"负责人：{app.owner.get()}\n范围：{self.scope.get()}\n本轮 {count} 篇可入库 / 待续验。\n\n"
+                f"另有 {skipped} 条只重查并记录跳过，不执行入库。\n"
                 "每条先重查 SA；原已处理的只同步 Excel。\n所属机构：上海交通大学；说明：SA补充-名单ID。\n"
                 "按 PPT 查重、优先级合并、新增并推送，可能合并已有文献元数据。\n"
                 "不上传 PDF；新导入不会直接写完成标记。结果不明时停止，不重复提交。\n\n是否继续？", parent=app.root):

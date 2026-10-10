@@ -235,16 +235,72 @@ test('an unreturned read probe is bounded; observation retries never repeat Sear
 });
 
 test('download capability check is read-only and reports the actual running extension',async()=>{
-  let executed=false;
+  const injections=[];
   const sandbox={URL,Date,setTimeout,chrome:{
-    runtime:{getManifest:()=>({version:'0.3.27'})},
+    runtime:{getManifest:()=>({version:'0.3.29'})},
     tabs:{get:async()=>({id:2,url:origins[1]+'/wos/woscc/summary/existing'})},
-    scripting:{executeScript:async()=>{executed=true;throw new Error('preflight must not submit or inject');}}
+    scripting:{executeScript:async input=>{
+      injections.push(input);
+      return [{result:{core_search_route:false,query_input_count:0,wos_error:false,
+        login_required:false,dialog_count:0,busy:false,private_text:'PRIVATE_QUERY'}}];
+    }}
   }};
   loadPolicy(sandbox);
-  const result=await sandbox.dispatchWorkflow({action:'wos_diagnose',expires:Date.now()+15000},{tabId:1,wosTabId:2});
-  assert.equal(result.data.extension_version,'0.3.27');
+  const result=await sandbox.dispatchWorkflow({action:'wos_diagnose',expires:Date.now()+25000},{tabId:1,wosTabId:2});
+  assert.equal(result.data.extension_version,'0.3.29');
   assert.equal(result.data.wos_download_protocol,1);
   assert.equal(result.data.result_reader,'shared-diagnostic');
-  assert.equal(executed,false);
+  assert.equal(injections.length,1);
+  assert.equal(injections[0].world,'ISOLATED');
+  assert.equal(injections[0].func,sandbox.inspectWorkPage);
+  assert.equal(injections[0].args[0].action,'wos_diagnose');
+  assert.equal(JSON.stringify(result).includes('PRIVATE_QUERY'),false);
+});
+
+test('download preflight waits for delayed search inputs without a Search or navigation',async()=>{
+  let reads=0;
+  const sandbox={URL,Date,setTimeout,chrome:{
+    runtime:{getManifest:()=>({version:'0.3.29'})},
+    tabs:{get:async()=>({id:2,url:origins[1]+'/wos/woscc/basic-search'})},
+    scripting:{executeScript:async input=>{
+      assert.equal(input.world,'ISOLATED');
+      assert.equal(input.args[0].action,'wos_diagnose');
+      return [{result:{core_search_route:true,query_input_count:++reads<2?0:1,
+        wos_error:false,login_required:false,dialog_count:0,busy:false}}];
+    }}
+  }};
+  loadPolicy(sandbox);
+  const result=await sandbox.dispatchWorkflow({action:'wos_diagnose',expires:Date.now()+25000},{tabId:1,wosTabId:2});
+  assert.equal(reads,2);
+  assert.equal(result.data.page.query_input_count,1);
+});
+
+test('empty initialized route returns an unavailable page, not a fabricated zero result',async()=>{
+  let reads=0;
+  const sandbox={URL,Date,setTimeout,chrome:{
+    runtime:{getManifest:()=>({version:'0.3.29'})},
+    tabs:{get:async()=>({id:2,url:origins[1]+'/wos/woscc/basic-search'})},
+    scripting:{executeScript:async()=>{
+      reads++;
+      return [{result:{core_search_route:true,query_input_count:0,
+        wos_error:false,login_required:false,dialog_count:0,busy:false}}];
+    }}
+  }};
+  loadPolicy(sandbox);
+  const result=await sandbox.dispatchWorkflow({action:'wos_diagnose',expires:Date.now()+13000},{tabId:1,wosTabId:2});
+  assert.ok(reads>=1);
+  assert.equal(result.data.page.query_input_count,0);
+  assert.equal('zero_result' in result.data.page,false);
+});
+
+test('preflight read failure is not retried or used as permission to search',async()=>{
+  let reads=0;
+  const sandbox={URL,Date,setTimeout,chrome:{
+    runtime:{getManifest:()=>({version:'0.3.29'})},
+    tabs:{get:async()=>({id:2,url:origins[1]+'/wos/woscc/basic-search'})},
+    scripting:{executeScript:async()=>{reads++;throw new Error('renderer unavailable');}}
+  }};
+  loadPolicy(sandbox);
+  await assert.rejects(()=>sandbox.dispatchWorkflow({action:'wos_diagnose',expires:Date.now()+25000},{tabId:1,wosTabId:2}),/renderer unavailable/);
+  assert.equal(reads,1);
 });

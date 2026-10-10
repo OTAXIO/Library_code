@@ -19,6 +19,7 @@ from pathlib import Path
 
 from claim import sa_claim_source
 from core import SafetyStop
+from wos_policy import SJTU, affiliation_status, author_review_reason, require_no_author_review, require_sjtu
 
 MAX_TXT = 512 * 1024
 
@@ -75,6 +76,9 @@ def classify(record, result):
             raise SafetyStop("网页 SA 题名与名单已不一致/缺失，请先核验并更新名单。")
         if "doiValue" not in row or "wosValue" not in row or doi(row["doiValue"]) != doi(record.doi) or wos(row["wosValue"]) != wos(record.wos):
             raise SafetyStop("网页 SA 的 DOI/WOS 与名单不一致/缺失，停止导入旧资料。")
+        author_issue = author_review_reason(record.reason, row.get("reason"))
+        if author_issue:
+            return Plan("manual", author_issue)
         return Plan("wos", "本库无匹配：检索 WOS，核验单篇文献与交大归属后导入。")
     if count > 1:
         return Plan("manual", "存在多个平台条目，需人工查重/合并，禁止自动挑选。")
@@ -126,7 +130,7 @@ def parse_wos(raw):
     if not re.fullmatch(r"(?:19|20)\d{2}", data["PY"].strip()):
         raise SafetyStop("发表年份格式未知。")
     affiliation = data["C1"]
-    sjtu = bool(re.search(r"\bShanghai\s+(?:Jiao\s*Tong|Jiaotong)\s+(?:Univ(?:ersity)?)\b|上海交通大学", affiliation, re.I))
+    sjtu = bool(SJTU.search(affiliation))
     return {"title": data["TI"].strip(), "doi": doi(data["DI"]), "wos": wos(data["UT"]),
             "authors": data["AF"].strip() or data["AU"].strip(), "year": data["PY"].strip(),
             "journal": data["SO"].strip(), "affiliation": affiliation.strip(), "sjtu": sjtu,
@@ -140,9 +144,12 @@ def identity(record, candidate):
         raise SafetyStop("导出文献 DOI 与名单冲突/缺失，禁止导入。")
     if expected_wos and expected_wos != candidate["wos"]:
         raise SafetyStop("导出 WOS 入藏号与名单冲突，禁止导入。")
-    if not candidate["sjtu"]:
-        raise SafetyStop("WOS 完整记录没有明确上海交通大学署名，请人工核验归属，不能自动设为本校成果。")
-    return bool((expected_doi or expected_wos) and norm(record.title) == norm(candidate["title"]))
+    require_no_author_review(record.reason)
+    confirmed = bool((expected_doi or expected_wos) and norm(record.title) == norm(candidate["title"]))
+    if not confirmed and affiliation_status(candidate) != 'sjtu':
+        raise SafetyStop("文献身份未获强匹配且交大归属未确认；不能批注非交大，请人工核验。")
+    require_sjtu(candidate)
+    return confirmed
 
 
 class ImportStore:
@@ -313,8 +320,9 @@ class WOSFlow:
             if others:
                 raise SafetyStop("同一论文已有导入或提交记录（" + "、".join(others) + "），请核对并关联已有条目，不重复导入。")
             result = self.call("search", {"sa_id": record.sa_id})
-            if classify(record, result).route != "wos":
-                raise SafetyStop("比对状态已变化，不再符合缺失条目的导入条件。")
+            fresh_plan = classify(record, result)
+            if fresh_plan.route != "wos":
+                raise SafetyStop("比对状态已变化，不再符合缺失条目的导入条件：" + fresh_plan.reason)
             scan = self.call("import_scan", common)
             if scan.get("batches") != []:
                 raise SafetyStop("已有同说明批次。请人工检查，禁止重复上传。")

@@ -53,7 +53,7 @@ class DownloadRosterTests(unittest.TestCase):
         self.assertFalse(a.done)
         self.assertFalse(a.skipped)
         self.assertTrue(b.skipped)
-        self.assertIn('未找到记录', b.remark)
+        self.assertEqual(b.remark, '未查询到')
         self.assertEqual(c, self.roster.records[2])
         self.assertEqual(duplicate.source, 'WOS')
         self.assertEqual(other, self.roster.records[4])
@@ -116,6 +116,24 @@ class DownloadRosterTests(unittest.TestCase):
         self.assertTrue(second.roster.records[1].skipped)
         self.assertIn('重新核验', second.roster.records[1].remark)
         self.assertNotIn('第一次失败', second.roster.records[1].remark)
+
+    def test_confirmed_non_sjtu_exact_note_keeps_two_and_other_rows_unchanged(self):
+        a = self.targets[0]
+        result = {'attempted': 1, 'exported': [], 'unconfirmed': [],
+                  'failed': {a.sa_id: {'row': a.row, 'error': '非交大：完整署名核验', 'note': '非交大'}}}
+        update = persist_download_outcomes(self.roster, [a], result)
+        self.assertEqual(update.roster.records[0].remark, '非交大')
+        self.assertTrue(update.roster.records[0].skipped)
+        self.assertFalse(update.roster.records[0].done)
+        self.assertEqual(update.roster.records[1:], self.roster.records[1:])
+
+    def test_unknown_note_cannot_write_a_fabricated_affiliation(self):
+        before = file_hash(self.path)
+        result = self.result()
+        result['failed'][self.targets[1].sa_id]['note'] = '不存在的结论'
+        with self.assertRaises(SafetyStop):
+            persist_download_outcomes(self.roster, self.targets, result)
+        self.assertEqual(file_hash(self.path), before)
 
 
 if __name__ == '__main__':

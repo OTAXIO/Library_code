@@ -84,9 +84,6 @@ async function dispatchWorkflow(command,pair) {
   let tab=await chrome.tabs.get(id);
   if(!validRolePage(tab.url,role))throw new Error("绑定的工作标签页已切换或未登录，请人工返回");
   const workOrigin=new URL(tab.url).origin;
-  if(command.action==='wos_diagnose')return {ok:true,data:{
-    extension_version:chrome.runtime.getManifest().version,
-    wos_download_protocol:1,result_reader:'shared-diagnostic',read_results_world:'ISOLATED'}};
   const execute=async(fn,cmd)=>{
     const current=await chrome.tabs.get(id);
     if(!validRolePage(current.url,role))throw new Error("工作标签页目标发生变化");
@@ -99,14 +96,38 @@ async function dispatchWorkflow(command,pair) {
     // inspectWorkPage so the site's overridden globals/DOM prototypes cannot
     // make a visible record readable in diagnostics but absent during a run.
     // Search/export/import interactions retain their existing MAIN environment.
-    const world=cmd.action==="wos_read_results"?"ISOLATED":"MAIN";
+    const readOnly=["wos_read_results","wos_diagnose"].includes(cmd.action);
+    const world=readOnly?"ISOLATED":"MAIN";
     const pending=chrome.scripting.executeScript({target:{tabId:id},world,func:fn,args:[cmd],
       ...(role==="wosTabId"?{injectImmediately:true}:{})});
-    const results=cmd.action==='wos_read_results'?await boundedWOSProbe(pending,cmd.expires):await pending;
+    const results=readOnly?await boundedWOSProbe(pending,cmd.expires):await pending;
     const result=results[0]?.result;
-    if(!result)throw new Error(cmd.action==="wos_read_results"?"WOS 只读探针在页面切换期间未返回结果":"工作页面没有返回结果");
+    if(!result)throw new Error(readOnly?"WOS 只读探针在页面切换期间未返回结果":"工作页面没有返回结果");
     return result;
   };
+  if(command.action==='wos_diagnose'){
+    // Verify the live page before starting a queue. An empty/uninitialized
+    // search page is not a zero-result paper and must not mark the queue red.
+    // Waiting here never submits Search, changes routes or retries a write.
+    const until=Math.min(Date.now()+10000,command.expires-12000);
+    let page;
+    do {
+      const observed=await execute(inspectWorkPage,command);
+      if(observed.error)throw new Error(observed.error);
+      const flags=['core_search_route','wos_error','login_required','busy'];
+      const counts=['query_input_count','dialog_count'];
+      if(flags.some(key=>typeof observed[key]!=="boolean") ||
+         counts.some(key=>!Number.isInteger(observed[key])||observed[key]<0||observed[key]>99999))
+        throw new Error('WOS 页面就绪检查未返回完整结果；本轮未提交检索');
+      page=Object.fromEntries([...flags,...counts].map(key=>[key,observed[key]]));
+      if(!page.core_search_route || page.query_input_count || page.wos_error || page.login_required || page.dialog_count)
+        break;
+      if(Date.now()>=until)break;
+      await new Promise(resolve=>setTimeout(resolve,200));
+    } while(Date.now()<until);
+    return {ok:true,data:{extension_version:chrome.runtime.getManifest().version,
+      wos_download_protocol:1,result_reader:'shared-diagnostic',read_results_world:'ISOLATED',page}};
+  }
   if(role==="importTabId") {
     if(command.action==="import_upload"){
       if(typeof command.content!=="string" || command.content.length>700000)throw new Error("TXT 文件大小异常");

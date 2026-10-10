@@ -13,6 +13,7 @@ from pathlib import Path
 
 from automation import ImportStore, MAX_TXT, doi, wos, norm, parse_wos
 from core import SafetyStop
+from wos_policy import POLICY_NOTES, WOSPolicyStop, require_no_author_review, require_sjtu, zero_result_note
 
 # Outcomes that are about this one paper rather than about the session being broken.
 # "WOS has no record" and "the result set is not a single record" are the expected,
@@ -24,6 +25,8 @@ PER_RECORD_OUTCOMES = (
     '与名单冲突',
     '没有明确上海交通大学署名',
     '禁止导入',
+    '非交大：',
+    '涉及作者或第一单位判断',
 )
 
 # These bridge states mean no subsequent paper can be dispatched safely. Keep the
@@ -55,10 +58,10 @@ def disconnected_outcome(message):
 def preflight(bridge):
     """Read extension capabilities before sending any Search or export click."""
     try:
-        result=bridge.call('wos_diagnose',{},timeout=15)
+        result=bridge.call('wos_diagnose',{},timeout=25)
     except SafetyStop as exc:
         if '未知 WOS 调度命令' in str(exc):
-            raise SafetyStop('当前运行的插件仍是旧版本。请在 Edge 扩展管理页重载到 0.3.28 或更新版本，'
+            raise SafetyStop('当前运行的插件仍是旧版本。请在 Edge 扩展管理页重载到 0.3.29 或更新版本，'
                              '刷新 WOS 页并重新连接；本轮未提交检索或下载。') from exc
         raise
     if (not isinstance(result,dict) or type(result.get('wos_download_protocol')) is not int
@@ -66,9 +69,25 @@ def preflight(bridge):
             or result.get('result_reader')!='shared-diagnostic'
             or result.get('read_results_world')!='ISOLATED'
             or not re.fullmatch(r'\d+\.\d+\.\d+',str(result.get('extension_version','')))
-            or tuple(map(int,result['extension_version'].split('.'))) < (0,3,28)):
-        raise SafetyStop('插件下载接口不兼容或版本过旧。请重载 0.3.28 或更新版本、刷新 WOS 页并重新连接；'
+            or tuple(map(int,result['extension_version'].split('.'))) < (0,3,29)):
+        raise SafetyStop('插件下载接口不兼容或版本过旧。请重载 0.3.29 或更新版本、刷新 WOS 页并重新连接；'
                          '本轮未提交检索或下载。')
+    page=result.get('page')
+    if (not isinstance(page,dict)
+            or any(type(page.get(key)) is not bool for key in ('core_search_route','wos_error','login_required','busy'))
+            or any(type(page.get(key)) is not int or not 0<=page[key]<=99999
+                   for key in ('query_input_count','dialog_count'))):
+        raise SafetyStop('插件未返回完整的页面就绪检查，请重载 0.3.29 或更新版本再连接；本轮未提交检索。')
+    if page['wos_error']:
+        raise SafetyStop('WOS 网站显示 Oops, something went wrong!；请先恢复文献检索页。'
+                         '本轮尚未开始，名单保持原样；这不是论文零结果。')
+    if page['login_required']:
+        raise SafetyStop('WOS 登录或验证码需要人工处理；本轮尚未开始，名单保持原样。')
+    if page['dialog_count']:
+        raise SafetyStop('WOS 当前存在操作弹窗，请先人工处理；本轮尚未开始，名单保持原样。')
+    if page['core_search_route'] and page['query_input_count']==0:
+        raise SafetyStop('WOS 检索页尚未显示条件输入区，请等页面恢复后再开始。'
+                         '本轮未提交检索、未将任何论文标为跳过；这不是论文零结果。')
     return {'extension_version':result['extension_version']}
 
 
@@ -117,7 +136,10 @@ def persist_download_outcomes(roster, targets, result):
                 raise SafetyStop('失败原因缺失，未修改名单。')
             error = re.sub(r'\bsk-[A-Za-z0-9_-]{10,}\b|Bearer\s+[A-Za-z0-9._~-]+', '[已隐藏凭据]', error)
             error = re.sub(r'[\x00-\x1f]', ' ', error).strip()
-            reasons[sa_id] = ('WOS 下载未完成：' + error)[:2000]
+            note = entry.get('note', '')
+            if note and note not in POLICY_NOTES:
+                raise SafetyStop('下载结果中的归属结论未知，未修改名单。')
+            reasons[sa_id] = note or zero_result_note(error) or ('WOS 下载未完成：' + error)[:2000]
     if len(seen) != attempted:
         raise SafetyStop('下载结果不完整，未修改名单；请核对完整报告。')
     update = DownloadRosterUpdate(roster)
@@ -267,7 +289,7 @@ class WOSDownload:
 
 def export(targets, bridge, store, inbox,
            stop=None, progress=lambda text: None, unchanged=lambda: None,
-           audit=lambda action, result, sa_id: None):
+           audit=lambda action, result, sa_id: None, eligible_only=False):
     """Export each target's Full Record through the user's own logged-in WOS tab.
 
     Takes the target list directly so the caller decides the scope; the WOS query field
@@ -288,13 +310,21 @@ def export(targets, bridge, store, inbox,
         progress(prefix+' · 准备检索')
         attempted += 1
         try:
+            if eligible_only:
+                require_no_author_review(record.reason)
             # prepare() is idempotent: an already archived export is reused, not re-downloaded.
             state = flow.prepare(record,progress=lambda text: progress(prefix+' · '+text))
             raw = store.bytes(state)
+            # Keep genuine downloaded bytes in the archive even when ineligible.
+            # Never put a non-SJTU or unresolved affiliation into the import inbox.
+            if eligible_only and state.get('identity_confirmed'):
+                require_sjtu(parse_wos(raw))
         except SafetyStop as exc:
             message = str(exc)
             failed[record.sa_id] = {'row': record.row, 'error': message,
                                     'per_record': per_record_outcome(message)}
+            if isinstance(exc, WOSPolicyStop):
+                failed[record.sa_id]['note'] = exc.note
             if disconnected_outcome(message):
                 disconnected = True
                 progress(f'浏览器会话不可用，已停止整批；剩余 {len(targets)-attempted} 条未执行。')

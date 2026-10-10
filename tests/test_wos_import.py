@@ -265,9 +265,12 @@ class ImportQueueTests(unittest.TestCase):
                 self.file.write_bytes(raw)
                 self.roster = Roster([r])
                 self.bridge = Bridge(self.roster.records)
-                self.assertEqual(self.plan().excluded[0].status, "deferred")
+                plan = self.plan()
+                if plan.items:
+                    self.assertEqual(plan.items[0].status, 'skip')
+                else:
+                    self.assertEqual(plan.excluded[0].status, "deferred")
                 result = self.run_plan()
-                self.assertEqual(result.outcomes, [])
                 self.assertNotIn("import_upload", self.actions())
 
     def test_changed_file_after_plan_does_not_upload(self):
@@ -435,3 +438,81 @@ class ImportQueueTests(unittest.TestCase):
         self.assertTrue(resumed.roster.records[0].skipped)
         self.assertFalse(resumed.roster.records[0].done)
         self.assertEqual(self.actions().count('import_submit'), 1)
+
+    def policy_workbook(self, reason=''):
+        from openpyxl import load_workbook
+        from core import HEADERS, read_roster
+        from tests.test_roster_write import make_roster
+        path = self.root / 'list.xlsx'
+        make_roster(path, flags=(None, None, None))
+        book = load_workbook(path)
+        sheet = book.active
+        columns = {key: 2 + list(HEADERS).index(key) for key in HEADERS}
+        sheet.cell(1, 14, '是否识别')
+        for key, value in {'owner': '谭勋策', 'matches': 0, 'item_ids': '', 'reason': reason,
+                           'title': 'Synthetic paper', 'doi': '10.1234/test'}.items():
+            sheet.cell(2, columns[key]).value = value
+        book.save(path)
+        book.close()
+        self.roster = read_roster(path)
+        self.bridge = Bridge(self.roster.records)
+
+    def test_confirmed_non_sjtu_is_freshly_checked_then_noted_two_without_upload(self):
+        self.policy_workbook()
+        self.file.write_bytes(sample(C1='[Alice Test] Other Univ, Country'))
+        before = self.roster.records[1:]
+        plan = self.plan(limit=1)
+        self.assertEqual([(i.status, i.note) for i in plan.items], [('skip', '非交大')])
+        result = self.run_plan(plan)
+        self.assertEqual(self.actions(), ['search'])
+        self.assertFalse(result.halted)
+        self.assertEqual(result.roster.records[0].remark, '非交大')
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertFalse(result.roster.records[0].done)
+        self.assertEqual(result.roster.records[1:], before)
+        self.assertIsNone(self.store.get(self.roster.records[0]))
+
+    def test_unknown_affiliation_and_author_issue_have_distinct_skip_notes(self):
+        for raw, reason, note in ((sample(C1='Other Univ'), '', '交大署名待核验'),
+                                  (sample(), '第一作者不一致', '涉及作者或第一单位判断，暂不处理')):
+            with self.subTest(note=note):
+                self.policy_workbook(reason)
+                self.file.write_bytes(raw)
+                result = self.run_plan(self.plan(limit=1))
+                self.assertEqual(self.actions(), ['search'])
+                self.assertEqual(result.roster.records[0].remark, note)
+                self.assertTrue(result.roster.records[0].skipped)
+
+    def test_already_processed_wins_over_local_non_sjtu_exclusion(self):
+        self.policy_workbook()
+        self.file.write_bytes(sample(C1='[Alice Test] Other Univ, Country'))
+        self.bridge.processed.add(self.roster.records[0].sa_id)
+        result = self.run_plan(self.plan(limit=1))
+        self.assertEqual(self.actions(), ['search'])
+        self.assertEqual(result.outcomes[0]['status'], 'synced')
+        self.assertTrue(result.roster.records[0].done)
+        self.assertFalse(result.roster.records[0].skipped)
+        self.assertNotEqual(result.roster.records[0].remark, '非交大')
+
+    def test_changed_skip_proof_cannot_write_the_old_affiliation_conclusion(self):
+        self.policy_workbook()
+        self.file.write_bytes(sample(C1='[Alice Test] Other Univ, Country'))
+        plan = self.plan(limit=1)
+        self.file.write_bytes(sample())
+        result = self.run_plan(plan)
+        self.assertEqual(self.actions(), ['search'])
+        self.assertNotEqual(result.roster.records[0].remark, '非交大')
+        self.assertIn('证据在预检后改变', result.roster.records[0].remark)
+
+    def test_fresh_author_issue_blocks_a_previously_eligible_file(self):
+        self.policy_workbook()
+        original = self.bridge.call
+        def call(action, payload, timeout=75):
+            answer = original(action, payload, timeout)
+            if action == 'search':
+                answer['row']['reason'] = '通讯作者不一致'
+            return answer
+        self.bridge.call = call
+        result = self.run_plan(self.plan(limit=1))
+        self.assertEqual(self.actions(), ['search'])
+        self.assertEqual(result.roster.records[0].remark, '涉及作者或第一单位判断，暂不处理')

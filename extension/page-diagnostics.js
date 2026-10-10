@@ -97,10 +97,19 @@ function inspectWorkPage(command) {
   const noResult=/(?:no\s+(?:results?|records?|documents?)\s+(?:were\s+)?found|your\s+search\s+(?:did\s+not\s+(?:return|find)\s+any|returned\s+no)\s+results?|您的?\s*(?:检索|搜索|檢索|搜尋)\s*(?:未找到|没有找到|沒有找到|未檢索到)\s*(?:任何)?\s*(?:结果|結果)|未找到\s*(?:任何)?\s*(?:结果|結果)|没有\s*(?:检索|搜索)\s*结果|沒有\s*(?:檢索|搜尋)\s*結果)/i.test(text);
   const busy=[...document.querySelectorAll('[aria-busy="true"],[role="progressbar"],mat-spinner,mat-progress-bar,.mat-mdc-progress-spinner')]
     .some(el=>visible(el)&&!el.closest('[hidden],[inert],[aria-hidden="true"]'));
+  // Readiness is only a coarse, read-only startup check. Never read a query,
+  // account name or input value, and leave ambiguous controls to the adapter.
+  const queryInputs=[...document.querySelectorAll('input:not([type]),input[type="text"],input[type="search"],textarea')]
+    .filter(el=>visible(el)&&!el.closest('nav,header,footer,aside,[role="navigation"],[role="banner"],[hidden],[inert],[aria-hidden="true"]'));
+  const loginRequired=[...document.querySelectorAll('iframe[src*="captcha"],input[type="password"],#challenge-form')].some(visible);
+  const dialogCount=[...document.querySelectorAll('[role="dialog"],mat-dialog-container')]
+    .filter(el=>visible(el)&&!el.closest('[hidden],[inert],[aria-hidden="true"]')).length;
   let recordRoute=false;
   try{recordRoute=!/%(?:2f|5c)/i.test(u.pathname)&&/^\/wos\/woscc\/full-record\/WOS:\d{15}\/?$/.test(decodeURIComponent(u.pathname));}catch{}
   const data={site:u.hostname,path:u.pathname,route:u.hash.split("?")[0],
     wos_error:/Oops,?\s*something went wrong!?/i.test(text),
+    core_search_route:/^\/wos\/woscc\/(?:basic-search|advanced-search|fielded-search)\/?$/.test(u.pathname),
+    query_input_count:queryInputs.length,login_required:loginRequired,dialog_count:dialogCount,
     summary_route:summary,record_route:recordRoute,
     zero_result:noResult||(summary&&totals.size===1&&totals.has(0)&&!recordLinks.size&&!busy),busy,
     result_total:totals.size===1?[...totals][0]:null,result_total_conflict:totals.size>1,
@@ -112,9 +121,9 @@ function inspectWorkPage(command) {
     controls,buttons,visible_button_count:buttonElements.length};
   if(!probing)return data;
   if(data.wos_error)return fail('WOS 网站报错：Oops, something went wrong! 请先恢复机构访问或检索页面');
-  if([...document.querySelectorAll('iframe[src*="captcha"],input[type="password"],#challenge-form')].some(visible))
+  if(loginRequired)
     return fail('登录或验证码需要人工处理');
-  if([...document.querySelectorAll('[role="dialog"],mat-dialog-container')].some(visible))
+  if(dialogCount)
     return fail('WOS 有弹窗，请人工处理');
   const diagnostic={summary_route:summary,record_route:recordRoute,busy,
     result_total:data.result_total,result_total_conflict:data.result_total_conflict,

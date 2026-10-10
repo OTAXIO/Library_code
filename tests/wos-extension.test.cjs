@@ -70,6 +70,10 @@ const fixture=fs.readFileSync(path.join(__dirname,'fixtures/wos-navigation.html'
       assert.equal(ready.ok,true,JSON.stringify(ready));
       assert.equal(ready.data.extension_version,JSON.parse(fs.readFileSync(path.join(root,'extension/manifest.json'),'utf8')).version);
       assert.equal(ready.data.result_reader,'shared-diagnostic');
+      assert.equal(ready.data.page.core_search_route,true);
+      assert.equal(ready.data.page.query_input_count,1);
+      assert.equal(ready.data.page.login_required,false);
+      assert.equal(ready.data.page.dialog_count,0);
       console.log(`PASS ${origin} actual extension capability handshake before any search`);
       const missing=await invoke('wos_search',{sa_id:'offline-missing',title:'Missing synthetic paper',doi:'',wos:''});
       assert.equal(missing.ok,false);assert.match(missing.error,/WOS 未找到记录/);

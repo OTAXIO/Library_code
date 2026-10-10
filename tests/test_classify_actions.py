@@ -35,7 +35,8 @@ class ClassifyActionsTests(unittest.TestCase):
 
     def test_batch_buttons_explain_scope_without_changing_callbacks(self):
         self.assertIn('不受表格筛选或选中行影响',self.app.batch_scope.get())
-        self.assertIn('备注为 2',self.app.batch_scope.get())
+        self.assertIn('“是否识别”为 2',self.app.batch_scope.get())
+        self.assertNotIn('备注为 2',self.app.batch_scope.get())
         self.assertIn('TXT',self.app.export_button['text'])
         self.assertIn('跳过',self.app.skipped_export_button['text'])
         self.assertIn('所选论文',self.app.review_button['text'])

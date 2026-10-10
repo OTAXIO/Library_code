@@ -11,6 +11,7 @@ from automation import MAX_TXT, WOSFlow, classify, doi, identity, norm, parse_wo
 from core import SafetyStop
 from pilot import OWNER
 from roster_write import mark_skipped_many, reconcile_processed
+from wos_policy import POLICY_NOTES, WOSPolicyStop, author_review_reason, require_no_author_review
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,7 @@ class ImportItem:
     path: str = ""
     sha256: str = ""
     candidate: dict = field(default_factory=dict)
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -79,10 +81,13 @@ def build_plan(roster, owner, limit, inbox, store, *, scope="pending", download_
             errors.append(f"{path.name}：{exc}")
     items, seen = [], set()
     for record in records:
+        path, candidate = "", {}
         try:
+            require_no_author_review(record.reason)
             state = store.get(record)
             if state:
                 candidate = parse_wos(store.bytes(state))
+                path = store.root / (candidate['sha256'] + '.txt')
                 identity(record, candidate)
                 if not state.get("identity_confirmed"):
                     items.append(ImportItem(record, "deferred", "存档文献身份待人工核验，请核验所选论文。",
@@ -149,22 +154,28 @@ def build_plan(roster, owner, limit, inbox, store, *, scope="pending", download_
             seen.add(paper_key)
             items.append(ImportItem(record, label, "文件身份匹配；导入前仍需核验本库缺失。" if label == "ready" else
                                     "继续核验既有批次，不重发已提交操作。", str(path), candidate["sha256"], candidate))
+        except WOSPolicyStop as exc:
+            # This is an actionable exclusion, not an upload candidate. The run
+            # still rechecks SA and the raw evidence before writing its skip note.
+            items.append(ImportItem(record, "skip", str(exc), str(path),
+                                    candidate.get('sha256', ''), candidate, exc.note))
         except (SafetyStop, OSError) as exc:
             items.append(ImportItem(record, "deferred", str(exc)))
     roster.assert_unchanged()
     selected, excluded = [], []
     # Verify uncertain prior submissions before starting new uploads. Resuming
     # these entries reads their existing batch rather than repeating a write.
-    eligible = sorted((item for item in items if item.status in ("ready", "resume")),
-                      key=lambda item: item.status != "resume")
+    eligible = sorted((item for item in items if item.status in ("ready", "resume", "skip")),
+                      key=lambda item: {"resume": 0, "ready": 1, "skip": 2}[item.status])
     selected_ids = {item.record.sa_id for item in eligible[:limit]}
     selected = [item for item in eligible if item.record.sa_id in selected_ids]
     for item in items:
         if item.record.sa_id in selected_ids:
             continue
-        if item.status in ("ready", "resume"):
-            item = ImportItem(item.record, "queued", "文件已通过预检；达到本轮条数上限，下轮继续处理。",
-                              item.path, item.sha256, item.candidate)
+        if item.status in ("ready", "resume", "skip"):
+            message = "达到本轮条数上限，下轮重新核验后记录跳过。" if item.status == "skip" else \
+                      "文件已通过预检；达到本轮条数上限，下轮继续处理。"
+            item = ImportItem(item.record, "queued", message, item.path, item.sha256, item.candidate, item.note)
         excluded.append(item)
     return ImportPlan(roster.sha256, owner, tuple(selected), tuple(errors), scope, tuple(excluded))
 
@@ -182,7 +193,8 @@ def run_import_plan(plan, roster, bridge, store, *, reviewed=False, stop=lambda:
     ids = [item.record.sa_id for item in plan.items]
     if len(ids) != len(set(ids)) or len(ids) > 100 or any(
         item.record != current.get(item.record.sa_id) or not in_scope(item.record, plan.owner, plan.scope) or
-        item.status not in ("ready", "resume") for item in plan.items
+        item.status not in ("ready", "resume", "skip") or
+        (item.status == "skip" and item.note not in POLICY_NOTES) for item in plan.items
     ):
         raise SafetyStop("导入计划包含范围外、重复或已变化的记录，请重新预检。")
     result = ImportResult(roster)
@@ -192,7 +204,7 @@ def run_import_plan(plan, roster, bridge, store, *, reviewed=False, stop=lambda:
         if stop():
             raise SafetyStop("已暂停后续步骤；已发出的提交请先核验结果。")
 
-    def record_outcome(item, status, message):
+    def record_outcome(item, status, message, note=""):
         # Only the item actually attempted is deferred. A lost reply must not
         # turn the rest of the unexecuted plan into red/skipped tasks.
         if status in ('deferred', 'halted'):
@@ -203,7 +215,7 @@ def run_import_plan(plan, roster, bridge, store, *, reviewed=False, stop=lambda:
                 reason = re.sub(r'\bsk-[A-Za-z0-9_-]{10,}\b|Bearer\s+[A-Za-z0-9._~-]+', '[已隐藏凭据]', message)
                 reason = re.sub(r'[\x00-\x1f]', ' ', reason).strip()
                 saved = mark_skipped_many(result.roster, [latest],
-                    reasons={latest.sa_id: ('WOS 导入未完成：' + reason)[:2000]})
+                    reasons={latest.sa_id: note or ('WOS 导入未完成：' + reason)[:2000]})
                 result.roster = saved.roster
             except (SafetyStop, OSError) as exc:
                 message += '；跳过原因/状态未回写：' + str(exc)
@@ -235,8 +247,27 @@ def run_import_plan(plan, roster, bridge, store, *, reviewed=False, stop=lambda:
             result.halted = True
             break
         try:
-            if classify(record, fresh).route != "wos":
-                raise SafetyStop("后台不再是未处理零匹配任务；未执行导入。")
+            fresh_plan = classify(record, fresh)
+            if fresh_plan.route != "wos":
+                if fresh_plan.reason == author_review_reason(record.reason, fresh.get('row', {}).get('reason')):
+                    require_no_author_review(record.reason, fresh.get('row', {}).get('reason'))
+                raise SafetyStop("后台不再是未处理零匹配任务；未执行导入：" + fresh_plan.reason)
+            if item.status == 'skip':
+                if not item.path or not item.sha256:
+                    raise SafetyStop('跳过的署名证据缺失，请重新预检；未填写归属结论。')
+                path = Path(item.path)
+                if path.is_symlink() or not path.is_file() or not 1 <= path.stat().st_size <= MAX_TXT:
+                    raise SafetyStop('跳过证据文件不可用，请重新预检；未填写归属结论。')
+                candidate = parse_wos(path.read_bytes())
+                if candidate['sha256'] != item.sha256:
+                    raise SafetyStop('跳过证据在预检后改变，请重新预检；未填写归属结论。')
+                try:
+                    identity(record, candidate)
+                except WOSPolicyStop as exc:
+                    if exc.note != item.note:
+                        raise SafetyStop('预检的跳过结论与原始记录不一致，未填写归属结论。') from exc
+                    raise
+                raise SafetyStop('文献归属已不再符合预检的跳过结论，请重新预检。')
             if item.path:
                 flow.prepare_file(record, item.path, item.sha256)
             state = store.get(record)
@@ -246,7 +277,7 @@ def run_import_plan(plan, roster, bridge, store, *, reviewed=False, stop=lambda:
             if state["phase"] == "exported" and store.other_writes(record, state["candidate"]):
                 raise SafetyStop("同一论文已由其他名单提交，不重复导入。")
         except (SafetyStop, OSError) as exc:
-            record_outcome(item, "deferred", str(exc))
+            record_outcome(item, "deferred", str(exc), exc.note if isinstance(exc, WOSPolicyStop) else "")
             if result.halted:
                 break
             continue

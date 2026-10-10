@@ -139,14 +139,21 @@ class PlanTests(unittest.TestCase):
 
 
 class PreflightTests(unittest.TestCase):
+    def capabilities(self, **page):
+        return {'extension_version':'0.3.29','wos_download_protocol':1,
+                'result_reader':'shared-diagnostic','read_results_world':'ISOLATED',
+                'page':{'core_search_route':True,'query_input_count':1,
+                        'wos_error':False,'login_required':False,'dialog_count':0,'busy':False,**page}}
+
     def test_running_capabilities_are_checked_before_search(self):
-        bridge=Mock(call=Mock(return_value={'extension_version':'0.3.28','wos_download_protocol':1,
-                    'result_reader':'shared-diagnostic','read_results_world':'ISOLATED'}))
-        self.assertEqual(preflight(bridge),{'extension_version':'0.3.28'})
-        bridge.call.assert_called_once_with('wos_diagnose',{},timeout=15)
+        bridge=Mock(call=Mock(return_value=self.capabilities()))
+        self.assertEqual(preflight(bridge),{'extension_version':'0.3.29'})
+        bridge.call.assert_called_once_with('wos_diagnose',{},timeout=25)
 
     def test_old_or_incompatible_extension_fails_without_a_search(self):
         results=({}, {'extension_version':'0.3.27','wos_download_protocol':1,
+                      'result_reader':'shared-diagnostic','read_results_world':'ISOLATED'},
+                 {'extension_version':'0.3.28','wos_download_protocol':1,
                       'result_reader':'shared-diagnostic','read_results_world':'ISOLATED'},
                  {'extension_version':'0.3.26','wos_download_protocol':1,
                       'result_reader':'other','read_results_world':'ISOLATED'},
@@ -166,6 +173,35 @@ class PreflightTests(unittest.TestCase):
         bridge=Mock(call=Mock(side_effect=SafetyStop('浏览器未连接')))
         with self.assertRaisesRegex(SafetyStop,'浏览器未连接'):
             preflight(bridge)
+
+    def test_uninitialized_search_is_not_a_zero_result_or_an_attempted_paper(self):
+        bridge=Mock(call=Mock(return_value=self.capabilities(query_input_count=0)))
+        with self.assertRaisesRegex(SafetyStop,'未将任何论文标为跳过'):
+            preflight(bridge)
+        bridge.call.assert_called_once_with('wos_diagnose',{},timeout=25)
+
+    def test_visible_site_error_login_and_dialog_block_before_any_search(self):
+        for page, label in (({'wos_error':True},'不是论文零结果'),
+                            ({'login_required':True},'登录或验证码'),
+                            ({'dialog_count':1},'操作弹窗')):
+            with self.subTest(page=page):
+                bridge=Mock(call=Mock(return_value=self.capabilities(**page)))
+                with self.assertRaisesRegex(SafetyStop,label):
+                    preflight(bridge)
+                self.assertEqual(bridge.call.call_count,1)
+
+    def test_existing_result_or_record_page_does_not_require_search_inputs(self):
+        bridge=Mock(call=Mock(return_value=self.capabilities(core_search_route=False,query_input_count=0)))
+        self.assertEqual(preflight(bridge),{'extension_version':'0.3.29'})
+
+    def test_missing_or_untyped_readiness_does_not_pass(self):
+        for page in (None,{},self.capabilities(query_input_count=True)['page'],
+                     self.capabilities(dialog_count=-1)['page']):
+            with self.subTest(page=page):
+                result=self.capabilities()
+                result['page']=page
+                with self.assertRaisesRegex(SafetyStop,'完整的页面就绪'):
+                    preflight(Mock(call=Mock(return_value=result)))
 
 
 class ExportTests(unittest.TestCase):
@@ -254,6 +290,31 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(len(result['exported']),1)
         self.assertEqual([(c.args[0], c.kwargs['timeout']) for c in bridge.call.call_args_list],
                          [('wos_search', 120), ('wos_export', 75)])
+
+    def test_intake_mode_archives_non_sjtu_but_never_adopts_or_imports(self):
+        store = ImportStore(self.root / 'downloads')
+        raw = sample(C1='[Alice Test] Other Univ, Country')
+        bridge = self.bridge_for(raw)
+        result = export(self.selected(), bridge, store, self.inbox, eligible_only=True)
+        self.assertEqual(result['exported'], [])
+        self.assertEqual(result['failed'][self.record.sa_id]['note'], '非交大')
+        self.assertEqual(list(self.inbox.iterdir()), [])
+        self.assertEqual(store.bytes(store.get(self.record)), raw)
+        self.assertFalse(any(c.args[0].startswith('import_') for c in bridge.call.call_args_list))
+
+    def test_intake_mode_does_not_assume_unknown_affiliation_is_non_sjtu(self):
+        bridge = self.bridge_for(sample(C1='Other Univ, Country'))
+        result = export(self.selected(), bridge, ImportStore(self.root / 'downloads'), self.inbox, eligible_only=True)
+        self.assertEqual(result['failed'][self.record.sa_id]['note'], '交大署名待核验')
+        self.assertEqual(list(self.inbox.iterdir()), [])
+
+    def test_intake_mode_skips_author_order_without_searching_and_continues(self):
+        first = record(sa_id='author-issue', reason='第一作者不一致')
+        bridge = self.bridge_for(sample())
+        result = export([first, self.record], bridge, ImportStore(self.root / 'downloads'), self.inbox, eligible_only=True)
+        self.assertEqual(result['failed'][first.sa_id]['note'], '涉及作者或第一单位判断，暂不处理')
+        self.assertEqual(result['exported'][0]['sa_id'], self.record.sa_id)
+        self.assertFalse(any(c.args[1]['sa_id'] == first.sa_id for c in bridge.call.call_args_list))
 
     def test_conflicting_doi_is_not_adopted(self):
         result=export(self.selected(),self.bridge_for(sample(DI='10.1234/other')),

@@ -285,13 +285,13 @@ class App:
                 report('log.txt 保存失败；本轮完整结果仍将单独保存，请检查文件权限。')
         def job():
             from wos_batch import default_store, preflight
-            report('正在确认浏览器插件版本和下载接口（最多 15 秒）')
+            report('正在确认插件版本与 WOS 页面是否就绪（最多 25 秒，尚未开始检索）')
             connection=preflight(bridge)
             report(f'已连接插件 {connection["extension_version"]}；准备下载 {total} 篇')
             store=default_store()
             result=export_batch(targets,bridge,store,default_inbox(),
                                 stop=self.classifier.stop,unchanged=roster.assert_unchanged,
-                                progress=report, audit=audit)
+                                progress=report, audit=audit, eligible_only=True)
             result.update(connection)
             try:
                 from wos_batch import persist_download_outcomes
