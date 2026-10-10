@@ -35,8 +35,8 @@ def save_download_report(result, owner, scope, root):
     lines = ["# WOS 下载结果", "", "```text",
              f"时间：{now:%Y-%m-%d %H:%M:%S}（北京时间）",
              f"负责人：{_text(owner)}",
-             f"浏览器插件：{_text(result.get('extension_version', '未记录'))}",
-             f"范围：{'已跳过论文（是否识别为 2）' if scope == 'skipped' else '待补论文（不含跳过项）'}",
+             f"下载连接：{('Browser Skill '+_text(result.get('browser_skill_version'))) if result.get('transport')=='browser-skill' else '原插件 '+_text(result.get('extension_version', '未记录'))}",
+             f"范围：{'纯试下载（不修改名单或入库队列）' if scope=='trial' else '已跳过论文（是否识别为 2）' if scope == 'skipped' else '待补论文（不含跳过项）'}",
              f"论文总数：{total}；已尝试：{attempted}；尚未执行：{remaining}",
              f"文件已采纳：{len(exported)}；身份待核验：{len(unconfirmed)}",
              f"WOS 无可用记录：{unavailable}；页面/会话问题：{problems}",
@@ -64,12 +64,19 @@ def save_download_report(result, owner, scope, root):
     outcomes = [{**value, "sa_id": sa_id} for sa_id, value in failed.items()]
     section("WOS 无可用记录", [entry for entry in outcomes if entry.get("per_record")])
     section("页面或会话问题", [entry for entry in outcomes if not entry.get("per_record")])
+    if result.get('page_blocked'):
+        lines.extend(["## 专用浏览器已暂停", "", "```text", _text(result.get('halt_reason')), "```", "",
+                      "未执行的后续论文保持原样；页面/会话问题不是未查询到。", ""])
     for key, label in (("source_error", "数据来源回写未完成"),
                        ("workflow_error", "跳过状态及原因回写未完成"),
                        ("classification_rebind_error", "分类索引刷新未完成")):
         if result.get(key):
             lines.extend([f"## {label}", "", "```text", _text(result[key]), "```", ""])
-    lines.extend(["## 下一步", "", "在桌面“WOS 导入”检查文件。核实文献与本库缺失后，确认上传入库。",
+    if scope=='trial':
+        lines.extend(["## 下一步", "", "本次仅验证 TXT 下载。名单、完成状态、数据来源和入库队列均未修改。",
+                      "正式补录请使用待补/重试下载入口，仍需核验零匹配、交大署名和文献身份。", ""])
+    else:
+        lines.extend(["## 下一步", "", "在桌面“WOS 导入”检查文件。核实文献与本库缺失后，确认上传入库。",
                   "身份待核验项可以在导入页选择论文后进入单条核验，不需要重新检索。",
                   "通信中断时先核对浏览器状态，恢复连接后再继续。不要对结果不明的入库操作重复提交。", ""])
     with path.open("x", encoding="utf-8", newline="\n") as stream:

@@ -215,7 +215,7 @@ async function runWOSCommand(command) {
   };
   try {
     check();
-    if(!["wos_search","wos_start_search","wos_read_results","wos_verify_record","wos_prepare_export","wos_download"].includes(command.action))fail("未知 WOS 命令");
+    if(!["wos_search","wos_start_search","wos_read_results","wos_verify_record","wos_prepare_export","wos_check_export","wos_download"].includes(command.action))fail("未知 WOS 命令");
     if(typeof command.title!=="string" || !command.title.trim() || command.title.length>1500)fail("题名缺失或过长");
     if(command.action==="wos_read_results") {
       if(all('[role="dialog"],mat-dialog-container').length)fail("WOS 有弹窗，请人工处理");
@@ -357,6 +357,9 @@ async function runWOSCommand(command) {
     if(!state || state.id!==command.sa_id || state.url!==recordURL || state.submitted || !visible(state.dialog))fail("导出预览失效或已提交");
     const selected=selection(state.select);
     if(!["Full Record","全记录","完整记录"].includes(selected) || state.ranges.some(el=>el.value!=="1"))fail("导出选项被修改");
+    // Browser Skill captures the one download from its freshly observed final
+    // button. This guard checks the same preview without submitting it again.
+    if(command.action==="wos_check_export")return {ok:true,data:{ready:true,record_url:recordURL}};
     state.submitted=true;
     click(button(["Export","导出"],state.dialog));
     return {ok:true,data:{submitted:true,record_url:recordURL}};

@@ -4,7 +4,7 @@ import tkinter as tk
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from app import App
 from core import Journal, file_hash, read_roster
 from operation_log import OperationLog
@@ -13,6 +13,11 @@ from tests.test_roster_write import make_roster
 
 class UnifiedTests(unittest.TestCase):
     def setUp(self):
+        # Unit/UI tests must never select the user's saved browser transport or
+        # open a real browser. Live transport is covered separately.
+        transport=patch('wos_browser.select_transport',return_value=Mock())
+        transport.start()
+        self.addCleanup(transport.stop)
         self.tmp=tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.path=Path(self.tmp.name)/'list.xlsx'
@@ -147,6 +152,7 @@ class UnifiedTests(unittest.TestCase):
         base=replace(self.app.roster.records[0],matches=0,doi='10.1234/synthetic',done=False)
         self.app.classifier.owner.set(base.owner)
         before=file_hash(self.path)
+        original_scope=self.app.last_wos_scope
         for skipped in (False,True):
             with self.subTest(skipped=skipped):
                 first=replace(base,skipped=skipped)
@@ -166,8 +172,9 @@ class UnifiedTests(unittest.TestCase):
                 self.assertEqual(start.call_count,1)
                 self.assertEqual(start.call_args.args[0],[first])
                 self.assertIn('试下载所选论文 TXT',start.call_args.args[1])
-                self.assertEqual(start.call_args.kwargs['rows'],2)
-                self.assertEqual(self.app.last_wos_scope,'skipped' if skipped else 'pending')
+                self.assertEqual(start.call_args.kwargs['rows'],4)
+                self.assertTrue(start.call_args.kwargs['trial'])
+                self.assertEqual(self.app.last_wos_scope,original_scope)
                 with patch.object(self.app,'_wos_export_ready',return_value={}), \
                      patch.object(self.app,'_start_wos_export') as start, \
                      patch('app.messagebox.showinfo'):

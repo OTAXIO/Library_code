@@ -182,6 +182,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_visible_site_error_login_and_dialog_block_before_any_search(self):
         for page, label in (({'wos_error':True},'不是论文零结果'),
+                            ({'site_timeout':True},'不是论文零结果'),
                             ({'login_required':True},'登录或验证码'),
                             ({'dialog_count':1},'操作弹窗')):
             with self.subTest(page=page):

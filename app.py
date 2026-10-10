@@ -202,7 +202,13 @@ class App:
             messagebox.showinfo('请先读取名单','请在人工处理页读取 list.xlsx。',parent=self.root)
             self.tabs.select(self.manual_page)
             return None
-        if not self.bridge or not self.bridge.online:
+        from wos_browser import read_settings
+        try:
+            connection_settings = read_settings(BASE / 'runtime')
+        except SafetyStop as exc:
+            messagebox.showwarning('下载连接配置无效',str(exc),parent=self.root)
+            return None
+        if connection_settings['transport']=='extension' and (not self.bridge or not self.bridge.online):
             messagebox.showinfo('需要连接浏览器',
                 '批量导出会操作你在扩展里绑定的 WOS 标签页。\n'
                 '请点“连接浏览器”取得配对码，在已登录的 WOS 页打开扩展并连接即可。无需 SA 或导入页。',
@@ -210,6 +216,7 @@ class App:
             return None
         from paper_classify import read_papers
         try:
+            self.roster.assert_unchanged()
             if owner not in {record.owner for record in self.roster.records}:
                 raise SafetyStop('所选负责人不在当前名单中，请重新读取名单。')
             return read_papers(BASE/'list.xlsx', owner=owner)
@@ -248,17 +255,17 @@ class App:
             return
         title=str(item.get('title') or '').strip()
         doi=str(item.get('doi') or '').strip()
-        rows=[record for record in self.roster.records if record.owner==owner and not record.done
-              and record.matches==0 and record.row in item.get('rows',[])
+        rows=[record for record in self.roster.records if record.owner==owner and record.row in item.get('rows',[])
               and record.title.strip()==title and record.doi.strip()==doi]
         if not rows:
-            messagebox.showinfo('此篇不能下载','所选论文没有对应的未完成、零匹配名单记录；请核对负责人并重读名单。',parent=self.root)
+            messagebox.showinfo('所选论文与名单不一致','所选题名、DOI、原表行号与当前负责人名单不对应；请重读名单。',parent=self.root)
             return
-        record=rows[0]
-        self.last_wos_owner,self.last_wos_scope=owner,'skipped' if record.skipped else 'pending'
-        self._start_wos_export([record],f'试下载所选论文 TXT·{owner}',rows=len(rows))
+        record=next((record for record in rows if not record.done and record.matches==0), rows[0])
+        # Explicit one-paper trial is download-only, even for a matched/done row.
+        # It must not alter the batch scope, roster, provenance or import queue.
+        self._start_wos_export([record],f'试下载所选论文 TXT·{owner}',rows=len(rows),trial=True)
 
-    def _start_wos_export(self, targets, label, rows=None):
+    def _start_wos_export(self, targets, label, rows=None, trial=False):
         if not targets:
             messagebox.showinfo('没有待导出的记录',
                 '当前负责人在所选范围内没有未完成的零匹配论文。\n'
@@ -266,7 +273,6 @@ class App:
             return
         from wos_batch import default_inbox, export as export_batch
         roster=self.roster
-        bridge=self.bridge
         self.classifier.set_exporting(True)
         generation=self.classifier.export_generation
         def report(message):
@@ -285,36 +291,53 @@ class App:
                 report('log.txt 保存失败；本轮完整结果仍将单独保存，请检查文件权限。')
         def job():
             from wos_batch import default_store, preflight
-            report('正在确认插件版本与 WOS 页面是否就绪（最多 25 秒，尚未开始检索）')
-            connection=preflight(bridge)
-            report(f'已连接插件 {connection["extension_version"]}；准备下载 {total} 篇')
-            store=default_store()
-            result=export_batch(targets,bridge,store,default_inbox(),
-                                stop=self.classifier.stop,unchanged=roster.assert_unchanged,
-                                progress=report, audit=audit, eligible_only=True)
-            result.update(connection)
+            from wos_browser import BrowserSkillWOS, select_transport
+            report('正在检查 WOS 下载连接和字段检索页面（尚未点击检索）')
+            bridge=select_transport(self.bridge,BASE,stop=self.classifier.stop,progress=report)
             try:
-                from wos_batch import persist_download_outcomes
-                update=persist_download_outcomes(roster,targets,result)
-                result['_roster_update']=update
-                result['skipped_saved']=update.skipped_count
-                if update.source_error:
-                    result['source_error']=update.source_error
-                if update.workflow_error:
-                    result['workflow_error']=update.workflow_error
-                if update.roster.sha256!=roster.sha256:
-                    audit(f'WOS 下载回写（来源 {update.source_count} 行；跳过 {update.skipped_count} 行）','已执行', '')
-                    try:
-                        from paper_classify import rebind_current_classification_sources
-                        result['classification_rebound']=rebind_current_classification_sources(update.roster.path)
-                    except Exception as exc:
-                        result['classification_rebind_error']=str(exc)
-            except Exception as exc:
-                result['workflow_error']=str(exc)
+                connection=preflight(bridge)
+                channel='浏览器技能专用窗口' if connection.get('transport')=='browser-skill' else '插件 '+connection['extension_version']
+                report(f'已连接{channel}；准备下载 {total} 篇')
+                if trial:
+                    from automation import ImportStore
+                    store=ImportStore(BASE/'runtime'/'wos-trials'/'archives')
+                    inbox=BASE/'runtime'/'wos-trials'/'files'
+                else:
+                    store,inbox=default_store(),default_inbox()
+                result=export_batch(targets,bridge,store,inbox,
+                                    stop=self.classifier.stop,unchanged=roster.assert_unchanged,
+                                    progress=report, audit=audit, eligible_only=not trial)
+            finally:
+                if isinstance(bridge,BrowserSkillWOS):
+                    report('正在保存浏览器证据并关闭专用下载窗口…')
+                    bridge.close()
+            result.update(connection)
+            result['trial']=trial
+            if trial:
+                result['skipped_saved']=0
+            else:
+                try:
+                    from wos_batch import persist_download_outcomes
+                    update=persist_download_outcomes(roster,targets,result)
+                    result['_roster_update']=update
+                    result['skipped_saved']=update.skipped_count
+                    if update.source_error:
+                        result['source_error']=update.source_error
+                    if update.workflow_error:
+                        result['workflow_error']=update.workflow_error
+                    if update.roster.sha256!=roster.sha256:
+                        audit(f'WOS 下载回写（来源 {update.source_count} 行；跳过 {update.skipped_count} 行）','已执行', '')
+                        try:
+                            from paper_classify import rebind_current_classification_sources
+                            result['classification_rebound']=rebind_current_classification_sources(update.roster.path)
+                        except Exception as exc:
+                            result['classification_rebind_error']=str(exc)
+                except Exception as exc:
+                    result['workflow_error']=str(exc)
             try:
                 from wos_reports import save_download_report
                 result['report_path'] = str(save_download_report(
-                    result, targets[0].owner, 'skipped' if targets[0].skipped else 'pending',
+                    result, targets[0].owner, 'trial' if trial else 'skipped' if targets[0].skipped else 'pending',
                     BASE / 'runtime' / 'wos-reports'))
             except Exception:
                 result['report_error'] = '完整结果报告保存失败，请检查 runtime 目录的写入权限。'
@@ -355,6 +378,13 @@ class App:
             if result.get('disconnected'):
                 detail+=(f'\n\n浏览器会话已不可继续（断连、回传超时或旧命令仍占用），整批已经停止；剩余 '
                          f'{result.get("remaining",0)} 条尚未执行。检查当前网页，重新连接并绑定 WOS 页后再继续。')
+            if result.get('page_blocked'):
+                detail+='\n\n专用浏览器已暂停，未把后续论文批量标成跳过：'+result.get('halt_reason','请检查 WOS 页面。')
+            if trial:
+                paths=[entry.get('file') or entry.get('archive') for entry in result.get('exported',[])+result.get('unconfirmed',[])]
+                detail+='\n\n纯试下载：名单、备注、是否识别、数据来源和入库队列均未修改。'
+                if paths:
+                    detail+='\n本次 TXT：\n'+'\n'.join(paths)
             outcome='已暂停' if result.get('stopped') else '已结束'
             self.classifier.status.set(
                 f'WOS 下载{outcome} · 已核验 TXT {len(result["exported"])} 篇 · '
@@ -363,14 +393,15 @@ class App:
                 f'页面/会话问题 {result.get("session_failures",0)} 篇 · '
                 f'未执行 {result.get("remaining",0)} 篇')
             messagebox.showinfo(f'{label}结束',
-                f'{scope}\n\n可核验入库 {len(result["exported"])} 篇 · 身份待核验 {len(result.get("unconfirmed",[]))} 篇\n'
+                f'{scope}\n\nTXT 已核验 {len(result["exported"])} 篇 · 身份待核验 {len(result.get("unconfirmed",[]))} 篇\n'
                 f'WOS 无可用记录 {result.get("not_exported",0)} 篇 · 页面/会话问题 {result.get("session_failures",0)} 篇\n'
-                f'尚未执行 {result.get("remaining",0)} 篇\n\n'
-                '下一步：在“WOS 导入”检查 TXT，核实本库缺失后上传入库。\n'
-                '身份待核验项也会列出，可点“核验所选论文”。\n'
-                '下载不会入库，也不会把 Excel 标为完成。'+detail,parent=self.root)
+                f'尚未执行 {result.get("remaining",0)} 篇\n\n'+
+                ('试下载只验证 WOS 检索与文件保存，不表示可入库。' if trial else
+                 '下一步：在“WOS 导入”检查 TXT，核实本库缺失后上传入库。\n'
+                 '身份待核验项也会列出，可点“核验所选论文”。\n'
+                 '下载不会入库，也不会把 Excel 标为完成。')+detail,parent=self.root)
             from pilot import OWNER
-            if targets[0].owner == OWNER and (result.get('exported') or result.get('unconfirmed')):
+            if not trial and targets[0].owner == OWNER and (result.get('exported') or result.get('unconfirmed')):
                 # A weak download is now persistently skipped; offer its archive
                 # in the skipped scope instead of silently hiding it in pending.
                 import_scope='skipped' if targets[0].skipped or (

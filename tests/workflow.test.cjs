@@ -101,11 +101,28 @@ const cmd=(action,more={})=>({action,sa_id:'demo-001',instructions:'SA补充-dem
     const prep=await page.evaluate(runWOSCommand,{...base,action:'wos_prepare_export'});
     assert.equal(prep.ok,true,JSON.stringify(prep));
     assert.equal(await page.evaluate(()=>document.querySelector('select').value),'Full Record');
+    const checked=await page.evaluate(runWOSCommand,{...base,action:'wos_check_export'});
+    assert.equal(checked.ok,true,JSON.stringify(checked));
+    assert.equal(checked.data.ready,true);
+    assert.equal(await page.evaluate(()=>exportsMade),0,'read-only export check must not submit');
+    assert.equal(await page.evaluate(()=>window.__saWOSExport.submitted),false);
     const download=page.waitForEvent('download');
     const done=await page.evaluate(runWOSCommand,{...base,action:'wos_download'});
     assert.equal(done.ok,true,JSON.stringify(done));await download;
     assert.equal((await page.evaluate(runWOSCommand,{...base,action:'wos_download'})).ok,false);
+    assert.equal((await page.evaluate(runWOSCommand,{...base,action:'wos_check_export'})).ok,false);
     assert.equal(await page.evaluate(()=>exportsMade),1);
+  });
+  test('WOS read-only export guard rejects changed content, SA ID and expired preview',async()=>{
+    await page.goto('https://www.webofscience.com/wos/woscc/basic-search');
+    const base={...cmd('wos_search'),title:'Synthetic paper',doi:'10.1234/test',wos:''};
+    assert.equal((await page.evaluate(runWOSCommand,base)).ok,true);
+    assert.equal((await page.evaluate(runWOSCommand,{...base,action:'wos_prepare_export'})).ok,true);
+    assert.equal((await page.evaluate(runWOSCommand,{...base,action:'wos_check_export',sa_id:'other-id'})).ok,false);
+    assert.equal((await page.evaluate(runWOSCommand,{...base,action:'wos_check_export',expires:Date.now()-1})).ok,false);
+    await page.evaluate(()=>document.querySelector('select').value='Author, Title, Source');
+    assert.equal((await page.evaluate(runWOSCommand,{...base,action:'wos_check_export'})).ok,false);
+    assert.equal(await page.evaluate(()=>exportsMade),0);
   });
   test('WOS nested content dialog still resolves the complete export panel',async()=>{
     await page.goto('https://www.webofscience.com/wos/woscc/basic-search');

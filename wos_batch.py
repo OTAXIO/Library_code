@@ -1,8 +1,8 @@
 """Batch WOS metadata export.
 
-This only downloads: it drives the user's own bound WOS tab through the existing
-``wos_search``/``wos_export`` extension commands and copies the captured Full Record
-TXT into the submission intake folder. It never uploads, imports or pushes, because
+This only downloads: the selected original extension or explicitly configured
+Browser Skill transport captures Full Record TXT for the submission intake.
+It never uploads, imports or pushes, because
 those write to the production library and stay single-record with human confirmation.
 """
 from __future__ import annotations
@@ -57,6 +57,15 @@ def disconnected_outcome(message):
 
 def preflight(bridge):
     """Read extension capabilities before sending any Search or export click."""
+    from wos_browser import BrowserSkillWOS
+    if isinstance(bridge, BrowserSkillWOS):
+        result = bridge.call('wos_diagnose', {}, timeout=120)
+        if (result.get('transport') != 'browser-skill' or result.get('wos_download_protocol') != 2
+                or not isinstance(result.get('page'), dict)
+                or not result['page'].get('core_search_route')
+                or result['page'].get('query_input_count') != 1):
+            raise SafetyStop('浏览器技能未确认 WOS 字段检索页就绪；尚未提交检索。')
+        return {'transport':'browser-skill','browser_skill_version':result['browser_skill_version']}
     try:
         result=bridge.call('wos_diagnose',{},timeout=25)
     except SafetyStop as exc:
@@ -81,6 +90,8 @@ def preflight(bridge):
     if page['wos_error']:
         raise SafetyStop('WOS 网站显示 Oops, something went wrong!；请先恢复文献检索页。'
                          '本轮尚未开始，名单保持原样；这不是论文零结果。')
+    if page.get('site_timeout'):
+        raise SafetyStop('WOS 网站返回 5xx/连接超时页；本轮未开始，名单保持原样；这不是论文零结果。')
     if page['login_required']:
         raise SafetyStop('WOS 登录或验证码需要人工处理；本轮尚未开始，名单保持原样。')
     if page['dialog_count']:
@@ -301,6 +312,8 @@ def export(targets, bridge, store, inbox,
     flow = WOSDownload(bridge, store, unchanged, stop, audit)
     exported, failed, unconfirmed = [], {}, []
     disconnected = False
+    page_blocked = False
+    halt_reason = ''
     attempted = 0
     for index, record in enumerate(targets):
         if stop is not None and stop.is_set():
@@ -320,11 +333,17 @@ def export(targets, bridge, store, inbox,
             if eligible_only and state.get('identity_confirmed'):
                 require_sjtu(parse_wos(raw))
         except SafetyStop as exc:
+            from wos_browser import WOSBrowserStop
             message = str(exc)
             failed[record.sa_id] = {'row': record.row, 'error': message,
                                     'per_record': per_record_outcome(message)}
             if isinstance(exc, WOSPolicyStop):
                 failed[record.sa_id]['note'] = exc.note
+            if isinstance(exc, WOSBrowserStop):
+                page_blocked = True
+                halt_reason = message
+                progress(f'WOS 专用页面/会话需要处理，已暂停；剩余 {len(targets)-attempted} 条未执行。')
+                break
             if disconnected_outcome(message):
                 disconnected = True
                 progress(f'浏览器会话不可用，已停止整批；剩余 {len(targets)-attempted} 条未执行。')
@@ -352,7 +371,8 @@ def export(targets, bridge, store, inbox,
             'not_exported': per_record, 'session_failures': len(failed) - per_record,
             'attempted': attempted, 'remaining': len(targets)-attempted,
             'disconnected': disconnected,
-            'stopped': bool(disconnected or (stop is not None and stop.is_set()))}
+            'page_blocked': page_blocked, 'halt_reason': halt_reason,
+            'stopped': bool(disconnected or page_blocked or (stop is not None and stop.is_set()))}
 
 
 def plan(document, classification_dir=None):

@@ -34,34 +34,68 @@ class SettingsPanel:
         self.key_status = tk.StringVar()
         self.models = {name: tk.StringVar(value=value) for name, value in DEFAULTS.items()}
         self.controls = []
-        ttk.Label(page, text="设置", style="Title.TLabel").pack(anchor="w", pady=(4, 14))
-        ttk.Label(page, text="模型服务 · 所有功能共用本机 API 密钥", style="Muted.TLabel").pack(anchor="w")
-        ttk.Label(page, text="API 地址").pack(anchor="w", pady=(16, 4))
-        address = ttk.Entry(page)
+        from wos_browser import DEFAULTS as BROWSER_DEFAULTS, read_settings
+        self.browser_path = Path(runtime) / 'wos_browser.json'
+        try:
+            browser = read_settings(runtime)
+        except SafetyStop as exc:
+            browser = dict(BROWSER_DEFAULTS)
+            self.status.set(str(exc))
+        self.browser_mode = tk.StringVar(value='浏览器技能（无需配对）' if browser['transport']=='browser-skill' else '原插件配对')
+        self.browser_instance = tk.StringVar(value=browser['instance_id'])
+        self.browser_origin = browser['origin']
+        ttk.Label(page, text="设置", style="Title.TLabel").pack(anchor="w", pady=(4, 10))
+        columns = ttk.Frame(page)
+        columns.pack(fill="x")
+        columns.columnconfigure((0, 1), weight=1, uniform="settings")
+        api = ttk.LabelFrame(columns, text="模型服务 · 本机密钥", padding=12)
+        api.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        preferences = ttk.Frame(columns)
+        preferences.grid(row=0, column=1, sticky="nsew")
+        ttk.Label(api, text="API 地址").pack(anchor="w", pady=(0, 4))
+        address = ttk.Entry(api)
         address.insert(0, API_BASE)
         address.configure(state="readonly")
         address.pack(fill="x")
-        ttk.Label(page, text="保留交大固定地址与 HTTPS 校验；不向其他服务发送密钥。", style="Muted.TLabel",
-                  wraplength=430).pack(anchor="w", pady=(4, 12))
-        ttk.Label(page, textvariable=self.key_status).pack(anchor="w")
-        self.entry = ttk.Entry(page, textvariable=self.key, show="●")
+        ttk.Label(api, text="固定交大 HTTPS 地址，不向其他服务发送密钥。", style="Muted.TLabel",
+                  wraplength=360).pack(anchor="w", pady=(6, 14))
+        ttk.Label(api, textvariable=self.key_status, wraplength=360).pack(anchor="w")
+        self.entry = ttk.Entry(api, textvariable=self.key, show="●")
         self.entry.pack(fill="x", pady=(5, 8))
         self.controls.append(self.entry)
-        actions = ttk.Frame(page)
+        actions = ttk.Frame(api)
         actions.pack(fill="x")
         app.button(actions, "保存密钥", self.save_key, style="Primary.TButton").pack(side="left")
         app.button(actions, "测试连接", self.test_connection).pack(side="left", padx=8)
-        ttk.Label(page, text="密钥使用 Windows 账号加密保存，不回显、不写入 Git 或日志。\n测试连接只读取可用模型，不发送名单。",
-                  wraplength=430, style="Muted.TLabel").pack(anchor="w", pady=(8, 14))
+        ttk.Label(api, text="密钥由 Windows 账号加密，不回显、不进 Git 或日志。\n测试连接仅查询可用模型，不发送名单。",
+                  wraplength=360, style="Muted.TLabel").pack(anchor="w", pady=(10, 6))
+        models_frame = ttk.LabelFrame(preferences, text="默认模型", padding=12)
+        models_frame.pack(fill="x", pady=(0, 10))
         for name, label in (("review", "单条核对模型"), ("classification", "批量分类模型"), ("submission", "材料准备模型")):
-            row = ttk.Frame(page)
-            row.pack(fill="x", pady=4)
-            ttk.Label(row, text=label, width=16).pack(side="left")
-            combo = ttk.Combobox(row, textvariable=self.models[name], values=MODELS, state="readonly", width=23)
+            row = ttk.Frame(models_frame)
+            row.pack(fill="x", pady=3)
+            ttk.Label(row, text=label, width=13).pack(side="left")
+            combo = ttk.Combobox(row, textvariable=self.models[name], values=MODELS, state="readonly", width=18)
             combo.pack(side="left", fill="x", expand=True)
             self.controls.append(combo)
-        app.button(page, "保存模型偏好", self.save_models).pack(anchor="w", pady=(10, 8))
-        ttk.Label(page, textvariable=self.status, wraplength=430).pack(anchor="w", pady=6)
+        app.button(models_frame, "保存模型偏好", self.save_models).pack(anchor="w", pady=(8, 0))
+        browser_frame = ttk.LabelFrame(preferences, text='WOS 下载连接', padding=12)
+        browser_frame.pack(fill='x')
+        row = ttk.Frame(browser_frame)
+        row.pack(fill='x')
+        selector = ttk.Combobox(row, textvariable=self.browser_mode,
+                               values=['浏览器技能（无需配对）','原插件配对'], state='readonly', width=23)
+        selector.pack(fill='x')
+        row = ttk.Frame(browser_frame)
+        row.pack(fill='x', pady=(6,0))
+        ttk.Label(row, text='浏览器编号').pack(side='left', padx=(0,8))
+        instance = ttk.Entry(row, textvariable=self.browser_instance)
+        instance.pack(side='left', fill='x', expand=True)
+        self.controls.extend([selector,instance])
+        app.button(browser_frame, '保存下载连接', self.save_browser).pack(anchor='w', pady=(8,0))
+        ttk.Label(browser_frame,text='技能通道：使用指定浏览器的新窗口下载。\n后台入库：仍需原插件配对。',
+                  wraplength=360,style='Muted.TLabel').pack(anchor='w',pady=(8,0))
+        ttk.Label(page, textvariable=self.status, wraplength=850).pack(anchor="w", pady=6)
         try:
             values = read_preferences(self.path)
             for name, value in values.items():
@@ -119,6 +153,22 @@ class SettingsPanel:
             self.app.note_operation("保存模型偏好")
         except (OSError, SafetyStop):
             self.status.set("模型偏好未保存，请检查目录权限。")
+
+    def save_browser(self):
+        if self.app.busy:
+            return
+        from wos_browser import validate_settings
+        try:
+            if self.browser_mode.get() not in {'浏览器技能（无需配对）','原插件配对'}:
+                raise ValueError('请选择支持的下载连接。')
+            values=validate_settings({'transport':'browser-skill' if self.browser_mode.get()=='浏览器技能（无需配对）' else 'extension',
+                                      'instance_id':self.browser_instance.get().strip(),'origin':self.browser_origin})
+            self.browser_path.parent.mkdir(parents=True,exist_ok=True)
+            atomic_json(self.browser_path,values)
+            self.status.set('WOS 下载连接已保存；下次下载生效，不影响认领或后台入库。')
+            self.app.note_operation('保存 WOS 下载连接')
+        except (OSError,ValueError) as exc:
+            self.status.set('下载连接未保存：'+str(exc))
 
     def test_connection(self):
         if self.app.busy:

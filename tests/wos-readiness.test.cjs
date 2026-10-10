@@ -23,6 +23,14 @@ const cases=[
   {name:'a previous Chinese zero-result banner does not hide a healthy input',
     html:'<main><p>您的检索未找到结果</p><input type="text" value="PRIVATE_QUERY"></main>',
     inputs:1,login:false,dialogs:0,zero:true,error:false},
+  {name:'Cloudflare 524 page is a site timeout, never a paper zero result',
+    html:'<h1>A timeout occurred</h1><h2>Error code 524</h2>',
+    inputs:0,login:false,dialogs:0,zero:false,error:false,timeout:true},
+  {name:'HTTP 503 page is a site timeout rather than a missing paper',
+    html:'<h1>HTTP 503</h1>',inputs:0,login:false,dialogs:0,zero:false,error:false,timeout:true},
+  {name:'a sentence in paper content is not a server error heading',
+    html:'<main><input><p>A timeout occurred during the experiment. Connection timed out.</p></main>',
+    inputs:1,login:false,dialogs:0,zero:false,error:false,timeout:false},
 ];
 (async()=>{
   const browser=await chromium.launch({headless:true,...(fs.existsSync(edge)?{executablePath:edge}:{})});
@@ -41,6 +49,12 @@ const cases=[
         assert.equal(diagnostic.dialog_count,item.dialogs,item.name);
         assert.equal(diagnostic.zero_result,item.zero,item.name);
         assert.equal(diagnostic.wos_error,item.error,item.name);
+        assert.equal(diagnostic.site_timeout,Boolean(item.timeout),item.name);
+        if(item.timeout){
+          const probe=await page.evaluate(inspectWorkPage,{action:'wos_read_results',expires:Date.now()+30000});
+          assert.equal(probe.ok,false,item.name);
+          assert.match(probe.error,/不是文献零结果/,item.name);
+        }
         assert.equal(JSON.stringify(diagnostic).includes('PRIVATE_'),false,item.name);
         assert.equal(page.url(),origin+'/wos/woscc/basic-search');
         console.log(`PASS ${new URL(origin).hostname} ${item.name}`);

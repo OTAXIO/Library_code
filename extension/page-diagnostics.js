@@ -106,8 +106,13 @@ function inspectWorkPage(command) {
     .filter(el=>visible(el)&&!el.closest('[hidden],[inert],[aria-hidden="true"]')).length;
   let recordRoute=false;
   try{recordRoute=!/%(?:2f|5c)/i.test(u.pathname)&&/^\/wos\/woscc\/full-record\/WOS:\d{15}\/?$/.test(decodeURIComponent(u.pathname));}catch{}
+  const errorHeadings=[document.title,...[...document.querySelectorAll('h1,h2,[role="alert"]')]
+    .filter(visible).map(el=>el.innerText)].map(normal);
+  const siteTimeout=errorHeadings.some(label=>/\b(?:Error\s+(?:code\s*)?|HTTP\s+)(?:500|502|503|504|520|521|522|523|524)\b|\b524\s*:\s*A timeout occurred\b/i.test(label)
+    || /^(?:A timeout occurred|Connection timed out|Bad gateway|Web server is down)$/i.test(label));
   const data={site:u.hostname,path:u.pathname,route:u.hash.split("?")[0],
     wos_error:/Oops,?\s*something went wrong!?/i.test(text),
+    site_timeout:siteTimeout,
     core_search_route:/^\/wos\/woscc\/(?:basic-search|advanced-search|fielded-search)\/?$/.test(u.pathname),
     query_input_count:queryInputs.length,login_required:loginRequired,dialog_count:dialogCount,
     summary_route:summary,record_route:recordRoute,
@@ -120,6 +125,7 @@ function inspectWorkPage(command) {
     wos_import_button:/WOS\s*数据导入\s*[（(]\s*Txt\s*[）)]/i.test(text),
     controls,buttons,visible_button_count:buttonElements.length};
   if(!probing)return data;
+  if(data.site_timeout)return fail('WOS 网站返回 5xx/连接超时页；不是文献零结果，请恢复网页后再继续');
   if(data.wos_error)return fail('WOS 网站报错：Oops, something went wrong! 请先恢复机构访问或检索页面');
   if(loginRequired)
     return fail('登录或验证码需要人工处理');
