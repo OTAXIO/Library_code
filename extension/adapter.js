@@ -94,7 +94,7 @@ async function runSACommand(command) {
       if (visibleAll(".el-dialog, .el-message-box, .el-drawer").length)
         stop("网页有未关闭的窗口，请人工处理后再预检");
       if (vm.loading) stop("列表仍在加载，请等待后重查");
-      return {ok: true, data: {row: snap(await fresh())}};
+      return {ok: true, data: {row: snap(await fresh()), non_sjtu_completion_protocol: 1}};
     }
     const drawer = vm.$refs?.compareDetailDrawer;
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");
@@ -463,9 +463,42 @@ async function runSACommand(command) {
     const note = typeof command.note === "string" ? command.note.trim() : "";
     const noteParts = note.split(/[；;]/).map(part => part.trim()).filter(Boolean);
     const knownShortNote = noteParts.length > 0 && noteParts.every(part => presetNotes.includes(part));
-    if (!command.reviewed || !note || (note.length < 6 && !knownShortNote) || note.length > 2000)
+    const nonSJTU = note === "非交大";
+    if (!command.reviewed || !note || (note.length < 6 && !knownShortNote && !nonSJTU) || note.length > 2000)
       stop("缺少人工核验及处理备注");
     if (row.markStatus !== "待处理") stop("记录已经处理，禁止再次切换状态");
+    if (nonSJTU) {
+      // A short negative is not a general remark shortcut. Require the actual
+      // Full Record metadata, strong paper identity and every author address.
+      const c = command.non_sjtu_evidence;
+      const norm = value => String(value ?? "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+      const empty = value => ["", "—", "-", "无", "null"].includes(value);
+      const doi = value => {const v=norm(value).replace(/^(?:https?:\/\/doi\.org\/|doi:)\s*/, "");
+        if(empty(v))return ""; if(!/^10\.\d{4,9}\/\S+$/.test(v))stop("非交大核验 DOI 格式不明确"); return v;};
+      const wos = value => {const v=norm(value).toUpperCase(); if(empty(norm(value)))return "";
+        if(!/^(?:WOS:)?\d{15}$/.test(v))stop("非交大核验 WOS 号格式不明确"); return "WOS:"+v.replace(/^WOS:/, "");};
+      if (command.action !== "complete" || command.owner !== "谭勋策" || Number(row.matchCount) !== 0 || row.itemId ||
+          !c || ["title", "doi", "wos", "authors", "affiliation", "sha256"].some(key => typeof c[key] !== "string") ||
+          !/^[a-f0-9]{64}$/.test(c.sha256) || !/^WOS:\d{15}$/.test(c.wos)) stop("缺少未处理零匹配任务的完整非交大证据");
+      const d=doi(row.doiValue), u=wos(row.wosValue);
+      if ((!d && !u) || norm(row.titleValue)!==norm(c.title) || d && d!==doi(c.doi) || u && u!==wos(c.wos))
+        stop("非交大 TXT 与当前 SA 文献未获强匹配，不能结案");
+      if (row.remark && row.remark !== note || /第一作者|共同一作|共同第一|首位作者|作者顺序|通讯作者|通信作者|第一单位|第一署名单位/.test(String(row.reason ?? "")))
+        stop("非交大结案遇到其他备注或作者/单位判断，停止覆盖");
+      const a=c.affiliation;
+      if (!a.trim() || !c.authors.trim() || /\bShanghai\s+(?:Jiao\s*Tong|Jiaotong)\s+Univ(?:ersity)?\b|上海交通大学/i.test(a) ||
+          /\.\.\.|…|\bet\s+al\b|\b(?:unknown|unavailable|missing)\b/i.test(a+";"+c.authors)) stop("交大署名存在或单位证据不足，不能批注非交大");
+      const groups=[...a.matchAll(/\[([^\[\]]+)\]([^\[\]]+)/g)];
+      const clean=value=>value.replace(/^[\s;]+|[\s;]+$/g, "");
+      const name=value=>norm(value).replace(/^[ ,.;]+|[ ,.;]+$/g, "");
+      const institution=/\b(?:Univ(?:ersity)?|Inst(?:itute)?|Acad(?:emy)?|College|Hosp(?:ital)?|Lab(?:orator(?:y|ies))?|Cent(?:er|re)|Group|Corp(?:oration)?|Company)\b|大学|学院|研究所|医院|公司/i;
+      if (!groups.length || clean(a.slice(0,groups[0].index)) ||
+          groups.some((g,i)=>!institution.test(g[2]) || !clean(g[2]) || i && clean(a.slice(groups[i-1].index+groups[i-1][0].length,g.index))) ||
+          clean(a.slice(groups.at(-1).index+groups.at(-1)[0].length))) stop("非交大作者单位记录不完整");
+      const authors=c.authors.split(';').map(name).filter(Boolean);
+      const mapped=new Set(groups.flatMap(g=>g[1].split(';').map(name).filter(Boolean)));
+      if(!authors.length || authors.some(author=>!mapped.has(author))) stop("未覆盖全部作者单位，不能批注非交大");
+    }
     const selected = presetNotes.filter(preset => note.includes(preset));
     if (selected.length) {
       const comparison = await showDetail();

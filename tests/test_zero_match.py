@@ -44,7 +44,7 @@ class Backend:
                            {"label": "交大是否第一单位", "sa": "是", "library": "是"}]
                 for field in fields:
                     field.update(self.comparison_override.get(field['label'], {}))
-            return {"row": copy.deepcopy(row), "comparison": fields}
+            return {"row": copy.deepcopy(row), "comparison": fields, "non_sjtu_completion_protocol": 1}
         if action == "import_resolve":
             return {"verified": True, "items": copy.deepcopy(self.items)}
         if action == 'prepare_claim':
@@ -235,12 +235,154 @@ class ZeroMatchTests(unittest.TestCase):
         self.assertFalse(result.halted, result.reason)
         self.assertTrue(result.roster.records[0].done)
 
-    def test_non_sjtu_skips_without_import(self):
+    def test_non_sjtu_closes_website_and_roster_without_import(self):
         self.download.path.write_bytes(sample(AF="Test, Alice", C1="[Test, Alice] Other University, China"))
         result = self.run_flow()
         self.assertFalse(result.halted, result.reason)
-        self.assertEqual(result.roster.records[0].remark, "非交大")
-        self.assertNotIn("import_upload", self.sa.calls)
+        self.assertEqual(result.remaining, 0)
+        self.assertEqual([e['status'] for e in result.outcomes], ['done', 'done'])
+        self.assertEqual(self.sa.calls.count('complete'), 2)
+        for record in result.roster.records[:2]:
+            self.assertTrue(record.done)
+            self.assertFalse(record.skipped)
+            self.assertEqual(record.remark, "非交大")
+            self.assertEqual(record.source, 'WOS')
+            self.assertEqual(self.sa.rows[record.sa_id]['markStatus'], '已处理')
+            self.assertEqual(self.sa.rows[record.sa_id]['remark'], '非交大')
+            self.assertEqual(self.workflow.get(record)['phase'], 'non_sjtu_done')
+        for action in ('import_resolve', 'import_upload', 'import_submit', 'import_push', 'link', 'submit_claim'):
+            self.assertNotIn(action, self.sa.calls)
+        book = load_workbook(self.path)
+        self.assertEqual([book['名单'][cell].value for cell in ('A2', 'A3', 'O2', 'O3')], ['非交大', '非交大', 1, 1])
+        self.assertEqual(book['名单']['M2'].value, '网页备注保留')
+        self.assertIsNone(book['名单']['O4'].value)
+        book.close()
+
+    def non_sjtu(self):
+        self.download.path.write_bytes(sample(AF='Test, Alice', C1='[Test, Alice] Other University, China'))
+
+    def test_non_sjtu_lost_ack_reconciles_only_without_a_second_write(self):
+        self.non_sjtu()
+        self.sa.lose = 'complete'
+        first = self.run_flow(1)
+        self.assertTrue(first.halted)
+        self.assertFalse(first.roster.records[0].done)
+        self.assertFalse(first.roster.records[0].skipped)
+        self.assertEqual(first.roster.records[0].source, 'WOS')
+        self.assertEqual(self.workflow.get(first.roster.records[0])['phase'], 'non_sjtu_complete_intent')
+        second = self.run_flow(1)
+        self.assertFalse(second.halted, second.reason)
+        self.assertTrue(second.roster.records[0].done)
+        self.assertEqual(second.roster.records[0].remark, '非交大')
+        self.assertEqual(second.roster.records[0].source, 'WOS')
+        self.assertEqual(self.sa.calls.count('complete'), 1)
+        self.assertNotIn('import_upload', self.sa.calls)
+
+    def test_non_sjtu_unknown_write_stops_tail_and_never_resubmits(self):
+        self.non_sjtu()
+        original = self.sa.call
+        def call(action, payload, timeout=75):
+            if action == 'complete':
+                self.sa.calls.append(action)
+                raise SafetyStop('写入效果未知')
+            return original(action, payload, timeout)
+        self.sa.call = call
+        first = self.run_flow()
+        self.assertTrue(first.halted)
+        self.assertEqual(first.remaining, 2)
+        self.assertFalse(any(r.done or r.skipped for r in first.roster.records[:2]))
+        self.assertTrue(self.run_flow().halted)
+        self.assertEqual(self.sa.calls.count('complete'), 1)
+        self.assertEqual(self.download.calls.count('wos_export'), 1)
+
+    def test_non_sjtu_old_extension_stops_before_intent_or_write(self):
+        self.non_sjtu()
+        original = self.sa.call
+        def call(action, payload, timeout=75):
+            value = original(action, payload, timeout)
+            value.pop('non_sjtu_completion_protocol', None)
+            return value
+        self.sa.call = call
+        result = self.run_flow(1)
+        self.assertTrue(result.halted)
+        self.assertIn('0.4.5', result.reason)
+        self.assertEqual(self.workflow.get(self.roster.records[0]), {})
+        self.assertNotIn('complete', self.sa.calls)
+        self.assertFalse(result.roster.records[0].skipped)
+
+    def test_non_sjtu_keeps_existing_website_remark(self):
+        self.non_sjtu()
+        self.sa.rows['demo-001']['remark'] = '其他人工结论'
+        result = self.run_flow(1)
+        self.assertTrue(result.halted)
+        self.assertNotIn('complete', self.sa.calls)
+        self.assertEqual(self.sa.rows['demo-001']['remark'], '其他人工结论')
+
+    def test_non_sjtu_local_source_failure_stops_before_website_write(self):
+        self.non_sjtu()
+        with patch('zero_match.record_data_sources', side_effect=SafetyStop('名单正在使用')):
+            result = self.run_flow(1)
+        self.assertTrue(result.halted)
+        self.assertNotIn('complete', self.sa.calls)
+        self.assertEqual(self.workflow.get(self.roster.records[0]), {})
+        self.assertFalse(result.roster.records[0].done)
+        self.assertFalse(result.roster.records[0].skipped)
+        self.assertEqual(result.roster.records[0].source, '')
+
+    def test_non_sjtu_changed_match_before_closure_does_not_write(self):
+        self.non_sjtu()
+        original = self.sa.call
+        reads = 0
+        def call(action, payload, timeout=75):
+            nonlocal reads
+            if action == 'status':
+                reads += 1
+                if reads == 2:
+                    self.sa.rows[payload['sa_id']]['matchCount'] = 1
+            return original(action, payload, timeout)
+        self.sa.call = call
+        result = self.run_flow(1)
+        self.assertTrue(result.halted)
+        self.assertNotIn('complete', self.sa.calls)
+        self.assertFalse(result.roster.records[0].done)
+
+    def test_non_sjtu_bad_readback_never_marks_workbook_done(self):
+        self.non_sjtu()
+        original = self.sa.call
+        def call(action, payload, timeout=75):
+            value = original(action, payload, timeout)
+            if action == 'complete':
+                value['row']['remark'] = ''
+            return value
+        self.sa.call = call
+        result = self.run_flow(1)
+        self.assertTrue(result.halted)
+        self.assertFalse(result.roster.records[0].done)
+        self.assertFalse(result.roster.records[0].skipped)
+        self.assertEqual(self.sa.calls.count('complete'), 1)
+
+    def test_unknown_affiliation_is_still_skipped_not_closed(self):
+        self.download.path.write_bytes(sample(AF='Test, Alice; Other, Bob', C1='[Test, Alice] Other University, China'))
+        result = self.run_flow(1)
+        self.assertFalse(result.halted, result.reason)
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertFalse(result.roster.records[0].done)
+        self.assertEqual(result.roster.records[0].remark, '交大署名待核验')
+        self.assertNotIn('complete', self.sa.calls)
+
+    def test_title_only_non_sjtu_is_never_closed(self):
+        self.non_sjtu()
+        book = load_workbook(self.path)
+        book['名单'].cell(2, 2 + list(HEADERS).index('doi')).value = ''
+        book.save(self.path)
+        book.close()
+        self.roster = read_roster(self.path)
+        self.sa = Backend(self.roster.records)
+        result = self.run_flow(1)
+        self.assertFalse(result.halted, result.reason)
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertFalse(result.roster.records[0].done)
+        self.assertNotIn('complete', self.sa.calls)
 
     def test_remote_processed_is_synced_before_download(self):
         self.sa.rows["demo-001"].update(markStatus="已处理", remark="原网页核验结论", titleValue="人工已纠正题名")

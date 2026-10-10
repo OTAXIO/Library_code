@@ -213,6 +213,58 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
         record_operation(action, "已执行", payload.get("sa_id", ""))
         return value
 
+    def close_non_sjtu(record, candidate, raw, state):
+        """Close a proven negative, not an import. Unknown writes never retry."""
+        fresh = call("status", {"sa_id": record.sa_id})
+        row = fresh.get("row")
+        verify_sa(record, row)
+        require_no_author_review(record.reason, row.get("reason"))
+        if (fresh.get("non_sjtu_completion_protocol") != 1 or
+                type(fresh.get("non_sjtu_completion_protocol")) is not int):
+            raise SafetyStop("请重载扩展 0.4.5 并刷新绑定 SA 页；尚未提交非交大结案。")
+        if (row.get("markStatus") != "待处理" or str(row.get("matchCount")) != "0"
+                or str(row.get("itemId", "")).lstrip(",") or row.get("remark", "") not in ("", "非交大")):
+            raise SafetyStop("非交大结案前后台状态、匹配或备注已改变，未覆盖。")
+        if state and state.get("phase") != "downloaded":
+            raise SafetyStop("此条已有写入断点，不能改作非交大结案或重复提交。")
+        if parse_wos(raw) != candidate:
+            raise SafetyStop("非交大 TXT 与核验记录不一致，未结案。")
+        # Recheck title, every supplied identifier, and the complete author map.
+        try:
+            identity(record, candidate)
+        except WOSPolicyStop as exc:
+            if exc.note != "非交大":
+                raise
+        else:
+            raise SafetyStop("TXT 不具备完整非交大证据，未结案。")
+        archive = download.store.archive(raw)
+        evidence = {"candidate": candidate, "sha256": candidate["sha256"],
+                    "path": str((download.store.root / (archive + ".txt")).resolve())}
+        # Provenance is already verified, independently of the website write.
+        # Persist it first so a lost completion ACK cannot drop the WOS source;
+        # the completion flag and remark still wait for verified read-back.
+        updated = record_data_sources(result.roster, [record], "WOS")
+        result.roster = updated.roster
+        record = next(r for r in result.roster.records if r.sa_id == record.sa_id)
+        intent = {**state, **evidence, "phase": "non_sjtu_complete_intent", "note": "非交大"}
+        workflow.save(record, intent)
+        proof = call("complete", {"sa_id": record.sa_id, "expected": row,
+                    "reviewed": True, "note": "非交大", "owner": OWNER,
+                    "non_sjtu_evidence": candidate})
+        after = proof.get("row")
+        verify_sa(record, after)
+        if (proof.get("verified") is not True or after.get("markStatus") != "已处理"
+                or after.get("remark") != "非交大" or str(after.get("matchCount")) != "0"
+                or str(after.get("itemId", "")).lstrip(",")):
+            raise SafetyStop("非交大备注及已处理状态未完整回读，名单未标完成；不重复提交。")
+        synced = reconcile_processed(result.roster, record, after)
+        if not synced:
+            raise SafetyStop("非交大网页结案未确认，名单未标完成。")
+        result.roster = synced.roster
+        workflow.save(record, {**intent, "phase": "non_sjtu_done"})
+        record_operation("非交大网页结案及名单回写", "已执行", record.sa_id)
+        return evidence
+
     # One genuine export can serve identical owned rows; each SA closure is
     # still separately verified. Never reuse across contradictory identifiers.
     files = {}
@@ -239,6 +291,8 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
                 continue
             verify_sa(record, row)
             state = workflow.get(record)
+            if state.get("phase") in ("non_sjtu_complete_intent", "non_sjtu_done"):
+                raise SafetyStop("上次非交大结案尚未回读为已处理；只读续验，不重复提交或导入。")
             require_no_author_review(record.reason, row.get("reason"))
             if not state and classify(record, fresh).route != "wos":
                 raise PaperSkip("后台不再是未处理零匹配任务，未重复导入。", "后台匹配状态已变化，待核验")
@@ -260,8 +314,18 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
             candidate = parse_wos(raw)
             try:
                 strong = identity(record, candidate)
-            except WOSPolicyStop:
-                raise
+            except WOSPolicyStop as exc:
+                if exc.note != "非交大":
+                    raise
+                if import_state:
+                    raise SafetyStop("此条已有上传/导入断点，不能改作非交大结案；请核验既有结果。")
+                stage = "非交大网页批注及结案"
+                evidence = close_non_sjtu(record, candidate, raw, state)
+                files[key] = raw
+                result.outcomes.append({"sa_id": record.sa_id, "title": record.title,
+                                        "status": "done", "message": "非交大", **evidence})
+                result.remaining -= 1
+                continue
             except SafetyStop as exc:
                 raise PaperSkip(str(exc), "WOS 文献标识或归属证据待核验：" + str(exc)) from exc
             if not strong:
