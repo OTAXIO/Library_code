@@ -26,7 +26,7 @@ from wos_policy import WOSPolicyStop, require_no_author_review, zero_result_note
 from skip_notes import brief_skip_note
 
 OWNER = "谭勋策"
-COMPLETION_NOTE = "WOS补充入库；已核验平台关联"
+COMPLETION_NOTE = "已入库"
 EXISTING_NOTE = "已核验本库同一文献；补充平台关联"
 
 
@@ -141,7 +141,7 @@ def resolved_item(answer, candidate):
     return item
 
 
-def verify_comparison(comparison, candidate, record, allow_unclaimed=False):
+def verify_paper_comparison(comparison, candidate, record):
     if not isinstance(comparison, list):
         raise SafetyStop("缺少关联后的比对详情。")
     for label, expected, source, normalizer in (("题名", candidate["title"], record.title, norm),
@@ -152,6 +152,10 @@ def verify_comparison(comparison, candidate, record, allow_unclaimed=False):
             raise SafetyStop("关联后的本库详情未确认：" + label)
         if not isinstance(fields[0].get("sa"), str) or normalizer(fields[0]["sa"]) != normalizer(source):
             raise SafetyStop("关联后的 SA 详情与名单不一致：" + label)
+
+
+def verify_comparison(comparison, candidate, record, allow_unclaimed=False):
+    verify_paper_comparison(comparison, candidate, record)
     # These labels/role flags are produced by the site's public comparison
     # formatter. Agreement is read-only evidence; we never infer or change a role.
     def field(label):
@@ -267,6 +271,61 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
         record_operation("非交大网页结案及名单回写", "已执行", record.sa_id)
         return evidence
 
+    def close_imported(record, candidate, item, state, fresh):
+        """Confirmed intake closes as 已入库, independently of author recognition.
+
+        A local journal or upload toast is insufficient. Re-read the actual
+        single-record pushed batch and linked paper, then submit closure once.
+        Unknown old claim/closure intents must not be reset by a new note.
+        """
+        if state["phase"] in ("claim_intent", "complete_intent"):
+            raise SafetyStop("上次认领或结案结果未确认；只读续验，不更改备注或重复提交。")
+        if type(fresh.get("import_completion_protocol")) is not int or fresh["import_completion_protocol"] != 1:
+            raise SafetyStop("请重载扩展 0.4.11 并重新绑定 SA 页；尚未提交“已入库”结案。")
+        verify_paper_comparison(fresh.get("comparison"), candidate, record)
+        imported = imports.get(record)
+        if (not imported or imported.get("phase") != "pushed" or imported.get("candidate") != candidate
+                or parse_wos(imports.bytes(imported)) != candidate):
+            raise SafetyStop("没有本条完整 TXT 和已确认推送的入库断点，不能备注已入库。")
+        previous = imported.get("batch") or {}
+        if not isinstance(previous.get("id"), str) or not previous["id"]:
+            raise SafetyStop("已入库批次编号不完整，未结案。")
+        checked = call("import_check", {"sa_id": record.sa_id, "candidate": candidate,
+            "instructions": "SA补充-" + record.sa_id, "batch_id": previous["id"], "expect_pushed": True})
+        batch = checked.get("batch") or {}
+        if (checked.get("verified") is not True or batch.get("id") != previous["id"]
+                or str(batch.get("status")) != "2" or batch.get("source") != "WOS"
+                or batch.get("instructions") != "SA补充-" + record.sa_id
+                or any(type(batch.get(key)) not in (int, str) or str(batch[key]) != value
+                       for key, value in (("total", "1"), ("actual", "1"), ("fail", "0")))):
+            raise SafetyStop("未回读到本条成功 1、失败 0 的已推送入库批次；未结案。")
+        fresh = call("search", {"sa_id": record.sa_id})
+        row = fresh.get("row")
+        verify_sa(record, row)
+        verify_paper_comparison(fresh.get("comparison"), candidate, record)
+        if (row.get("markStatus") != "待处理" or str(row.get("matchCount")) != "1"
+                or str(row.get("itemId", "")).lstrip(",") != item["id"]
+                or row.get("remark", "") not in ("", COMPLETION_NOTE)):
+            raise SafetyStop("入库结案前关联、状态或备注改变；未覆盖。")
+        state = {**state, "phase": "complete_intent", "note": COMPLETION_NOTE}
+        workflow.save(record, state)
+        proof = call("complete", {"sa_id": record.sa_id, "expected": row,
+            "expected_comparison": fresh["comparison"], "reviewed": True, "owner": OWNER,
+            "note": COMPLETION_NOTE,
+            "imported_evidence": {"candidate": candidate, "batch": batch, "item_id": item["id"]}})
+        after = proof.get("row")
+        verify_sa(record, after)
+        if (proof.get("verified") is not True or after.get("markStatus") != "已处理"
+                or after.get("remark") != COMPLETION_NOTE
+                or str(after.get("itemId", "")).lstrip(",") != item["id"]):
+            raise SafetyStop("“已入库”备注或已处理状态未完整回读；名单未标完成，不重复提交。")
+        synced = reconcile_processed(result.roster, record, after)
+        if not synced:
+            raise SafetyStop("入库结案未确认，名单未标完成。")
+        result.roster = synced.roster
+        workflow.save(record, {**state, "phase": "done"})
+        record_operation("已入库网页结案及名单回写", "已执行", record.sa_id)
+
     # One genuine export can serve identical owned rows; each SA closure is
     # still separately verified. Never reuse across contradictory identifiers.
     files = {}
@@ -303,7 +362,9 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
             state = workflow.get(record)
             if state.get("phase") in ("non_sjtu_complete_intent", "non_sjtu_done"):
                 raise SafetyStop("上次非交大结案尚未回读为已处理；只读续验，不重复提交或导入。")
-            require_no_author_review(record.reason, row.get("reason"))
+            import_state = imports.get(record)
+            if not import_state or import_state.get("phase") != "pushed":
+                require_no_author_review(record.reason, row.get("reason"))
             if not state and classify(record, fresh).route != "wos":
                 raise PaperSkip("后台不再是未处理零匹配任务，未重复导入。", "后台匹配状态已变化，待核验")
             if not backend_ready:
@@ -312,7 +373,6 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
                     raise SafetyStop("请重载扩展 0.4.2 并重新绑定工作页；尚未下载或导入。")
                 backend_ready = True
             stage = "下载并核验 TXT"
-            import_state = imports.get(record)
             key = (record.title, record.doi, record.wos)
             if import_state:
                 raw = imports.bytes(import_state)
@@ -355,6 +415,8 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
             item = resolved_item(call("import_resolve", {"sa_id": record.sa_id, "candidate": candidate}), candidate)
             imported = bool(import_state and import_state.get("phase") == "pushed")
             if not item:
+                if type(fresh.get("import_completion_protocol")) is not int or fresh["import_completion_protocol"] != 1:
+                    raise SafetyStop("请重载扩展 0.4.11 并重新绑定 SA 页；尚未上传或导入。")
                 # A linked/completion-intent record must never re-import when
                 # the retrieval index is temporarily missing its target.
                 if state["phase"] in ("link_intent", "linked", "claim_intent", "claimed", "complete_intent", "done"):
@@ -395,6 +457,12 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
             verify_sa(record, row)
             if str(row.get("matchCount")) != "1" or str(row.get("itemId", "")).lstrip(",") != item["id"]:
                 raise SafetyStop("平台关联未回读为唯一匹配。")
+            if imported:
+                close_imported(record, candidate, item, state, fresh)
+                result.outcomes.append({"sa_id": record.sa_id, "title": record.title,
+                                        "status": "done", "message": COMPLETION_NOTE, **evidence})
+                result.remaining -= 1
+                continue
             require_no_author_review(row.get("reason"))
             claimed = verify_comparison(fresh.get("comparison"), candidate, record, allow_unclaimed=True)
             if row.get("markStatus") == "待处理" and not claimed:

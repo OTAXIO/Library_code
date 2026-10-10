@@ -29,7 +29,7 @@ def preflight(bridge, *, resume_export=False):
         result = bridge.call("wos_diagnose", {}, timeout=25)
     except SafetyStop as exc:
         if "未知 WOS 调度命令" in str(exc):
-            raise SafetyStop("当前插件仍是旧版本，请重载 0.4.10、刷新工作页并重新绑定；尚未提交检索。") from exc
+            raise SafetyStop("当前插件仍是旧版本，请重载 0.4.11、刷新工作页并重新绑定；尚未提交检索。") from exc
         raise
     if (not isinstance(result, dict) or type(result.get("wos_download_protocol")) is not int
             or result.get("wos_download_protocol") != 1
@@ -41,7 +41,7 @@ def preflight(bridge, *, resume_export=False):
             or result.get("read_results_world") != "ISOLATED"
             or not re.fullmatch(r"\d+\.\d+\.\d+", str(result.get("extension_version", "")))
             or tuple(map(int, result["extension_version"].split("."))) < (0, 4, 9)):
-        raise SafetyStop("插件下载接口不兼容，请重载 0.4.10、刷新 WOS 页并重新绑定；未提交检索或下载。")
+        raise SafetyStop("插件下载接口不兼容，请重载 0.4.11、刷新 WOS 页并重新绑定；未提交检索或下载。")
     page = result.get("page")
     if (not isinstance(page, dict)
             or any(type(page.get(k)) is not bool for k in ("core_search_route", "wos_error", "site_timeout", "login_required", "busy"))

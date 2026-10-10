@@ -204,12 +204,35 @@ assert.ok(['https://www.webofscience.com','https://webofscience.clarivate.cn'].i
     assert.equal(verified.ok,true,JSON.stringify(verified));assert.equal(verified.data.batch.status,2);
     assert.deepEqual(await importPage.evaluate(()=>writes),{upload:1,import:1,push:1});
     console.log('PASS captured TXT -> hash check -> one upload -> one import -> priority merge -> verified push');
+    const [columns,values]=raw.toString('utf8').trim().split(/\r?\n/).map(line=>line.split('\t'));
+    const exportedFields=Object.fromEntries(columns.map((name,index)=>[name,values[index]]));
+    const closureCandidate={...importCandidate,authors:exportedFields.AF,affiliation:exportedFields.C1};
+    await site.evaluate(candidate=>{
+      Object.assign(synthetic,{markStatus:'待处理',remark:'',matchCount:1,itemId:'9876543210987654321',
+        titleValue:candidate.title,doiValue:candidate.doi,wosValue:'',reason:'第一单位不一致；作者不一致'});
+      Object.assign(testConfig,{claim:'未认领',saDoi:candidate.doi,libraryDoi:candidate.doi,libraryWos:candidate.wos});
+    },closureCandidate);
+    const beforeClosure=await site.evaluate(()=>({writes:writeCount,claims:claimWrites}));
+    const closureRead=await invoke('search',{sa_id:'demo-001'});
+    assert.equal(closureRead.ok,true,JSON.stringify(closureRead));
+    assert.equal(closureRead.data.import_completion_protocol,1);
+    const closurePayload={sa_id:'demo-001',expected:closureRead.data.row,
+      expected_comparison:closureRead.data.comparison,reviewed:true,owner:'谭勋策',note:'已入库',
+      imported_evidence:{candidate:closureCandidate,batch:verified.data.batch,item_id:'9876543210987654321'}};
+    const intakeClosed=await invoke('complete',closurePayload);
+    assert.equal(intakeClosed.ok,true,JSON.stringify(intakeClosed));
+    assert.equal(intakeClosed.data.row.markStatus,'已处理');assert.equal(intakeClosed.data.row.remark,'已入库');
+    assert.equal(await site.evaluate(()=>claimWrites),beforeClosure.claims);
+    assert.equal(await site.evaluate(()=>writeCount),beforeClosure.writes+1);
+    assert.equal((await invoke('complete',{...closurePayload,expected:intakeClosed.data.row})).ok,false);
+    assert.equal(await site.evaluate(()=>writeCount),beforeClosure.writes+1);
+    console.log('PASS verified TXT and pushed batch -> exact 已入库 closure through Bridge and real extension, no claim or duplicate write');
     assert.ok(site.url().includes('/dataCompare/list'));
     await importPage.evaluate(()=>location.hash='#/wel/index');
     const changedTab=await invoke('import_scan',{sa_id:'demo-001',instructions:'SA补充-demo-001',candidate:c});
     assert.equal(changedTab.ok,false);
     console.log('PASS changed workflow tab stops before executing commands');
-    console.log(`Extension integration: 19 cases passed (${wosOrigin}). Only synthetic data; no production requests.`);
+    console.log(`Extension integration: 20 cases passed (${wosOrigin}). Only synthetic data; no production requests.`);
   } finally {
     if(context)await context.close();
     if(stagedExtension && path.dirname(path.resolve(stagedExtension))===path.resolve(os.tmpdir()) &&

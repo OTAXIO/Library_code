@@ -109,7 +109,7 @@ async function runSACommand(command) {
       if (vm.loading) stop("列表仍在加载，请等待后重查");
       const row = snap(await fresh());
       guardSurface();
-      return {ok: true, data: {row, non_sjtu_completion_protocol: 1}};
+      return {ok: true, data: {row, non_sjtu_completion_protocol: 1, import_completion_protocol: 1}};
     }
     const drawer = vm.$refs?.compareDetailDrawer;
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");
@@ -308,7 +308,7 @@ async function runSACommand(command) {
     };
     if (command.action === "search") {
       const comparison = await showDetail();
-      return {ok: true, data: {row: before, comparison}};
+      return {ok: true, data: {row: before, comparison, import_completion_protocol: 1}};
     }
     if (["prepare_claim", "submit_claim"].includes(command.action)) {
       const submitting = command.action === "submit_claim";
@@ -479,9 +479,49 @@ async function runSACommand(command) {
     const noteParts = note.split(/[；;]/).map(part => part.trim()).filter(Boolean);
     const knownShortNote = noteParts.length > 0 && noteParts.every(part => presetNotes.includes(part));
     const nonSJTU = note === "非交大";
-    if (!command.reviewed || !note || (note.length < 6 && !knownShortNote && !nonSJTU) || note.length > 2000)
+    const imported = note === "已入库";
+    if (!command.reviewed || !note || (note.length < 6 && !knownShortNote && !nonSJTU && !imported) || note.length > 2000)
       stop("缺少人工核验及处理备注");
     if (row.markStatus !== "待处理") stop("记录已经处理，禁止再次切换状态");
+    if (imported) {
+      const proof = command.imported_evidence, c = proof?.candidate, b = proof?.batch;
+      const norm = value => String(value ?? "").normalize("NFKC").toLowerCase().replace(/\s+/g," ").trim();
+      const doi = value => norm(value).replace(/^(?:https?:\/\/doi\.org\/|doi:)\s*/,"");
+      const wos = value => {const v=String(value??"").trim().toUpperCase();return v&&!v.startsWith("WOS:")?"WOS:"+v:v;};
+      if (command.action !== "complete" || command.owner !== "谭勋策" || Number(row.matchCount) !== 1 ||
+          !proof || !/^\d{1,40}$/.test(proof.item_id??"") ||
+          String(row.itemId??"").replace(/^,/,"") !== proof.item_id || !c ||
+          ["title","doi","wos","sha256","affiliation","authors"].some(key=>typeof c[key]!=="string") ||
+          !c.title.trim() || !c.authors.trim() || c.doi && !/^10\.\d{4,9}\/\S+$/.test(doi(c.doi)) ||
+          !/^[a-f0-9]{64}$/.test(c.sha256) || !/^WOS:\d{15}$/.test(c.wos) ||
+          !/\bShanghai\s+(?:Jiao\s*Tong|Jiaotong)\s+Univ(?:ersity)?\b|上海交通大学/i.test(c.affiliation) ||
+          !b || typeof b.id!=="string" || !b.id || typeof b.modelId!=="string" || !b.modelId ||
+          b.source!=="WOS" || b.instructions!=="SA补充-"+command.sa_id || String(b.status)!=="2" ||
+          [["total","1"],["actual","1"],["fail","0"]].some(([key,value])=>
+            !["string","number"].includes(typeof b[key]) || String(b[key])!==value))
+        stop("缺少成功单篇入库、推送及平台关联证据，不能提交已入库结案");
+      const d=doi(row.doiValue), u=wos(row.wosValue);
+      if ((!d&&!u) || norm(row.titleValue)!==norm(c.title) || d&&d!==doi(c.doi) || u&&u!==c.wos ||
+          row.remark && row.remark!==note) stop("入库文献与 SA 不符或已有其他备注，未结案");
+      const comparison=await showDetail();
+      const field=(rows,label,side)=>{
+        const fields=Array.isArray(rows)?rows.filter(f=>f.label===label):[];
+        if(fields.length!==1 || typeof fields[0][side]!=="string")stop("缺少入库文献详情："+label);
+        return fields[0][side];
+      };
+      for(const [label,key,normalize] of [["题名","title",norm],["DOI","doi",doi],["WOS记录号","wos",wos]]) {
+        if(normalize(field(comparison,label,"library"))!==normalize(c[key]))stop("入库后的本库文献不一致："+label);
+        const saValue=key==="title"?row.titleValue:key==="doi"?row.doiValue:row.wosValue;
+        if(normalize(field(comparison,label,"sa"))!==normalize(saValue))stop("入库后的 SA 文献不一致："+label);
+        for(const side of ["sa","library"])
+          if(field(comparison,label,side)!==field(command.expected_comparison,label,side))
+            stop("入库相关详情已变化，未结案");
+      }
+      // Intake closure asserts only 已入库: no claims or role/unit edits.
+      await closeReadOnlyDetail();
+      row=await fresh();
+      if(!equal(snap(row),before))stop("入库结案前网页记录改变，未覆盖");
+    }
     if (nonSJTU) {
       // A short negative is not a general remark shortcut. Require the actual
       // Full Record metadata, strong paper identity and every author address.

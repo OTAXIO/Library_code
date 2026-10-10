@@ -44,7 +44,8 @@ class Backend:
                            {"label": "交大是否第一单位", "sa": "是", "library": "是"}]
                 for field in fields:
                     field.update(self.comparison_override.get(field['label'], {}))
-            return {"row": copy.deepcopy(row), "comparison": fields, "non_sjtu_completion_protocol": 1}
+            return {"row": copy.deepcopy(row), "comparison": fields, "non_sjtu_completion_protocol": 1,
+                    "import_completion_protocol": 1}
         if action == "import_resolve":
             return {"verified": True, "items": copy.deepcopy(self.items)}
         if action == 'prepare_claim':
@@ -69,7 +70,10 @@ class Backend:
             self.phase = 1
             return {"submitted": True}
         if action == "import_check":
-            return {"verified": True, "batch": {"id": "batch-1", "status": self.phase, "batchNumber": "B-1", "modelId": "article"}}
+            return {"verified": True, "batch": {"id": "batch-1", "status": self.phase,
+                "batchNumber": "B-1", "modelId": "article", "source": "WOS",
+                "instructions": "SA补充-" + payload["sa_id"], "total": 1,
+                "actual": 1 if self.phase == 2 else 0, "fail": 0}}
         if action == "import_push":
             self.phase = 2
             c = payload["candidate"]
@@ -138,6 +142,96 @@ class ZeroMatchTests(unittest.TestCase):
         self.roster = result.roster
         return result
 
+    def existing_paper(self):
+        from automation import parse_wos
+        self.sa.candidate = parse_wos(sample())
+        self.sa.items = [{"id": "1234567890123456789",
+            **{key: self.sa.candidate[key] for key in ("title", "doi", "wos")}}]
+
+    def test_confirmed_intake_uses_exact_imported_note_and_closes_without_claim(self):
+        self.sa.comparison_override = {'认领状态': {'library': '未认领'},
+                                      '交大是否第一单位': {'library': '未知'}}
+        self.sa.author_issue = True
+        result = self.run_flow(1)
+        self.assertFalse(result.halted, result.reason)
+        record = result.roster.records[0]
+        self.assertTrue(record.done)
+        self.assertFalse(record.skipped)
+        self.assertEqual(record.remark, '已入库')
+        self.assertEqual(self.sa.rows[record.sa_id]['markStatus'], '已处理')
+        self.assertEqual(self.sa.rows[record.sa_id]['remark'], '已入库')
+        self.assertNotIn('prepare_claim', self.sa.calls)
+        self.assertNotIn('submit_claim', self.sa.calls)
+        self.assertEqual(self.sa.calls.count('complete'), 1)
+        self.assertEqual(self.workflow.get(record)['phase'], 'done')
+
+    def test_intake_closure_requires_successful_batch_readback(self):
+        original = self.sa.call
+        checks = 0
+        invalid_batch = {}
+        def call(action, payload, timeout=75):
+            nonlocal checks
+            answer = original(action, payload, timeout)
+            if action == 'import_check':
+                checks += 1
+                if checks >= 3:
+                    answer['batch'].update(invalid_batch)
+            return answer
+        self.sa.call = call
+        for invalid_batch in ({'fail': 1}, {'status': 1}, {'total': 2, 'actual': 2},
+                              {'actual': 0}, {'source': 'CNKI'}, {'instructions': 'SA补充-other'},
+                              {'id': 'another-batch'}, {'total': True}):
+            with self.subTest(batch=invalid_batch):
+                result = self.run_flow(1)
+                self.assertTrue(result.halted)
+                self.assertFalse(result.roster.records[0].done)
+                self.assertNotIn('complete', self.sa.calls)
+                self.assertEqual(self.sa.calls.count('import_submit'), 1)
+
+    def test_intake_closure_refuses_old_extension_without_protocol(self):
+        original = self.sa.call
+        def call(action, payload, timeout=75):
+            answer = original(action, payload, timeout)
+            answer.pop('import_completion_protocol', None)
+            return answer
+        self.sa.call = call
+        result = self.run_flow(1)
+        self.assertTrue(result.halted)
+        self.assertNotIn('complete', self.sa.calls)
+        self.assertFalse(result.roster.records[0].done)
+        self.assertNotIn('import_upload', self.sa.calls)
+
+    def test_explicit_retry_finishes_previously_imported_skipped_item_without_reimport(self):
+        original = self.sa.call
+        checks = 0
+        def call(action, payload, timeout=75):
+            nonlocal checks
+            answer = original(action, payload, timeout)
+            if action == 'import_check':
+                checks += 1
+                if checks == 3:
+                    raise SafetyStop('模拟入库结果回读暂不可用')
+            return answer
+        self.sa.call = call
+        self.assertTrue(self.run_flow(1).halted)
+        from roster_write import mark_skipped_many
+        record = self.roster.records[0]
+        self.roster = mark_skipped_many(self.roster, [record],
+            reasons={record.sa_id: '第一单位待核验'}).roster
+        record = self.roster.records[0]
+        self.sa.rows[record.sa_id]['reason'] = '第一单位不一致'
+        self.sa.comparison_override['交大是否第一单位'] = {'library': '未知'}
+        self.sa.call = original
+        result = run_batch(self.roster, [record], self.sa, self.download, self.imports,
+                           self.workflow, self.stop, retry_skipped=True)
+        self.assertFalse(result.halted, result.reason)
+        self.assertEqual(result.roster.records[0].remark, '已入库')
+        self.assertTrue(result.roster.records[0].done)
+        self.assertFalse(result.roster.records[0].skipped)
+        for action in ('import_upload', 'import_submit', 'import_push', 'complete'):
+            self.assertEqual(self.sa.calls.count(action), 1)
+        self.assertNotIn('submit_claim', self.sa.calls)
+
     def test_full_two_row_pipeline_one_download_one_import_two_closures(self):
         result = self.run_flow()
         self.assertFalse(result.halted, result.reason)
@@ -149,7 +243,7 @@ class ZeroMatchTests(unittest.TestCase):
             self.assertEqual(self.sa.calls.count(action), count)
         book = load_workbook(self.path)
         self.assertEqual(book["名单"]["O2"].value, 1)
-        self.assertIn("入库", book["名单"]["A2"].value)
+        self.assertEqual(book["名单"]["A2"].value, "已入库")
         self.assertEqual(book["名单"]["N2"].value, "WOS")
         self.assertEqual(book["名单"]["M2"].value, "网页备注保留")
         self.assertIsNone(book["名单"]["O4"].value)
@@ -439,6 +533,7 @@ class ZeroMatchTests(unittest.TestCase):
         self.assertEqual(self.sa.calls.count("complete"), 1)
 
     def test_author_issue_after_link_is_not_falsely_closed(self):
+        self.existing_paper()  # Existing library paper is not proof of a new import.
         self.sa.author_issue = True
         result = self.run_flow(1)
         self.assertFalse(result.halted, result.reason)
@@ -447,6 +542,7 @@ class ZeroMatchTests(unittest.TestCase):
         self.assertNotIn("complete", self.sa.calls)
 
     def test_unclaimed_precise_person_is_claimed_before_completion(self):
+        self.existing_paper()
         self.sa.comparison_override['认领状态'] = {'library': '未认领'}
         result = self.run_flow(1)
         self.assertFalse(result.halted, result.reason)
@@ -455,6 +551,7 @@ class ZeroMatchTests(unittest.TestCase):
         self.assertLess(self.sa.calls.index('submit_claim'), self.sa.calls.index('complete'))
 
     def test_unclaimed_ambiguous_person_is_skipped_not_claimed(self):
+        self.existing_paper()
         self.sa.comparison_override['认领状态'] = {'library': '未认领'}
         self.sa.ambiguous_author = True
         result = self.run_flow(1)
@@ -464,6 +561,7 @@ class ZeroMatchTests(unittest.TestCase):
         self.assertNotIn('complete', self.sa.calls)
 
     def test_lost_claim_ack_resumes_only_by_readback(self):
+        self.existing_paper()
         self.sa.comparison_override['认领状态'] = {'library': '未认领'}
         self.sa.lose = 'submit_claim'
         self.assertTrue(self.run_flow(1).halted)
@@ -473,6 +571,7 @@ class ZeroMatchTests(unittest.TestCase):
         self.assertEqual(self.sa.calls.count('submit_claim'), 1)
 
     def test_role_or_unit_difference_is_not_closed_with_empty_reason(self):
+        self.existing_paper()
         staff = self.roster.records[0].staff_id
         for label, value in [('作者信息', f'工号：{staff}\n是否第一作者：是\n是否通讯作者：否'),
                              ('交大是否第一单位', '否')]:
