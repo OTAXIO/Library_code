@@ -169,8 +169,25 @@ class ZeroMatchTests(unittest.TestCase):
         result = self.run_flow()
         self.assertFalse(result.halted, result.reason)
         self.assertTrue(result.roster.records[0].skipped)
-        self.assertEqual(result.roster.records[0].remark, "未查询到")
+        self.assertEqual(result.roster.records[0].remark, "wos未查询到")
         self.assertTrue(result.roster.records[1].done)
+
+    def test_extension_zero_result_saves_requested_note_and_flag_before_next_paper(self):
+        self.download.fail["demo-001"] = (
+            "[扩展 0.4.1] [WOS 已暂停] WOS 未找到记录；这不等于未发表，也不自动标记完成")
+        result = self.run_flow()
+        self.assertFalse(result.halted, result.reason)
+        self.assertEqual(result.remaining, 0)
+        self.assertEqual([outcome["status"] for outcome in result.outcomes], ["skip", "done"])
+        self.assertEqual(result.outcomes[0]["message"], "wos未查询到")
+        self.assertFalse(result.roster.records[0].done)
+        book = load_workbook(self.path)
+        self.addCleanup(book.close)
+        self.assertEqual(book["名单"]["A2"].value, "wos未查询到")
+        self.assertEqual(book["名单"]["O2"].value, 2)
+        self.assertEqual(book["名单"]["O3"].value, 1)
+        self.assertIsNone(book["名单"]["A4"].value)
+        self.assertIsNone(book["名单"]["O4"].value)
 
     def test_skip_save_failure_retains_prior_completion_and_stops_tail(self):
         records = select_records(self.roster, '谭勋策', 2)

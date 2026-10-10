@@ -42,7 +42,7 @@ if(location.pathname.includes('/summary/')){
   main.querySelector('button').onclick=()=>{
     if(main.querySelector('input').value==='Missing synthetic paper'){
       const banner=document.createElement('section');banner.setAttribute('role','alert');
-      banner.innerHTML=cn?'<span>您的</span><span>检索</span><span>未找到</span><span>结果</span>':'Your search did not return any results';main.prepend(banner);
+      banner.innerHTML=cn?'<span>您的</span><span>检索</span><span>未找到</span><span>结果</span>':'Your search found no results';main.prepend(banner);
     }else location.assign('/wos/woscc/summary/offline');
   };
 }

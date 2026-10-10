@@ -245,7 +245,7 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
             if not backend_ready:
                 capability = call("import_capabilities", {"sa_id": record.sa_id})
                 if (capability.get("zero_match_protocol") != 1 or capability.get("library_resolution") is not True):
-                    raise SafetyStop("请重载扩展 0.4.0 并重新绑定工作页；尚未下载或导入。")
+                    raise SafetyStop("请重载扩展 0.4.1 并重新绑定工作页；尚未下载或导入。")
                 backend_ready = True
             stage = "下载并核验 TXT"
             import_state = imports.get(record)

@@ -209,7 +209,8 @@ const cmd=(action,more={})=>({action,sa_id:'demo-001',instructions:'SA补充-dem
   test('WOS Chinese and English zero-result banners finish without URL navigation or timeout',async()=>{
     const cases=[['First missing paper','您的检索未找到结果'],
       ['Second missing paper','Your search did not return any results'],
-      ['Third missing paper','Your search did not find any results']];
+      ['Third missing paper','Your search did not find any results'],
+      ['Screenshot missing paper','Your search found no results']];
     for(const [title,message] of cases){
       await page.goto('https://www.webofscience.com/wos/woscc/basic-search');
       await page.evaluate(message=>document.querySelector('button').onclick=()=>{
@@ -236,12 +237,14 @@ const cmd=(action,more={})=>({action,sa_id:'demo-001',instructions:'SA补充-dem
     assert.equal(read.ok,true,JSON.stringify(read));assert.equal(read.data.state,'zero');
   });
   test('WOS stale zero-result banner requests a clean reload before any new search click',async()=>{
-    await page.goto('https://www.webofscience.com/wos/woscc/basic-search');
-    await page.evaluate(()=>{const alert=document.createElement('section');alert.setAttribute('role','alert');
-      alert.textContent='您的检索未找到结果';document.getElementById('main').prepend(alert);});
-    const r=await page.evaluate(runWOSCommand,{...cmd('wos_search'),title:'Next paper'});
-    assert.equal(r.ok,false);assert.match(r.error,/保留上一条零结果/);
-    assert.equal(await page.evaluate(()=>searches),0);
+    for(const message of ['您的检索未找到结果','Your search found no results']){
+      await page.goto('https://www.webofscience.com/wos/woscc/basic-search');
+      await page.evaluate(message=>{const alert=document.createElement('section');alert.setAttribute('role','alert');
+        alert.textContent=message;document.getElementById('main').prepend(alert);},message);
+      const r=await page.evaluate(runWOSCommand,{...cmd('wos_search'),title:'Next paper'});
+      assert.equal(r.ok,false);assert.match(r.error,/保留上一条零结果/);
+      assert.equal(await page.evaluate(()=>searches),0);
+    }
   });
   test('read-only diagnosis reports encoded WOS links without exposing titles or queries',async()=>{
     await page.goto('https://www.webofscience.com/wos/woscc/basic-search');

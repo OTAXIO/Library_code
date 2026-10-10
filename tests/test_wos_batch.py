@@ -13,18 +13,19 @@ from wos_batch import WOSDownload, default_store, preflight
 
 class PreflightTests(unittest.TestCase):
     def capabilities(self, **page):
-        return {"extension_version": "0.4.0", "wos_download_protocol": 1,
+        return {"extension_version": "0.4.1", "wos_download_protocol": 1,
                 "result_reader": "shared-diagnostic", "read_results_world": "ISOLATED",
                 "page": {"core_search_route": True, "query_input_count": 1,
                          "wos_error": False, "login_required": False, "dialog_count": 0, "busy": False, **page}}
 
     def test_extension_protocol_checked_before_search(self):
         bridge = Mock(call=Mock(return_value=self.capabilities()))
-        self.assertEqual(preflight(bridge), {"extension_version": "0.4.0"})
+        self.assertEqual(preflight(bridge), {"extension_version": "0.4.1"})
         bridge.call.assert_called_once_with("wos_diagnose", {}, timeout=25)
 
     def test_old_incompatible_and_alternate_transport_fail_without_search(self):
         for result in ({}, {**self.capabilities(), "extension_version": "0.3.28"},
+                       {**self.capabilities(), "extension_version": "0.4.0"},
                        {**self.capabilities(), "wos_download_protocol": True},
                        {**self.capabilities(), "read_results_world": "MAIN"},
                        {"transport": "browser-skill", "wos_download_protocol": 2}):
@@ -60,7 +61,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_result_page_does_not_require_search_inputs(self):
         self.assertEqual(preflight(Mock(call=Mock(return_value=self.capabilities(
-            core_search_route=False, query_input_count=0)))), {"extension_version": "0.4.0"})
+            core_search_route=False, query_input_count=0)))), {"extension_version": "0.4.1"})
 
 
 class DownloadTests(unittest.TestCase):

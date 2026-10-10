@@ -173,11 +173,12 @@ async function runWOSCommand(command) {
   // A zero-result search stays on basic-search in the current WOS SPA. It is a
   // completed per-paper outcome, not a navigation/connection timeout. Keep the
   // phrases narrow so help text and search-history labels cannot become results.
+  // The English banner also says "Your search found no results" (not returned).
   // WOS renders parts of the Chinese message in separate elements. `norm()`
   // therefore leaves spaces between words that look contiguous on screen.
   // Allow only whitespace between the known phrase fragments; do not use a
   // broad "0" match that could mistake search history or help text for a result.
-  const noResultPattern=/(?:no\s+(?:results?|records?|documents?)\s+(?:were\s+)?found|your\s+search\s+(?:did\s+not\s+(?:return|find)\s+any|returned\s+no)\s+results?|您的?\s*(?:检索|搜索|檢索|搜尋)\s*(?:未找到|没有找到|沒有找到|未檢索到)\s*(?:任何)?\s*(?:结果|結果)|未找到\s*(?:任何)?\s*(?:结果|結果)|没有\s*(?:检索|搜索)\s*结果|沒有\s*(?:檢索|搜尋)\s*結果)/i;
+  const noResultPattern=/(?:no\s+(?:results?|records?|documents?)\s+(?:were\s+)?found|your\s+search\s+(?:did\s+not\s+(?:return|find)\s+any|(?:returned|found)\s+no)\s+results?|您的?\s*(?:检索|搜索|檢索|搜尋)\s*(?:未找到|没有找到|沒有找到|未檢索到)\s*(?:任何)?\s*(?:结果|結果)|未找到\s*(?:任何)?\s*(?:结果|結果)|没有\s*(?:检索|搜索)\s*结果|沒有\s*(?:檢索|搜尋)\s*結果)/i;
   const noResults=()=>noResultPattern.test(norm(document.body?.innerText||""));
   const noResultTextNodes=()=>{
     const found=[];

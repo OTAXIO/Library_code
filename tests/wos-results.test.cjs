@@ -12,6 +12,11 @@ const record='/wos/woscc/full-record/WOS:000123456789012';
 const second='/wos/woscc/full-record/WOS:000123456789013';
 const link=(attrs='',target=record)=>`<a href="${target}" ${attrs}><span>PRIVATE_TITLE</span></a>`;
 const cases=[
+  {name:'screenshot English found-no-results banner on basic search with a stale record link',
+    route:'/wos/woscc/basic-search',html:`<section role="alert"><b>Your search found no results</b><p>Check the spelling and/or broaden your search parameters</p></section>${link()}`,
+    state:'zero',total:null},
+  {name:'English found-no-results banner split over elements',
+    route:'/wos/woscc/basic-search',html:'<section role="alert"><span>Your </span><span>search </span><span>found </span><span>no </span><span>results</span></section>',state:'zero',total:null},
   {name:'inline count and unit without a text-space',html:`<div role="tab"><b>1</b><span>Documents</span></div>${link()}`,state:'single',total:1},
   {name:'English document tab',html:`<div role="tab">1 Documents</div>${link()}`,state:'single',total:1},
   {name:'Chinese count split over inline nodes',html:`<h2><span>1</span><span>篇</span><span>文献</span></h2>${link()}`,state:'single',total:1},
@@ -50,7 +55,7 @@ const cases=[
   try{
     for(const origin of ['https://webofscience.clarivate.cn','https://www.webofscience.com']){
       for(const test of cases){
-        await page.goto(origin+'/wos/woscc/summary/offline');
+        await page.goto(origin+(test.route||'/wos/woscc/summary/offline'));
         await page.evaluate(html=>document.getElementById('main').innerHTML=html,test.html.replace('HOST',new URL(origin).hostname));
         const url=page.url();
         const result=await page.evaluate(runWOSCommand,{action:'wos_read_results',sa_id:'offline',title:'PRIVATE_QUERY',expires:Date.now()+30000});
