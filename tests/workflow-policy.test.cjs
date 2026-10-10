@@ -34,6 +34,27 @@ test('invalid import binding reports a page error without accessing command glob
   assert.match(policy.workflowBindingError('http://admin.ir.lib.sjtu.edu.cn/#/wel/index','importTabId',false),/不是后台/);
 });
 
+test('validated background import tab is activated before its async public methods', async()=>{
+  const order=[],tab={id:3,active:false,url:'http://admin.ir.lib.sjtu.edu.cn/#/collectItem/batchManage'};
+  const sandbox={URL,Date,setTimeout,resolveLibraryRecord(){},runImportCommand(){},chrome:{
+    tabs:{get:async()=>tab,update:async(id,options)=>{assert.equal(id,3);assert.equal(options.active,true);assert.deepEqual(Object.keys(options),['active']);tab.active=true;order.push('activate');}},
+    scripting:{executeScript:async()=>{order.push('execute');return [{result:{ok:true,data:{verified:true,items:[]}}}];}}}};
+  loadPolicy(sandbox);
+  const result=await sandbox.dispatchWorkflow({action:'import_resolve',expires:Date.now()+30000},{tabId:1,importTabId:3});
+  assert.equal(result.ok,true);
+  assert.deepEqual(order,['activate','execute']);
+});
+
+test('a changed import binding is rejected before tab activation or page execution',async()=>{
+  const sandbox={URL,Date,setTimeout,chrome:{
+    tabs:{get:async()=>({id:3,active:false,url:'http://admin.ir.lib.sjtu.edu.cn/#/item/entryManage'}),
+      update:async()=>{throw Error('must not activate a changed tab');}},
+    scripting:{executeScript:async()=>{throw Error('must not execute on a changed tab');}}}};
+  loadPolicy(sandbox);
+  await assert.rejects(sandbox.dispatchWorkflow({action:'import_resolve',expires:Date.now()+30000},
+    {tabId:1,importTabId:3}),/已切换/);
+});
+
 for (const origin of origins) {
   test(`${origin}: binding accepts only the exact HTTPS WOS origin`, () => {
     assert.equal(policy.validRolePage(origin + '/wos/woscc/basic-search', 'wosTabId'), true);
@@ -146,7 +167,7 @@ test('a redirect to the other WOS origin stops before page execution', async () 
 
 test('manifest grants both exact WOS hosts, not broad wildcard hosts', () => {
   const manifest=require('../extension/manifest.json');
-  assert.match(manifest.version,/^0\.3\.\d+$/);
+  assert.match(manifest.version,/^0\.4\.\d+$/);
   for(const origin of origins)assert.ok(manifest.host_permissions.includes(origin+'/*'));
   assert.ok(!manifest.host_permissions.some(x=>x.includes('*://')||x.includes('://*.')||x==='<all_urls>'));
 });

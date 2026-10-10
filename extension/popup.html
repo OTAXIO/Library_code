@@ -16,21 +16,21 @@
       <h1>论文助手</h1>
     </div>
   </header>
-  <p class="intro">这里连接工作页，具体任务在桌面助手中开始。</p>
+  <p class="intro">自动认领 / 自动导入。在这里连接网页，在桌面开始任务。</p>
   <main>
     <section class="card pairing" aria-labelledby="pairing-title">
       <div class="section-heading">
         <h2 id="pairing-title">1. 连接桌面助手</h2>
         <span class="pill">桌面配对</span>
       </div>
-      <p class="hint">仅下载 TXT：在 WOS 文献检索页连接。<br>后台入库：先在「SA 数据比对 → 比对结果」页连接。</p>
+      <p class="hint">在「SA 数据比对 → 比对结果」页粘贴配对码。<br>自动认领只需要连接这一页。</p>
       <div class="field-label">
         <label for="token">本次配对码</label>
         <span>来自桌面助手 · 非账号密码</span>
       </div>
       <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴配对码" aria-describedby="pairing-title">
       <div class="pair-actions">
-        <button id="pair" class="primary"><span class="button-label">连接此页与桌面助手</span><span class="button-arrow" aria-hidden="true">↗</span></button>
+        <button id="pair" class="primary"><span class="button-label">连接 SA 比对页</span><span class="button-arrow" aria-hidden="true">↗</span></button>
         <button id="disconnect" class="secondary">断开连接</button>
       </div>
     </section>
@@ -40,29 +40,25 @@
     </section>
     <details class="card workflow">
       <summary>
-        <span>2. 设置检索 / 入库页面</span>
+        <span>2. 自动导入：再连接两个网页</span>
         <span class="summary-trailing"><span class="optional">展开</span><span class="chevron" aria-hidden="true">›</span></span>
       </summary>
       <div class="workflow-content">
-        <h3>WOS 检索与下载</h3>
-        <p class="hint">在 WOS 文献检索标签页点击。仅下载无需连接后台。</p>
-        <button id="wos" class="secondary full-width">将此页用于 WOS 检索</button>
+        <h3>WOS 文献页</h3>
+        <p class="hint">切换到已登录的 WOS 文献页，在该页扩展中点击：</p>
+        <button id="wos" class="secondary full-width">绑定当前 WOS 页</button>
         <div class="workflow-divider" aria-hidden="true"></div>
-        <h3>TXT 上传与入库</h3>
-        <p class="hint">先连接 SA 比对结果页并保持打开。另开「数据导入与批次管理」，在该标签页点击“将此页用于 TXT 入库”。</p>
+        <h3>后台导入页</h3>
+        <p class="hint">另开「数据管理 → 数据导入与批次管理」，在该页扩展中点击：</p>
         <button id="open-import" class="secondary full-width"><span class="button-label">打开数据导入与批次管理</span><span class="button-arrow" aria-hidden="true">↗</span></button>
-        <button id="import" class="secondary full-width import-binding">将此页用于 TXT 入库</button>
-        <p class="caption">这是「数据管理 → 数据导入与批次管理」，不是普通数据列表。绑定后回桌面检查 TXT，再确认导入。</p>
+        <button id="import" class="secondary full-width import-binding">绑定当前导入页</button>
+        <p class="caption">三个网页保持打开。回桌面选择“自动导入”，程序会下载 TXT、核验、入库并批注回写。</p>
       </div>
     </details>
     <div class="utilities">
       <button id="inspect" class="utility">
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m13 13 4 4M14.5 8.5a6 6 0 1 1-12 0 6 6 0 0 1 12 0Z"/></svg>
         查看连接诊断<span class="utility-note">只读</span>
-      </button>
-      <button id="mute" class="utility">
-        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m9 3-5 4H2v6h2l5 4ZM13 6a6 6 0 0 1 0 8M15.5 3.5a9 9 0 0 1 0 13"/></svg>
-        WOS 静音 / 恢复
       </button>
     </div>
     <textarea id="diagnostics" rows="6" readonly hidden aria-label="只读控件诊断"></textarea>

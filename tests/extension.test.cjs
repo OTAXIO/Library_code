@@ -71,6 +71,12 @@ assert.ok(['https://www.webofscience.com','https://webofscience.clarivate.cn'].i
     await site.evaluate(()=>testConfig.drawerCloseDelay=180);
     console.log('PASS repeated SA reads reuse the same drawer without close timeout or writes');
     const editor=await invoke('open_metadata',{sa_id:'demo-001',expected:read.data.row});
+    if(!editor.ok)console.log('Synthetic SA timeout diagnostics',await site.evaluate(()=>({
+      visibility:document.visibilityState,loading:vm.loading,detailLoading:detail.dialogLoading,
+      detailVisible:detail.dialogVisible,detailTarget:detail.currentSaLzkId,
+      editorOpened:window.openedEditor||false,claimVisible:claimWindow.drawer,
+      closeCalls:window.closeCalls||0,writes:window.writeCount
+    })),await worker.evaluate(()=>({busy,polling})));
     assert.equal(editor.ok,true,JSON.stringify(editor));
     assert.equal(await site.evaluate(()=>openedEditor),'1234567890123456789');
     assert.equal(await site.evaluate(()=>writeCount),0);

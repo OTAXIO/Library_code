@@ -3,6 +3,11 @@ import json
 import sys
 from bridge import Bridge
 
+# Node sends UTF-8 JSON. Windows redirected stdin otherwise uses GBK with
+# surrogateescape, corrupting Chinese snapshot fields and breaking HTTP JSON.
+sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+sys.stdout.reconfigure(encoding="utf-8", errors="strict")
+
 bridge = Bridge(0)  # Do not compete with the user's running assistant.
 try:
     # Read by the test subprocess only; never log this ephemeral pairing secret.

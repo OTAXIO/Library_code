@@ -11,18 +11,19 @@ const root=path.resolve(__dirname,'..');
     const page=await browser.newPage({viewport:{width:400,height:600}});
     await page.addInitScript(()=>{
       window.calls=[];
-      window.chrome={tabs:{query:async()=>[{id:1}]},runtime:{sendMessage:async message=>{
+      window.activeURL='http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list';
+      window.chrome={tabs:{query:async()=>[{id:1,url:window.activeURL}]},runtime:{sendMessage:async message=>{
         window.calls.push(message);return {ok:true};}}};
     });
     await page.goto(pathToFileURL(path.join(root,'extension/popup.html')).href);
     const folder=path.join(root,'runtime/ui-preview');fs.mkdirSync(folder,{recursive:true});
-    await page.screenshot({path:path.join(folder,'popup-0.3.25.png')});
+    await page.screenshot({path:path.join(folder,'popup-0.4.0.png')});
     assert.equal(await page.locator('.workflow').evaluate(el=>el.open),false);
     const status=await page.locator('#status').boundingBox();
     assert.ok(status.y+status.height<=600,'connection status must be visible on opening');
     await page.locator('summary').click();
-    const labels={pair:'连接此页与桌面助手',wos:'将此页用于 WOS 检索',import:'将此页用于 TXT 入库',
-      'open-import':'打开数据导入与批次管理',inspect:'查看连接诊断',mute:'WOS 静音 / 恢复',disconnect:'断开连接'};
+    const labels={pair:'连接 SA 比对页',wos:'绑定当前 WOS 页',import:'绑定当前导入页',
+      'open-import':'打开数据导入与批次管理',inspect:'查看连接诊断',disconnect:'断开连接'};
     for (const [id,text] of Object.entries(labels)) {
       const button=page.locator('#'+id);
       assert.ok((await button.innerText()).includes(text));
@@ -35,9 +36,9 @@ const root=path.resolve(__dirname,'..');
     await page.locator('#pair').click();
     assert.equal(await page.locator('#token').inputValue(),'');
     await page.locator('#wos').click();
-    assert.ok((await page.locator('#status').innerText()).includes('用于 WOS 检索'));
+    assert.ok((await page.locator('#status').innerText()).includes('WOS 页已绑定'));
     await page.locator('#import').click();
-    assert.ok((await page.locator('#status').innerText()).includes('用于 TXT 入库'));
+    assert.ok((await page.locator('#status').innerText()).includes('导入页已绑定'));
     const calls=await page.evaluate(()=>window.calls);
     assert.deepEqual(calls.map(value=>value.type),['pair','bind_workflow','bind_workflow']);
     assert.deepEqual(calls.slice(1).map(value=>value.role),['wosTabId','importTabId']);
@@ -50,7 +51,12 @@ const root=path.resolve(__dirname,'..');
     await page.locator('#status').evaluate(el=>{el.textContent='布局检查完成';});
     await page.locator('#diagnostics').evaluate(el=>{el.hidden=true;});
     await page.evaluate(()=>window.scrollTo(0,0));
-    await page.screenshot({path:path.join(folder,'popup-0.3.25-expanded.png'),fullPage:true});
-    console.log('PASS popup: collapsed/expanded layout and long diagnostics fit; 7 actions and WOS/import roles unchanged');
+    await page.screenshot({path:path.join(folder,'popup-0.4.0-expanded.png'),fullPage:true});
+    assert.equal(await page.locator('#mute').count(),0);
+    await page.evaluate(()=>window.activeURL='https://webofscience.clarivate.cn/wos/woscc/basic-search');
+    await page.locator('#pair').click();
+    assert.ok((await page.locator('#status').innerText()).includes('请先切换到 SA'));
+    assert.equal(await page.evaluate(()=>window.calls.length),3,'wrong role must not replace pairing');
+    console.log('PASS popup: minimal 6 controls, collapsed/expanded layout and long diagnostics fit; roles unchanged');
   } finally {await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

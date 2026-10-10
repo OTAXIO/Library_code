@@ -90,13 +90,13 @@ async function runWOSCommand(command) {
       });
       const actions=matches.filter(el=>!matches.some(other=>other!==el&&el.contains(other)));
       if(actions.length){
-        if(actions.length!==1)fail(`文献检索按钮未唯一识别（当前检索区域识别到 ${actions.length} 个）。未点击检索按钮；请点扩展“检查工作页”复制按钮诊断`);
+        if(actions.length!==1)fail(`文献检索按钮未唯一识别（当前检索区域识别到 ${actions.length} 个）。未点击检索按钮；请点扩展“查看连接诊断”复制按钮诊断`);
         return actions[0];
       }
       if(root===boundary)break;
       root=root.parentElement;
     }
-    fail("文献检索按钮未唯一识别（当前检索区域识别到 0 个）。未点击检索按钮；请点扩展“检查工作页”复制按钮诊断");
+    fail("文献检索按钮未唯一识别（当前检索区域识别到 0 个）。未点击检索按钮；请点扩展“查看连接诊断”复制按钮诊断");
   };
   const click=el=>{check();if(el.disabled||el.getAttribute("aria-disabled")==="true")fail("控件尚不可用");el.click();};
   const set=(el,value)=>{
@@ -264,7 +264,7 @@ async function runWOSCommand(command) {
                    "切换字段检索",15000);
       }
       const combos=fields();
-      if(combos.length!==1)fail(`检索字段选择器未唯一识别（识别到 ${combos.length} 个）。请进入 Advanced Search / 高级检索 → Fielded Search / 字段检索，只保留一行条件。可点扩展“检查工作页”复制控件诊断`);
+      if(combos.length!==1)fail(`检索字段选择器未唯一识别（识别到 ${combos.length} 个）。请进入 Advanced Search / 高级检索 → Fielded Search / 字段检索，只保留一行条件。可点扩展“查看连接诊断”复制控件诊断`);
       let field=combos[0];
       if(field.tagName==="SELECT"){
         const option=one([...field.options].filter(o=>choices.includes(norm(o.textContent))),"检索字段");

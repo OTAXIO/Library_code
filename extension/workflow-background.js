@@ -44,7 +44,7 @@ function wosSearchTimeout(diagnostic) {
     String(diagnostic.canonical_record_link_count):"未确认";
   const page=diagnostic?.record_route===true?"单篇页":diagnostic?.summary_route===true?"结果页":"尚未识别结果页";
   const busy=diagnostic?.busy===true?"是":"否";
-  return `[WOS 已暂停] WOS 检索结果超时（${page}；文献总数 ${count}；安全单篇链接 ${links}；加载中 ${busy}），未自动重复 Search；请点击扩展“检查工作页”核对结果诊断后再继续`;
+  return `[WOS 已暂停] WOS 检索结果超时（${page}；文献总数 ${count}；安全单篇链接 ${links}；加载中 ${busy}），未自动重复 Search；请点击扩展“查看连接诊断”核对结果诊断后再继续`;
 }
 function workflowBindingError(url,role,sameSATab) {
   if(sameSATab)return "当前标签页已用于 SA 比对，请保留它，并在独立标签页打开 WOS 或导入管理页后绑定";
@@ -84,6 +84,10 @@ async function dispatchWorkflow(command,pair) {
   let tab=await chrome.tabs.get(id);
   if(!validRolePage(tab.url,role))throw new Error("绑定的工作标签页已切换或未登录，请人工返回");
   const workOrigin=new URL(tab.url).origin;
+  // Operate on the visible bound work tab so site timers/async UI transitions
+  // are not throttled. Diagnostics remain read-only and do not switch tabs.
+  if(command.action!=="wos_diagnose" && tab.active===false)
+    await chrome.tabs.update(id,{active:true});
   const execute=async(fn,cmd)=>{
     const current=await chrome.tabs.get(id);
     if(!validRolePage(current.url,role))throw new Error("工作标签页目标发生变化");

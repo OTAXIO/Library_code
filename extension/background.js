@@ -42,7 +42,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const sa=await chrome.tabs.get(pair.tabId);
         if (!validPage(sa.url)) throw new Error("SA 比对页已切换，请先返回比对结果");
         await chrome.tabs.create({windowId:sa.windowId,url:new URL(sa.url).origin+"/#/collectItem/batchManage",active:true});
-        return {ok:true,message:"已打开后台导入页。看到“WOS数据导入(Txt)”和批次列表后，再点击“绑定当前导入管理页”。"};
+        return {ok:true,message:"已打开后台导入页。看到“WOS数据导入(Txt)”和批次列表后，再点击“绑定当前导入页”。"};
       }
       if (message.type === "toggle_wos_mute") {
         if (!Number.isInteger(pair.wosTabId)) throw new Error("请先在 WOS 页面点击“绑定当前 WOS 页”");
@@ -127,6 +127,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             throw new Error("当前是 WOS 下载连接。后台操作请在桌面重新配对 SA 页面");
           if (workflowRole(command.action)) result = await dispatchWorkflow(command, pair);
           else {
+            // MAIN-world page methods wait on page timers. A background SA tab
+            // can be throttled/frozen after WOS work, delaying the result past
+            // the bridge deadline. Activate only the already validated work tab.
+            if (tab.active === false) await chrome.tabs.update(tab.id, {active: true});
             const outcomes = await chrome.scripting.executeScript({target: {tabId: pair.tabId},
               world: "MAIN", func: runSACommand, args: [command]});
             result = outcomes[0]?.result || {ok: false, error: "页面没有返回执行结果"};

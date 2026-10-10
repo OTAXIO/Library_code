@@ -73,7 +73,7 @@ details[open] .optional { display: none; }
 .two-columns { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 8px; margin-top: 8px; }
 .two-columns button { padding-inline: 5px; font-size: 11px; }
 .caption { color: var(--muted); font-size: 10px; line-height: 1.7; margin-top: 11px; }
-.utilities { display: grid; grid-template-columns: minmax(0,1.2fr) minmax(0,1fr); gap: 8px; }
+.utilities { display: flex; justify-content: center; }
 .utility { font-size: 11px; background: transparent; border-color: transparent; padding: 5px; gap: 6px; }
 .utility svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linejoin: round; stroke-linecap: round; flex-shrink: 0; }
 .utility-note { color: var(--muted); font-size: 10px; }

@@ -97,7 +97,7 @@ def fixed_roster_path(folder=None):
     directory = Path(folder).resolve() if folder is not None else Path(__file__).resolve().parent
     path = directory / ROSTER_FILENAME
     if not path.is_file():
-        raise SafetyStop(f"未找到固定名单：{path}\n请将名单保存为 code 文件夹内的 list.xlsx，再点击“重新读取 list.xlsx”。\n不读取其他名称、父目录或 .xls 文件；不要将文件命名为 list.xlsx.xlsx。")
+        raise SafetyStop(f"未找到固定名单：{path}\n请将名单保存为 code 文件夹内的 list.xlsx，再点击“重读名单”。\n不读取其他名称、父目录或 .xls 文件；不要将文件命名为 list.xlsx.xlsx。")
     return path
 
 

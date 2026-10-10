@@ -5,6 +5,24 @@ const vm=require('node:vm');
 const path=require('node:path');
 const root=path.join(__dirname,'../extension');
 
+test('validated background SA tab is activated before executing page transitions',async()=>{
+  const order=[],tab={id:7,active:false,url:'http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list'};
+  const state={token:'a'.repeat(43),tabId:7,mode:'sa'};
+  let listener;
+  const chrome={runtime:{id:'test',getURL:p=>'chrome-extension://test/'+p,getManifest:()=>({version:'test'}),
+    onMessage:{addListener:fn=>listener=fn}},storage:{session:{get:async()=>state}},
+    tabs:{get:async()=>tab,update:async(id,options)=>{assert.equal(id,7);assert.equal(options.active,true);assert.deepEqual(Object.keys(options),['active']);tab.active=true;order.push('activate');}},
+    scripting:{executeScript:async()=>{order.push('execute');return [{result:{ok:true,data:{verified:true}}}];}}};
+  const command={id:'command-1',action:'search',sa_id:'demo-001',expires:Date.now()+30000};
+  const context=vm.createContext({chrome,URL,Date,AbortSignal,importScripts:()=>{},runSACommand(){},setTimeout,
+    fetch:async(url)=>({ok:true,json:async()=>url.endsWith('/poll')?{command}:{}})});
+  vm.runInContext(fs.readFileSync(path.join(root,'workflow-background.js'),'utf8'),context);
+  vm.runInContext(fs.readFileSync(path.join(root,'background.js'),'utf8'),context);
+  const reply=await new Promise(resolve=>listener({type:'tick'},{tab},resolve));
+  assert.equal(reply.ok,true);
+  assert.deepEqual(order,['activate','execute']);
+});
+
 test('WOS pairs and executes without an SA or import tab; rejects backend operations',async()=>{
   const state={}, requests=[], injections=[];
   let listener,command;

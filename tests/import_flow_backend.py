@@ -7,6 +7,10 @@ from automation import ImportStore, WOSFlow
 from bridge import Bridge
 from core import Record, SafetyStop
 
+# JSON sent by Node is UTF-8, independent of the Windows console codepage.
+sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+sys.stdout.reconfigure(encoding="utf-8", errors="strict")
+
 
 root = Path(sys.argv[1]).resolve()
 bridge = Bridge(0)
