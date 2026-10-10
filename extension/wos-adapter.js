@@ -29,7 +29,12 @@ async function runWOSCommand(command) {
     if(/Oops,?\s*something went wrong!?/i.test(document.body?.innerText||""))
       fail("WOS 网站自身报错：Oops, something went wrong! 这不是导入管理页的问题。请先点击 WOS 网页顶部 Search 或导航菜单重新进入检索；若仍报错，请人工检查登录、校园网/机构访问。网页恢复前不继续检索或导入");
     if(!location.pathname.startsWith("/wos/woscc/"))fail("请在 WOS 核心合集的文献检索页登录，不能使用作者检索");
-    if(all('iframe[src*="captcha"],input[type="password"],#challenge-form').length)fail("登录或验证码需要人工处理");
+    if(all('#challenge-form,#cf-challenge-running,iframe[src*="captcha"],iframe[src*="challenge"]').some(el=>
+      !el.closest('.grecaptcha-badge,[hidden],[inert],[aria-hidden="true"]')&&
+      (el.tagName!=="IFRAME"||el.getBoundingClientRect().height>=70)))
+      fail("WOS 显示人工验证，请完成验证后继续；不自动重试检索");
+    if(all('input[type="password"]').some(el=>!el.closest('[hidden],[inert],[aria-hidden="true"]')))
+      fail("WOS 显示登录表单，请完成登录后继续；不自动重试检索");
   };
   const wait=async(fn,label,ms=30000)=>{
     const end=Math.min(Date.now()+ms,command.expires-resultMargin);

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SA 比对半自动助手",
-  "version": "0.3.30",
+  "version": "0.3.31",
   "description": "SA 比对、WOS 论文信息下载与核验入库；明确区分下载和入库，未知情况暂停。",
   "permissions": ["storage", "scripting", "activeTab", "downloads"],
   "host_permissions": [

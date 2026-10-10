@@ -1,6 +1,6 @@
 {
   "name": "sa-library-assistant-tests",
   "private": true,
-  "scripts": {"test": "node tests/browser.test.cjs", "test:extension": "node tests/extension.test.cjs", "test:workflow": "node tests/workflow.test.cjs", "test:policy": "node --test tests/workflow-policy.test.cjs", "test:wos-search": "node tests/wos-search.test.cjs", "test:wos-results": "node tests/wos-results.test.cjs", "test:wos-extension": "node tests/wos-extension.test.cjs", "test:import-extension": "node tests/import-extension.test.cjs"},
+  "scripts": {"test": "node tests/browser.test.cjs", "test:extension": "node tests/extension.test.cjs", "test:workflow": "node tests/workflow.test.cjs", "test:policy": "node --test tests/workflow-policy.test.cjs", "test:wos-search": "node tests/wos-search.test.cjs", "test:wos-results": "node tests/wos-results.test.cjs", "test:wos-extension": "node tests/wos-extension.test.cjs", "test:import-extension": "node tests/import-extension.test.cjs", "test:library": "node tests/library-resolution.test.cjs", "test:readiness": "node tests/wos-readiness.test.cjs"},
   "devDependencies": {"playwright": "1.62.1"}
 }

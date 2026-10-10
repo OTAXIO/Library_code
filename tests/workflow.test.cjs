@@ -23,6 +23,13 @@ const cmd=(action,more={})=>({action,sa_id:'demo-001',instructions:'SA补充-dem
   };
   const submit=async()=>{const data=await upload();const r=await execute(cmd('import_submit',{upload:data}));assert.equal(r.ok,true,JSON.stringify(r));};
   const tests=[];const test=(name,fn)=>tests.push([name,fn]);
+  test('one-click capability check is read-only and requires no invented candidate',async()=>{
+    const result=await execute({action:'import_capabilities',sa_id:'demo-001',expires:Date.now()+30000});
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.zero_match_protocol,1);
+    assert.equal(result.data.library_resolution,true);
+    assert.deepEqual(await page.evaluate(()=>writes),{upload:0,import:0,push:0});
+  });
   test('empty scan performs no writes',async()=>{
     assert.deepEqual((await execute(cmd('import_scan'))).data.batches,[]);
     assert.deepEqual(await page.evaluate(()=>writes),{upload:0,import:0,push:0});

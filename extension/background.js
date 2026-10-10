@@ -1,4 +1,4 @@
-importScripts("adapter.js", "import-adapter.js", "wos-adapter.js", "workflow-background.js", "page-diagnostics.js");
+importScripts("adapter.js", "import-adapter.js", "wos-adapter.js", "workflow-background.js", "page-diagnostics.js", "library-adapter.js");
 let polling = false;
 let busy = false;
 let updatingConnection = false;

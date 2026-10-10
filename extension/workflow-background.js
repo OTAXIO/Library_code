@@ -120,6 +120,7 @@ async function dispatchWorkflow(command,pair) {
          counts.some(key=>!Number.isInteger(observed[key])||observed[key]<0||observed[key]>99999))
         throw new Error('WOS 页面就绪检查未返回完整结果；本轮未提交检索');
       page=Object.fromEntries([...flags,...counts].map(key=>[key,observed[key]]));
+      if(['login','verification',''].includes(observed.access_gate))page.access_gate=observed.access_gate;
       if(!page.core_search_route || page.query_input_count || page.wos_error || page.login_required || page.dialog_count)
         break;
       if(Date.now()>=until)break;
@@ -129,6 +130,7 @@ async function dispatchWorkflow(command,pair) {
       wos_download_protocol:1,result_reader:'shared-diagnostic',read_results_world:'ISOLATED',page}};
   }
   if(role==="importTabId") {
+    if(command.action==='import_resolve')return execute(resolveLibraryRecord,command);
     if(command.action==="import_upload"){
       if(typeof command.content!=="string" || command.content.length>700000)throw new Error("TXT 文件大小异常");
       const bytes=Uint8Array.from(atob(command.content),c=>c.charCodeAt(0));

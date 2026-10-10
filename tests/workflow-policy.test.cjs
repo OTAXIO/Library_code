@@ -14,6 +14,26 @@ function loadPolicy(sandbox) {
   vm.runInContext(source,sandbox);
 }
 
+test('library resolution dispatches only to the separately bound import tab', async () => {
+  const calls=[];
+  const sandbox={URL,Date,setTimeout,resolveLibraryRecord(){},runImportCommand(){},chrome:{
+    tabs:{get:async()=>({id:3,url:'http://admin.ir.lib.sjtu.edu.cn/#/collectItem/batchManage'})},
+    scripting:{executeScript:async input=>{calls.push(input);return [{result:{ok:true,data:{verified:true,items:[]}}}];}},
+  }};
+  loadPolicy(sandbox);
+  const result=await sandbox.dispatchWorkflow({action:'import_resolve',expires:Date.now()+30000},{tabId:1,importTabId:3});
+  assert.equal(result.data.verified,true);
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].target.tabId,3);
+  assert.equal(calls[0].func,sandbox.resolveLibraryRecord);
+  assert.equal(calls[0].world,'MAIN');
+});
+
+test('invalid import binding reports a page error without accessing command globals', () => {
+  assert.match(policy.workflowBindingError('http://admin.ir.lib.sjtu.edu.cn/#/item/entryManage','importTabId',false),/普通/);
+  assert.match(policy.workflowBindingError('http://admin.ir.lib.sjtu.edu.cn/#/wel/index','importTabId',false),/不是后台/);
+});
+
 for (const origin of origins) {
   test(`${origin}: binding accepts only the exact HTTPS WOS origin`, () => {
     assert.equal(policy.validRolePage(origin + '/wos/woscc/basic-search', 'wosTabId'), true);

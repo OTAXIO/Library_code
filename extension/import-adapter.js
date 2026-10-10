@@ -26,6 +26,7 @@ async function runImportCommand(command) {
   const one = (items, label) => { if(items.length!==1)fail(label+"不是唯一对象，请人工处理"); return items[0]; };
   try {
     check();
+    if(command.action==='import_capabilities')return {ok:true,data:{zero_match_protocol:1,library_resolution:true}};
     if (!["import_scan","import_upload","import_submit","import_check","import_push"].includes(command.action)) fail("未知导入命令");
     if (typeof command.sa_id!=="string" || !/^[\w-]{1,160}$/.test(command.sa_id) ||
         command.instructions!=="SA补充-"+command.sa_id) fail("导入说明必须严格绑定当前名单 ID");

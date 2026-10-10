@@ -43,5 +43,11 @@ const vm={$options:{name:'BatchManage'},$children:[drawer,push,view],$refs:{wosD
   async getData(page,size){this.loading=true;const data=await request('batches?page='+page+'&size='+size);
     this.tableData=data.items;this.page.total=data.total;this.loading=false;},
   importWosDataText(){drawer.showDrawer();},batchPush(row){push.showDrawer(row);}};
+const library={$options:{name:'EntryManage',components:{ItemEdit:{}}},$el:document.getElementById('app'),$children:[],
+  $refs:{itemDetail:{}},page:{current:1,size:100},queryForm:{},tableData:[],total:0,loading:false,
+  async getData(page,query){this.loading=true;this.tableData=[];
+    try {const data=await request('library',query);this.tableData=data.items;this.total=data.total;}
+    finally {this.loading=false;}}};
+vm.$router={async push(path){location.hash='#'+path;document.getElementById('app').__vue__=path==='/item/entryManage'?library:vm;}};
 document.getElementById('app').__vue__=vm;
 </script></body></html>

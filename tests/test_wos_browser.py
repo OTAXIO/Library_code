@@ -95,6 +95,15 @@ class BrowserFlowTests(unittest.TestCase):
         self.url='https://webofscience.clarivate.cn/wos/woscc/full-record/WOS:000123456789012'
         self.query={'sa_id':'demo-001','title':'Synthetic paper','doi':'10.1234/test','wos':''}
 
+    def test_access_gate_reports_observed_kind_without_claiming_every_gate_is_captcha(self):
+        bridge=FakeBrowser(self.base)
+        for kind, expected in [('login','登录需要'),('verification','人工验证需要'),('', '访问检查需要')]:
+            with self.subTest(kind=kind), self.assertRaisesRegex(WOSBrowserStop,expected):
+                bridge._human_gate({'login_required':True,'access_gate':kind})
+        bridge._human_gate({'login_required':False,'access_gate':''})
+        self.assertEqual(bridge.actions,[])
+        self.assertEqual(bridge.downloads,0)
+
     def test_one_real_capture_path_after_one_search_and_read_only_checks(self):
         bridge=FakeBrowser(self.base,[{'ok':True,'data':{'state':'single','navigate_url':self.url}},
                                     {'ok':True,'data':{'state':'record','record_url':self.url}}])

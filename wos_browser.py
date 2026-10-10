@@ -232,17 +232,18 @@ class BrowserSkillWOS:
     def _human_gate(self, page):
         if not page.get("login_required"):
             return
-        self.progress("WOS 登录/验证码需要你处理，请在专用浏览器窗口完成。")
+        gate = {"login": "登录", "verification": "人工验证"}.get(page.get("access_gate"), "访问检查")
+        self.progress(f"WOS {gate}需要你处理，请在专用浏览器窗口完成。")
         if self.interaction.get("request_help") == "enabled":
             # One request only. Disabled/cancelled/timed-out help is not consent.
             result = self._run(["request-help", "--session", self.session,
-                                "--prompt", "请在 WOS 专用测试页完成登录或验证码；无需提供账号密码。",
+                                "--prompt", f"请在 WOS 专用测试页处理{gate}；无需提供账号密码。",
                                 "--timeout", "45s"], timeout=48)
             if result.get("status") in {"completed", "continued"} or result.get("outcome") in {"completed", "continued"}:
                 self._observe()
                 if not self._probe().get("login_required"):
                     return
-        raise WOSBrowserStop("WOS 登录或验证码需要人工处理；未继续下一篇。")
+        raise WOSBrowserStop(f"WOS {gate}需要人工处理；未继续下一篇。")
 
     def _navigate(self, url):
         # WOS may leave analytics/personalization requests pending even when

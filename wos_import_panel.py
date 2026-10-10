@@ -11,8 +11,8 @@ from notices import messages as messagebox
 from ui_theme import P, style_text
 from wos_import import build_plan, require_owner, run_import_plan
 
-LABELS = {"ready": "本轮可入库", "resume": "本轮续验", "deferred": "需人工核验", "pushed": "已入库·待关联",
-          "synced": "原已处理", "halted": "已暂停", "queued": "下轮再核验", "skip": "本轮只记跳过"}
+LABELS = {"done": "已结案·批注同步", "ready": "本轮可入库", "resume": "本轮续验", "deferred": "需人工核验", "pushed": "已入库·待关联",
+          "synced": "原已处理", "halted": "已暂停", "queued": "尚未执行", "skip": "待核验·已跳过"}
 SCOPES = {"待补论文（不含跳过项）": "pending", "已跳过论文（是否识别为 2）": "skipped"}
 
 
@@ -29,8 +29,8 @@ class WOSImportPanel:
         self.scope = tk.StringVar(value=next(iter(SCOPES)))
         self.inbox = tk.StringVar(value=str(app.automation_panel.runtime.parent / "submission" / "待收导出"))
         self.reviewed = tk.BooleanVar(value=False)
-        self.status = tk.StringVar(value="第 1 步：选择负责人和范围，检查已下载的 TXT。")
-        ttk.Label(page, text="论文入库 · WOS TXT", style="Title.TLabel").pack(anchor="w", pady=(2, 8))
+        self.status = tk.StringVar(value="一键补录：后台核验 → WOS TXT → 导入推送 → 平台关联 → 网页及名单批注。")
+        ttk.Label(page, text="零匹配论文补录", style="Title.TLabel").pack(anchor="w", pady=(2, 8))
         owner_row = ttk.Frame(page)
         owner_row.pack(fill="x", pady=(0, 6))
         ttk.Label(owner_row, text="负责人").pack(side="left")
@@ -41,7 +41,7 @@ class WOSImportPanel:
         app.button(owner_row, "连接浏览器", app.pair).pack(side="right")
         source = ttk.Frame(page)
         source.pack(fill="x", pady=(0, 8))
-        ttk.Label(source, text="文件目录").pack(side="left")
+        ttk.Label(source, text="已有 TXT 目录").pack(side="left")
         self.folder_entry = ttk.Entry(source, textvariable=self.inbox, width=10)
         self.folder_entry.pack(side="left", fill="x", expand=True, padx=6)
         app.button(source, "更换目录", self.choose_folder).pack(side="right")
@@ -52,27 +52,32 @@ class WOSImportPanel:
         ttk.Label(row, text="本轮最多").pack(side="left")
         self.limit_box = ttk.Spinbox(row, from_=1, to=100, textvariable=self.limit, width=5)
         self.limit_box.pack(side="left", padx=6)
-        ttk.Label(row, text="篇").pack(side="left")
+        ttk.Label(row, text="条名单").pack(side="left")
         actions = ttk.Frame(page)
         actions.pack(fill="x", pady=(0, 8))
-        app.button(actions, "1. 检查 TXT 文件", self.preview).pack(side="left")
-        self.start_button = app.button(actions, "2. 上传并入库 / 续验", self.start, style="Primary.TButton")
-        self.start_button.pack(side="left", padx=5)
-        self.stop_button = ttk.Button(actions, text="暂停", command=self.cancel, state="disabled")
+        self.one_click_button = app.button(actions, "一键补录 / 继续", self.one_click, style="Primary.TButton")
+        self.one_click_button.pack(side="left", padx=(0, 5))
+        self.stop_button = ttk.Button(actions, text="当前步骤后暂停", command=self.cancel, state="disabled")
         self.stop_button.pack(side="right")
+        manual = ttk.Frame(page)
+        manual.pack(fill="x", pady=(0, 6))
+        ttk.Label(manual, text="已有 TXT：", style="Muted.TLabel").pack(side="left")
+        app.button(manual, "1. 检查 TXT 文件", self.preview).pack(side="left")
+        self.start_button = app.button(manual, "2. 上传并入库 / 续验", self.start)
+        self.start_button.pack(side="left", padx=5)
         utilities = ttk.Frame(page)
         utilities.pack(fill="x", pady=(0, 6))
         app.button(utilities, "核验所选论文", self.open_single).pack(side="left")
         app.button(utilities, "打开 TXT 文件夹", self.open_folder).pack(side="left", padx=5)
         app.button(utilities, "查看下载结果", self.open_download_report).pack(side="left")
-        self.intro_label = ttk.Label(page, text="入库需连接 SA 比对页，并绑定“数据导入与批次管理”页。\n检查文件不操作网页。入库会上传、导入、推送，但不代表 SA 已完成。",
+        self.intro_label = ttk.Label(page, text="一键补录仅处理谭勋策的零匹配项目；不需要先分类。\n验证码/结果不明时暂停并保留进度，不重复提交。已有 TXT 的两步工具不自动结案。",
                   wraplength=430, style="Muted.TLabel")
         self.intro_label.pack(anchor="w", pady=(0, 8))
         # Reserve the consent/status footer before allocating the flexible list area.
         self.status_label = ttk.Label(page, textvariable=self.status, wraplength=850)
         self.status_label.pack(side="bottom", fill="x", pady=(8, 0))
         self.consent = ttk.Checkbutton(page, variable=self.reviewed,
-                                      text="已核验本轮文献；新入库项已确认本库缺失")
+                                      text="仅已有 TXT 两步工具：已核验身份及本库缺失")
         self.consent.pack(side="bottom", anchor="w", pady=(6, 0))
         panes = ttk.Panedwindow(page, orient="vertical")
         panes.pack(fill="both", expand=True)
@@ -84,7 +89,7 @@ class WOSImportPanel:
         self.tree.column("title", width=280, minwidth=140)
         self.tree.column("state", width=140, minwidth=125, stretch=False)
         for tag, color in (("ready", P.amber), ("resume", P.amber), ("deferred", P.red), ("skip", P.red),
-                           ("halted", P.red), ("pushed", P.green), ("synced", P.green)):
+                           ("halted", P.red), ("pushed", P.amber), ("synced", P.green), ("done", P.green)):
             self.tree.tag_configure(tag, foreground=color)
         scrollbar = ttk.Scrollbar(listing, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -134,7 +139,7 @@ class WOSImportPanel:
             if folder.is_dir():
                 os.startfile(folder)
             else:
-                messagebox.showinfo("还没有 TXT 文件", "请先在分类页下载 WOS TXT，或更换到已有文件目录。", parent=self.app.root)
+                messagebox.showinfo("还没有 TXT 文件", "可直接点“一键补录 / 继续”，或更换到已有 TXT 文件目录。", parent=self.app.root)
 
     def open_download_report(self):
         if self.app.busy:
@@ -254,7 +259,66 @@ class WOSImportPanel:
     def cancel(self):
         self.stop.set()
         self.stop_button.configure(state="disabled")
-        self.status.set("已请求暂停后续步骤；已发出的提交不能撤回，请等待回读。")
+        self.status.set("已请求暂停：当前入库步骤先完成回读，后续关联、认领或结案不再提交。")
+
+    def one_click(self):
+        """One UI entry, one orchestrator. Legacy download/import tools remain intact."""
+        app = self.app
+        if app.busy:
+            return
+        from zero_match import SerialWOS, WorkflowStore, run_batch, select_records
+        from wos_browser import BrowserSkillWOS, select_transport
+        from wos_batch import default_store
+        try:
+            if not app.roster:
+                raise SafetyStop("请先读取 list.xlsx。")
+            text = self.limit.get().strip()
+            if not text.isdigit():
+                raise SafetyStop("本轮条数须为 1–100 的整数。")
+            records = select_records(app.roster, app.owner.get(), int(text), SCOPES[self.scope.get()])
+            if not records:
+                raise SafetyStop("当前范围没有未完成的零匹配任务。")
+            if not app.bridge or not app.bridge.online:
+                raise SafetyStop("请先连接 SA 比对页，并绑定数据导入与批次管理页。")
+            roster, sa = app.roster, app.bridge
+        except SafetyStop as exc:
+            messagebox.showwarning("暂未开始补录", str(exc), parent=app.root)
+            return
+        self.stop.clear()
+        self.running = True
+        self.invalidate()
+        self.entries = {r.sa_id: {"sa_id": r.sa_id, "title": r.title, "status": "queued", "message": "尚未执行"} for r in records}
+        self.render()
+        progress = app.automation_panel.progress.put
+        def audit(action, outcome, sa_id):
+            app.operation_log.record(action, outcome, sa_id)
+        def job():
+            # The configured WOS channel is explicit. Never fall back after an
+            # access/permission failure; backend writes stay on the paired SA extension.
+            from paper_classify import BASE
+            transport = select_transport(sa, BASE, stop=self.stop, progress=progress)
+            try:
+                download = SerialWOS(transport, default_store(), self.stop, progress)
+                return run_batch(roster, records, sa, download, self.store(),
+                    WorkflowStore(app.automation_panel.runtime), self.stop, progress, audit)
+            finally:
+                if isinstance(transport, BrowserSkillWOS):
+                    transport.close()
+        def done(result):
+            app.roster = result.roster
+            app.skipped = {r.sa_id: r.remark for r in app.roster.records if r.skipped and not r.done}
+            for entry in result.outcomes:
+                self.entries[entry["sa_id"]].update(entry)
+            app.clear_selection()
+            app.populate()
+            self.render()
+            finished = sum(e["status"] in ("done", "synced") for e in result.outcomes)
+            synced = sum(e["status"] == "synced" for e in result.outcomes)
+            skipped = sum(e["status"] == "skip" for e in result.outcomes)
+            self.status.set(f"已结案 {finished} 条（含原已处理 {synced} 条） · 跳过 {skipped} 条 · 尚待继续 {result.remaining} 条。" +
+                            ("\n已暂停：" + result.reason if result.halted else ""))
+            app.status.set(self.status.get())
+        app.run(job, done, "开始零匹配补录…", log_action="一键零匹配补录")
 
     def render(self):
         self.tree.delete(*self.tree.get_children())

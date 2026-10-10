@@ -220,3 +220,37 @@ class ImportUITests(unittest.TestCase):
         self.assertEqual(state['phase'], 'exported')
         self.assertFalse(state['identity_confirmed'])
         self.assertEqual(self.bridge.calls, [])
+
+    def test_one_click_runs_owned_zero_match_to_web_and_excel_without_extra_approval(self):
+        from tests.test_zero_match import Backend, Download
+        self.app.bridge = Backend(self.app.roster.records)
+        self.app.bridge.online = True
+        self.app.bridge.close = lambda: None
+        transport = Download(self.folder)
+        self.panel.limit.set('1')
+        with patch('wos_browser.select_transport', return_value=transport), \
+             patch('zero_match.SerialWOS', side_effect=lambda transport, *args: transport), \
+             patch('wos_import_panel.messagebox.askyesno') as confirm:
+            self.panel.one_click()
+        confirm.assert_not_called()
+        self.assertTrue(self.app.roster.records[0].done)
+        self.assertEqual(self.panel.entries['demo-001']['status'], 'done')
+        self.assertFalse(self.app.busy)
+        self.assertFalse(self.panel.running)
+        self.assertIn('已结案 1', self.panel.status.get())
+
+    def test_one_click_global_verification_pause_retains_list_and_has_no_tail_skips(self):
+        from tests.test_zero_match import Backend, Download
+        self.app.bridge = Backend(self.app.roster.records)
+        self.app.bridge.online = True
+        self.app.bridge.close = lambda: None
+        transport = Download(self.folder)
+        transport.fail['demo-001'] = 'WOS 显示人工验证'
+        before = file_hash(self.path)
+        with patch('wos_browser.select_transport', return_value=transport), \
+             patch('zero_match.SerialWOS', side_effect=lambda transport, *args: transport):
+            self.panel.one_click()
+        self.assertEqual(file_hash(self.path), before)
+        self.assertEqual(self.panel.entries['demo-001']['status'], 'halted')
+        self.assertIn('已暂停', self.panel.status.get())
+        self.assertFalse(self.app.busy)

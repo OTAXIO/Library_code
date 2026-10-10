@@ -101,7 +101,15 @@ function inspectWorkPage(command) {
   // account name or input value, and leave ambiguous controls to the adapter.
   const queryInputs=[...document.querySelectorAll('input:not([type]),input[type="text"],input[type="search"],textarea')]
     .filter(el=>visible(el)&&!el.closest('nav,header,footer,aside,[role="navigation"],[role="banner"],[hidden],[inert],[aria-hidden="true"]'));
-  const loginRequired=[...document.querySelectorAll('iframe[src*="captcha"],input[type="password"],#challenge-form')].some(visible);
+  // A reCAPTCHA badge/hidden anchor is not an active verification challenge.
+  // Do not read account fields; report only the kind of visible access gate.
+  const challenge=[...document.querySelectorAll('#challenge-form,#cf-challenge-running,iframe[src*="captcha"],iframe[src*="challenge"]')]
+    .some(el=>visible(el)&&!el.closest('.grecaptcha-badge,[hidden],[inert],[aria-hidden="true"]')&&
+      (el.tagName!=="IFRAME"||el.getBoundingClientRect().height>=70));
+  const login=[...document.querySelectorAll('input[type="password"]')].some(el=>visible(el)&&
+    !el.closest('[hidden],[inert],[aria-hidden="true"]'));
+  const gateKind=challenge?'verification':login?'login':'';
+  const loginRequired=Boolean(gateKind);
   const dialogCount=[...document.querySelectorAll('[role="dialog"],mat-dialog-container')]
     .filter(el=>visible(el)&&!el.closest('[hidden],[inert],[aria-hidden="true"]')).length;
   let recordRoute=false;
@@ -114,7 +122,7 @@ function inspectWorkPage(command) {
     wos_error:/Oops,?\s*something went wrong!?/i.test(text),
     site_timeout:siteTimeout,
     core_search_route:/^\/wos\/woscc\/(?:basic-search|advanced-search|fielded-search)\/?$/.test(u.pathname),
-    query_input_count:queryInputs.length,login_required:loginRequired,dialog_count:dialogCount,
+    query_input_count:queryInputs.length,login_required:loginRequired,access_gate:gateKind,dialog_count:dialogCount,
     summary_route:summary,record_route:recordRoute,
     zero_result:noResult||(summary&&totals.size===1&&totals.has(0)&&!recordLinks.size&&!busy),busy,
     result_total:totals.size===1?[...totals][0]:null,result_total_conflict:totals.size>1,
@@ -128,7 +136,7 @@ function inspectWorkPage(command) {
   if(data.site_timeout)return fail('WOS 网站返回 5xx/连接超时页；不是文献零结果，请恢复网页后再继续');
   if(data.wos_error)return fail('WOS 网站报错：Oops, something went wrong! 请先恢复机构访问或检索页面');
   if(loginRequired)
-    return fail('登录或验证码需要人工处理');
+    return fail(gateKind==='verification'?'WOS 显示人工验证，请完成验证后继续；未查询当前论文':'WOS 显示登录表单，请完成登录后继续；未查询当前论文');
   if(dialogCount)
     return fail('WOS 有弹窗，请人工处理');
   const diagnostic={summary_route:summary,record_route:recordRoute,busy,
