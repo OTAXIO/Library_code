@@ -2,6 +2,7 @@
 import json
 import sys
 from bridge import Bridge
+from wos_batch import preflight
 
 # Node sends UTF-8 JSON. Windows redirected stdin otherwise uses GBK with
 # surrogateescape, corrupting Chinese snapshot fields and breaking HTTP JSON.
@@ -17,7 +18,8 @@ try:
         if task.get("exit"):
             break
         try:
-            result = bridge.call(task["action"], task.get("payload", {}), timeout=20)
+            result = (preflight(bridge) if task["action"] == "test_preflight"
+                      else bridge.call(task["action"], task.get("payload", {}), timeout=20))
             print(json.dumps({"ok": True, "data": result}), flush=True)
         except Exception as exc:
             print(json.dumps({"ok": False, "error": str(exc)}), flush=True)

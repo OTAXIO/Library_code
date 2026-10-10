@@ -10,23 +10,26 @@ from core import SafetyStop
 
 def preflight(bridge):
     """Read actual extension capabilities before Search or export."""
-    # Earlier extensions miss English zero results or resume before reset mounts.
+    # Read-only capability/access handshake, not search-form readiness. The
+    # bound tab is activated and prepared by the extension before any Search.
     try:
         result = bridge.call("wos_diagnose", {}, timeout=25)
     except SafetyStop as exc:
         if "未知 WOS 调度命令" in str(exc):
-            raise SafetyStop("当前插件仍是旧版本，请重载 0.4.2、刷新工作页并重新绑定；尚未提交检索。") from exc
+            raise SafetyStop("当前插件仍是旧版本，请重载 0.4.3、刷新工作页并重新绑定；尚未提交检索。") from exc
         raise
     if (not isinstance(result, dict) or type(result.get("wos_download_protocol")) is not int
             or result.get("wos_download_protocol") != 1
+            or type(result.get("search_prepare_protocol")) is not int
+            or result.get("search_prepare_protocol") != 1
             or result.get("result_reader") != "shared-diagnostic"
             or result.get("read_results_world") != "ISOLATED"
             or not re.fullmatch(r"\d+\.\d+\.\d+", str(result.get("extension_version", "")))
-            or tuple(map(int, result["extension_version"].split("."))) < (0, 4, 2)):
-        raise SafetyStop("插件下载接口不兼容，请重载 0.4.2、刷新 WOS 页并重新绑定；未提交检索或下载。")
+            or tuple(map(int, result["extension_version"].split("."))) < (0, 4, 3)):
+        raise SafetyStop("插件下载接口不兼容，请重载 0.4.3、刷新 WOS 页并重新绑定；未提交检索或下载。")
     page = result.get("page")
     if (not isinstance(page, dict)
-            or any(type(page.get(k)) is not bool for k in ("core_search_route", "wos_error", "login_required", "busy"))
+            or any(type(page.get(k)) is not bool for k in ("core_search_route", "wos_error", "site_timeout", "login_required", "busy"))
             or any(type(page.get(k)) is not int or not 0 <= page[k] <= 99999 for k in ("query_input_count", "dialog_count"))):
         raise SafetyStop("插件未返回完整的页面就绪检查，请重载后连接；未提交检索。")
     if page["wos_error"]:
@@ -37,8 +40,6 @@ def preflight(bridge):
         raise SafetyStop("WOS 登录或验证码需要人工处理；本轮尚未开始，名单保持原样。")
     if page["dialog_count"]:
         raise SafetyStop("WOS 当前存在操作弹窗，请先人工处理；未提交检索。")
-    if page["core_search_route"] and page["query_input_count"] == 0:
-        raise SafetyStop("WOS 条件输入区尚未就绪，未将任何论文标为跳过；这不是论文零结果。")
     return {"extension_version": result["extension_version"]}
 
 

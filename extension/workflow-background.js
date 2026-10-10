@@ -110,28 +110,20 @@ async function dispatchWorkflow(command,pair) {
     return result;
   };
   if(command.action==='wos_diagnose'){
-    // Verify the live page before starting a queue. An empty/uninitialized
-    // search page is not a zero-result paper and must not mark the queue red.
-    // Waiting here never submits Search, changes routes or retries a write.
-    const until=Math.min(Date.now()+10000,command.expires-12000);
-    let page;
-    do {
-      const observed=await execute(inspectWorkPage,command);
-      if(observed.error)throw new Error(observed.error);
-      const flags=['core_search_route','wos_error','login_required','busy'];
-      const counts=['query_input_count','dialog_count'];
-      if(flags.some(key=>typeof observed[key]!=="boolean") ||
-         counts.some(key=>!Number.isInteger(observed[key])||observed[key]<0||observed[key]>99999))
-        throw new Error('WOS 页面就绪检查未返回完整结果；本轮未提交检索');
-      page=Object.fromEntries([...flags,...counts].map(key=>[key,observed[key]]));
-      if(['login','verification',''].includes(observed.access_gate))page.access_gate=observed.access_gate;
-      if(!page.core_search_route || page.query_input_count || page.wos_error || page.login_required || page.dialog_count)
-        break;
-      if(Date.now()>=until)break;
-      await new Promise(resolve=>setTimeout(resolve,200));
-    } while(Date.now()<until);
+    // Capability/access snapshot only. Smart Search may have navigation but no
+    // input, and a background tab may not hydrate until activated. Preparation
+    // belongs to the activated search command, never this read-only handshake.
+    const observed=await execute(inspectWorkPage,command);
+    if(observed.error)throw new Error(observed.error);
+    const flags=['core_search_route','wos_error','site_timeout','login_required','busy'];
+    const counts=['query_input_count','dialog_count'];
+    if(flags.some(key=>typeof observed[key]!=="boolean") ||
+       counts.some(key=>!Number.isInteger(observed[key])||observed[key]<0||observed[key]>99999))
+      throw new Error('WOS 页面就绪检查未返回完整结果；本轮未提交检索');
+    const page=Object.fromEntries([...flags,...counts].map(key=>[key,observed[key]]));
+    if(['login','verification',''].includes(observed.access_gate))page.access_gate=observed.access_gate;
     return {ok:true,data:{extension_version:chrome.runtime.getManifest().version,
-      wos_download_protocol:1,result_reader:'shared-diagnostic',read_results_world:'ISOLATED',page}};
+      wos_download_protocol:1,search_prepare_protocol:1,result_reader:'shared-diagnostic',read_results_world:'ISOLATED',page}};
   }
   if(role==="importTabId") {
     if(command.action==='import_resolve')return execute(resolveLibraryRecord,command);
@@ -183,7 +175,7 @@ async function dispatchWorkflow(command,pair) {
             if(observed.site_timeout)throw new Error("WOS 刷新后返回 5xx/连接超时页；未提交当前论文检索");
             if(observed.login_required)throw new Error("WOS 刷新后需登录或人工验证；未提交当前论文检索");
             if(observed.dialog_count)throw new Error("WOS 刷新后有操作弹窗，请人工处理；未提交当前论文检索");
-            if(observed.core_search_route && observed.query_input_count>0 && !observed.zero_result && !observed.busy){
+            if(observed.core_search_route && !observed.zero_result && !observed.busy){
               ready=true;break;
             }
           }
@@ -194,16 +186,43 @@ async function dispatchWorkflow(command,pair) {
         "WOS 文献检索页未加载完成，请核验登录/页面后再继续");
     };
     await ensureSearchPage(false);
+    // Navigation/hydration is a resumable phase with no Search or query writes.
+    // Only known navigation controls are followed and each route/control is
+    // clicked once. The sole final submit below is NEVER retried on uncertainty.
+    const prepareEnd=Math.min(Date.now()+45000,command.expires-12000);
+    const attempted=new Set();let prepared=false,reset=false;
+    while(Date.now()<prepareEnd){
+      let preparation;
+      try {preparation=await execute(runWOSCommand,{...command,action:'wos_prepare_search',attempted_navigation:[...attempted]});}
+      catch(error){
+        if(transientInjectionError(error)||String(error?.message||error)==='工作页面没有返回结果'){
+          await new Promise(r=>setTimeout(r,200));continue;
+        }
+        throw error;
+      }
+      if(!preparation.ok)return preparation;
+      const state=preparation.data?.state;
+      if(state==='ready'){prepared=true;break;}
+      if(state==='stale_zero'){
+        if(reset)throw new Error('WOS 刷新后仍保留旧零结果；未提交当前论文检索');
+        reset=true;await ensureSearchPage(true);attempted.clear();continue;
+      }
+      if(state==='navigating'){
+        const key=preparation.data?.navigation_key;
+        if(typeof key!=='string'||!/^\/wos\/woscc\/(?:basic-search|advanced-search|fielded-search)\/?\|(?:advanced|fielded)$/.test(key))
+          throw new Error('WOS 返回未知准备导航；未提交检索');
+        if(attempted.has(key))throw new Error('WOS 准备导航发生重复；未提交检索');
+        attempted.add(key);
+      }else if(state!=='loading')throw new Error('WOS 返回未知检索准备状态；未提交检索');
+      await new Promise(r=>setTimeout(r,200));
+    }
+    if(!prepared)throw new Error('WOS 检索页面准备超时：未能确认唯一字段、输入框及检索按钮；尚未提交 Search，名单保持原样。请核验高级检索/字段检索或登录状态');
     // Search submission is deliberately a short injected step. The adapter
     // schedules exactly one click and returns before a real WOS navigation can
     // destroy the execution context. Results are then observed read-only.
-    const start=()=>execute(runWOSCommand,{...command,action:"wos_start_search"});
-    let result=await start();
-    if(shouldReloadWOSSearch(result)){
-      await ensureSearchPage(true);
-      result=await start();
-    }
+    const result=await execute(runWOSCommand,{...command,action:"wos_start_search",require_prepared:true});
     if(!result.ok)return result;
+    if(result.data?.submitted!==true)throw new Error('WOS 未确认 Search 提交回执；未自动重试，请核验当前网页');
     const end=Math.min(Date.now()+90000,command.expires-12000);
     let navigated=false,navigationTarget,lastDiagnostic;
     while(Date.now()<end){
@@ -253,9 +272,10 @@ async function dispatchWorkflow(command,pair) {
   if(!isWOSPage(recordURL) || new URL(recordURL).origin!==workOrigin)throw new Error("WOS 导出记录域名与绑定页面不一致，未开始下载");
   // Listen only during this single export. Download origin/referrer must bind it
   // to this WOS record; never pick the newest arbitrary file from Downloads.
-  const found=[];
+  const found=[];let rejected=0;
   const listener=item=>{
     if(isExpectedWOSDownload(item,recordURL))found.push(item.id);
+    else rejected++;
   };
   chrome.downloads.onCreated.addListener(listener);
   try {
@@ -275,7 +295,7 @@ async function dispatchWorkflow(command,pair) {
       await new Promise(r=>setTimeout(r,200));
     }
     if(!completed || !/\.txt$/i.test(completed.filename) || completed.fileSize>524288 || completed.fileSize<=0)
-      throw new Error("未取得可确认的单篇 TXT 下载。请检查 WOS 导出/浏览器下载提示");
+      throw new Error(`未取得可确认的单篇 TXT 下载（本次关联下载 ${found.length} 个；来源校验排除 ${rejected} 个）。请检查 WOS 导出/浏览器下载提示；不会采用无关或历史文件`);
     return {ok:true,data:{path:completed.filename,download_id:completed.id,sa_id:command.sa_id,record_url:recordURL}};
   } finally {chrome.downloads.onCreated.removeListener(listener);}
 }

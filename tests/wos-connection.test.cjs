@@ -37,6 +37,7 @@ test('WOS pairs and executes without an SA or import tab; rejects backend operat
       injections.push(options);
       // Pairing is tested through the production split-search dispatcher. A
       // bare data:{} stub no longer implements that read-only state contract.
+      if(options.args?.[0]?.action==='wos_prepare_search')return [{result:{ok:true,data:{state:'ready'}}}];
       if(options.args?.[0]?.action==='wos_start_search'){
         tab.url='https://www.webofscience.com/wos/woscc/full-record/WOS:000123456789012';
         return [{result:{ok:true,data:{submitted:true}}}];

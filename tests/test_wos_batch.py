@@ -13,20 +13,23 @@ from wos_batch import WOSDownload, default_store, preflight
 
 class PreflightTests(unittest.TestCase):
     def capabilities(self, **page):
-        return {"extension_version": "0.4.2", "wos_download_protocol": 1,
+        return {"extension_version": "0.4.3", "wos_download_protocol": 1, "search_prepare_protocol": 1,
                 "result_reader": "shared-diagnostic", "read_results_world": "ISOLATED",
                 "page": {"core_search_route": True, "query_input_count": 1,
-                         "wos_error": False, "login_required": False, "dialog_count": 0, "busy": False, **page}}
+                         "wos_error": False, "site_timeout": False, "login_required": False, "dialog_count": 0, "busy": False, **page}}
 
     def test_extension_protocol_checked_before_search(self):
         bridge = Mock(call=Mock(return_value=self.capabilities()))
-        self.assertEqual(preflight(bridge), {"extension_version": "0.4.2"})
+        self.assertEqual(preflight(bridge), {"extension_version": "0.4.3"})
         bridge.call.assert_called_once_with("wos_diagnose", {}, timeout=25)
 
     def test_old_incompatible_and_alternate_transport_fail_without_search(self):
         for result in ({}, {**self.capabilities(), "extension_version": "0.3.28"},
                        {**self.capabilities(), "extension_version": "0.4.0"},
                        {**self.capabilities(), "extension_version": "0.4.1"},
+                       {**self.capabilities(), "extension_version": "0.4.2"},
+                       {**self.capabilities(), "search_prepare_protocol": True},
+                       {**self.capabilities(), "search_prepare_protocol": None},
                        {**self.capabilities(), "wos_download_protocol": True},
                        {**self.capabilities(), "read_results_world": "MAIN"},
                        {"transport": "browser-skill", "wos_download_protocol": 2}):
@@ -42,12 +45,11 @@ class PreflightTests(unittest.TestCase):
             with self.assertRaisesRegex(SafetyStop, expected):
                 preflight(bridge)
 
-    def test_site_error_login_dialog_and_missing_controls_are_not_paper_misses(self):
+    def test_site_error_login_and_dialog_are_not_paper_misses(self):
         for page, expected in (({"wos_error": True}, "不是论文零结果"),
                                ({"site_timeout": True}, "不是论文零结果"),
                                ({"login_required": True}, "登录或验证码"),
-                               ({"dialog_count": 1}, "操作弹窗"),
-                               ({"query_input_count": 0}, "未将任何论文标为跳过")):
+                               ({"dialog_count": 1}, "操作弹窗")):
             bridge = Mock(call=Mock(return_value=self.capabilities(**page)))
             with self.assertRaisesRegex(SafetyStop, expected):
                 preflight(bridge)
@@ -55,6 +57,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_untyped_readiness_fails(self):
         for page in (None, {}, self.capabilities(query_input_count=True)["page"],
+                     self.capabilities(site_timeout=None)["page"],
                      self.capabilities(dialog_count=-1)["page"]):
             result = {**self.capabilities(), "page": page}
             with self.assertRaisesRegex(SafetyStop, "完整的页面就绪"):
@@ -62,7 +65,12 @@ class PreflightTests(unittest.TestCase):
 
     def test_result_page_does_not_require_search_inputs(self):
         self.assertEqual(preflight(Mock(call=Mock(return_value=self.capabilities(
-            core_search_route=False, query_input_count=0)))), {"extension_version": "0.4.2"})
+            core_search_route=False, query_input_count=0)))), {"extension_version": "0.4.3"})
+
+    def test_smart_navigation_only_and_delayed_inputs_do_not_block_preparation(self):
+        bridge = Mock(call=Mock(return_value=self.capabilities(query_input_count=0, busy=True)))
+        self.assertEqual(preflight(bridge), {"extension_version": "0.4.3"})
+        bridge.call.assert_called_once_with("wos_diagnose", {}, timeout=25)
 
 
 class DownloadTests(unittest.TestCase):

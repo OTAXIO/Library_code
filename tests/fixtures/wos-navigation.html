@@ -41,6 +41,7 @@ if(location.pathname.includes('/summary/')){
   const mountSearch=()=>{
     main.innerHTML='<form><select><option>Topic</option><option>Title</option><option>DOI</option><option>Accession Number</option></select><input type="text"><button type="button"><mat-icon>search</mat-icon>'+(cn?'检索':'Search')+'</button></form>';
     main.querySelector('button').onclick=()=>{
+      fetch('/offline-query',{method:'POST',body:main.querySelector('input').value});
       if(main.querySelector('input').value==='Missing synthetic paper'){
         const banner=document.createElement('section');banner.setAttribute('role','alert');
         banner.innerHTML=cn?'<span>您的</span><span>检索</span><span>未找到</span><span>结果</span>':'Your search found no results';main.prepend(banner);
@@ -52,6 +53,16 @@ if(location.pathname.includes('/summary/')){
     // until the new fielded form mounts. Never uses a real WOS session.
     main.innerHTML='<section role="alert">'+(cn?'您的检索未找到结果':'Your search found no results')+'</section>';
     setTimeout(mountSearch,window.__offlineSearchMountDelay);
+  }else if(window.__offlineStartWithNavigation){
+    // Smart Search with no text box, then a real document navigation. This was
+    // blocked by the old preflight before its Advanced control could be used.
+    main.innerHTML='<h1>Smart Search</h1><a href="/wos/woscc/advanced-search">'+(cn?'高级检索':'Advanced Search')+'</a>';
+  }else if(location.pathname.endsWith('/advanced-search')){
+    main.innerHTML='<h1>Advanced Search</h1><button role="tab" aria-selected="false">'+(cn?'字段检索':'Fielded Search')+'</button>';
+    main.querySelector('button').onclick=()=>{
+      main.querySelector('button').setAttribute('aria-selected','true');
+      setTimeout(mountSearch,1100);
+    };
   }else mountSearch();
 }
 </script></body></html>

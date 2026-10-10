@@ -10,7 +10,7 @@ async function runWOSCommand(command) {
   const visible = el => el && el.getClientRects().length>0 && getComputedStyle(el).visibility!=="hidden";
   const all = (sel,root=document)=>[...root.querySelectorAll(sel)].filter(visible);
   const caption = el => norm(el.getAttribute("aria-label") || el.innerText || el.textContent);
-  const selection = el => el.tagName==="SELECT" ? norm(el.selectedOptions[0]?.textContent) : norm(el.innerText || el.textContent || el.getAttribute("aria-label"));
+  const selection = el => el.tagName==="SELECT" ? norm(el.selectedOptions[0]?.textContent) : searchText(el)||norm(el.getAttribute("aria-label"));
   const fieldText = el => selection(el).replace(/(?:arrow_drop_down|expand_more|keyboard_arrow_down)/g, "").trim().replace(/\s*\((?:TS|TI|DO|UT|ALL)\)$/, "");
   const fieldNames = ["All Fields","所有字段","全部字段","所有欄位","Topic","主题","主題","Title","标题","题名","標題","題名",
     "DOI","Accession Number","入藏号","入藏號","Author","作者","Publication Titles","出版物名称","出版物名稱"];
@@ -28,6 +28,10 @@ async function runWOSCommand(command) {
     if(!Number.isFinite(command.expires) || Date.now()>=command.expires-resultMargin)fail("WOS 操作超时，请人工查看网页");
     if(/Oops,?\s*something went wrong!?/i.test(document.body?.innerText||""))
       fail("WOS 网站自身报错：Oops, something went wrong! 这不是导入管理页的问题。请先点击 WOS 网页顶部 Search 或导航菜单重新进入检索；若仍报错，请人工检查登录、校园网/机构访问。网页恢复前不继续检索或导入");
+    const errorHeadings=[norm(document.title),...all('h1,h2,[role="alert"]').map(el=>norm(el.innerText))];
+    if(errorHeadings.some(text=>/\b(?:Error\s+(?:code\s*)?|HTTP\s+)(?:500|502|503|504|520|521|522|523|524)\b|\b524\s*:\s*A timeout occurred\b/i.test(text)
+        || /^(?:A timeout occurred|Connection timed out|Bad gateway|Web server is down)$/i.test(text)))
+      fail("WOS 网站返回 5xx/连接超时页；未提交检索，这不是论文零结果");
     if(!location.pathname.startsWith("/wos/woscc/"))fail("请在 WOS 核心合集的文献检索页登录，不能使用作者检索");
     if(all('#challenge-form,#cf-challenge-running,iframe[src*="captcha"],iframe[src*="challenge"]').some(el=>
       !el.closest('.grecaptcha-badge,[hidden],[inert],[aria-hidden="true"]')&&
@@ -99,6 +103,8 @@ async function runWOSCommand(command) {
     fail("文献检索按钮未唯一识别（当前检索区域识别到 0 个）。未点击检索按钮；请点扩展“查看连接诊断”复制按钮诊断");
   };
   const click=el=>{check();if(el.disabled||el.getAttribute("aria-disabled")==="true")fail("控件尚不可用");el.click();};
+  const queryInputs=field=>all('input:not([type]),input[type="text"],input[type="search"],textarea',field.closest('form')||document)
+    .filter(el=>!el.readOnly&&!el.disabled&&!el.closest('nav,header,footer,aside,[role="navigation"],[role="banner"],[hidden],[inert],[aria-hidden="true"]'));
   const set=(el,value)=>{
     const proto=el.tagName==="TEXTAREA"?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(proto,"value").set.call(el,value);
@@ -221,13 +227,47 @@ async function runWOSCommand(command) {
   };
   try {
     check();
-    if(!["wos_search","wos_start_search","wos_read_results","wos_verify_record","wos_prepare_export","wos_check_export","wos_download"].includes(command.action))fail("未知 WOS 命令");
+    if(!["wos_prepare_search","wos_search","wos_start_search","wos_read_results","wos_verify_record","wos_prepare_export","wos_check_export","wos_download"].includes(command.action))fail("未知 WOS 命令");
     if(typeof command.title!=="string" || !command.title.trim() || command.title.length>1500)fail("题名缺失或过长");
     if(command.action==="wos_read_results") {
       if(all('[role="dialog"],mat-dialog-container').length)fail("WOS 有弹窗，请人工处理");
       return {ok:true,data:resultState()};
     }
     if(command.action==="wos_verify_record")return {ok:true,data:{state:"record",record_url:fingerprint()}};
+    if(command.action==="wos_prepare_search") {
+      // Short, resumable navigation-only phase. It cannot fill or submit a
+      // query. Full document navigation may destroy this context; only this
+      // phase may then be observed again. Search remains a separate one-shot.
+      if(!/\/(?:basic-search|advanced-search|fielded-search)\/?$/.test(location.pathname))fail("请先进入 WOS 核心合集的字段检索页");
+      if(all('[role="dialog"],mat-dialog-container').length)fail("WOS 有弹窗，请人工处理");
+      if(noResults())return {ok:true,data:{state:"stale_zero"}};
+      if(all('[aria-busy="true"],[role="progressbar"],mat-spinner,mat-progress-bar,.mat-mdc-progress-spinner')
+          .some(el=>!el.closest('[hidden],[inert],[aria-hidden="true"]')))
+        return {ok:true,data:{state:"loading"}};
+      const combos=fields();
+      if(combos.length>1)fail(`检索字段选择器未唯一识别（识别到 ${combos.length} 个）。请只保留一行条件；尚未提交检索`);
+      if(combos.length===1) {
+        const field=combos[0], inputs=queryInputs(field);
+        if(!inputs.length)return {ok:true,data:{state:"loading"}};
+        const input=one(inputs,"单行文献检索输入框");
+        searchButton(field,input); // A disabled Search before input is normal.
+        return {ok:true,data:{state:"ready"}};
+      }
+      const fieldedLabels=["Fielded Search","字段检索","字段搜索","欄位檢索"];
+      const advancedLabels=["Advanced Search","高级检索","高级搜索","進階檢索"];
+      const controls=all('a,button,[role="tab"]').filter(el=>[...fieldedLabels,...advancedLabels].includes(actionLabel(el)));
+      const fielded=controls.filter(el=>fieldedLabels.includes(actionLabel(el)));
+      // Selected fielded panel with delayed hydration: wait, never reclick it.
+      if(fielded.some(el=>el.getAttribute('aria-selected')==='true'))return {ok:true,data:{state:"loading"}};
+      const next=fielded.length?fielded:controls.filter(el=>advancedLabels.includes(actionLabel(el))&&el.getAttribute('aria-selected')!=='true');
+      if(next.length>1)fail("字段检索导航未唯一识别；尚未提交检索");
+      if(!next.length)return {ok:true,data:{state:"loading"}};
+      const target=next[0], key=location.pathname+'|'+(fielded.length?'fielded':'advanced');
+      if(Array.isArray(command.attempted_navigation)&&command.attempted_navigation.includes(key))return {ok:true,data:{state:"loading"}};
+      if(target.disabled||target.getAttribute('aria-disabled')==='true')return {ok:true,data:{state:"loading"}};
+      setTimeout(()=>{if(target.isConnected)target.click();},0);
+      return {ok:true,data:{state:"navigating",navigation_key:key}};
+    }
     if(command.action==="wos_search" || command.action==="wos_start_search") {
       if(!/\/(?:basic-search|advanced-search|fielded-search)\/?$/.test(location.pathname))fail("请先进入 WOS 核心合集的字段检索页");
       if(all('[role="dialog"],mat-dialog-container').length)fail("WOS 有弹窗，请人工处理");
@@ -248,8 +288,8 @@ async function runWOSCommand(command) {
       // Chrome may report the tab as complete before the WOS SPA mounts its search
       // controls. Wait for semantic controls instead of treating an empty first
       // render as a permanent selector mismatch.
-      await wait(()=>fields().length>0 || navigationControls().length>0,"加载字段检索页面",15000);
-      for(let step=0;fields().length===0 && step<3;step++) {
+      if(!command.require_prepared)await wait(()=>fields().length>0 || navigationControls().length>0,"加载字段检索页面",15000);
+      for(let step=0;!command.require_prepared && fields().length===0 && step<3;step++) {
         const controls=navigationControls();
         const selectedFielded=controls.filter(el=>fieldedLabels.includes(caption(el)) && el.getAttribute("aria-selected")==="true");
         if(selectedFielded.length===1) {
@@ -278,8 +318,7 @@ async function runWOSCommand(command) {
       await wait(()=>fields().length===1 && choices.includes(fieldText(fields()[0])),"确认检索字段",5000);
       field=fields()[0];
       // Only the uniquely identified single-row document query is controlled.
-      const scope=field.closest("form") || document;
-      const inputs=all('input:not([type]),input[type="text"],input[type="search"],textarea',scope).filter(e=>!e.readOnly&&!e.disabled);
+      const inputs=queryInputs(field);
       const input=one(inputs,"单行文献检索输入框");
       searchButton(field,input); // Ambiguity stops before replacing the query.
       set(input,query);
@@ -345,8 +384,8 @@ async function runWOSCommand(command) {
         select.value=one([...select.options].filter(o=>full.includes(norm(o.textContent))),"Full Record").value;
         select.dispatchEvent(new Event("change",{bubbles:true}));
       }else{
-        click(select);await wait(()=>all('[role="option"],mat-option').some(o=>full.includes(caption(o))),"完整记录选项",5000);
-        click(one(all('[role="option"],mat-option').filter(o=>full.includes(caption(o))),"Full Record"));
+        click(select);await wait(()=>all('[role="option"],mat-option').some(o=>full.includes(actionLabel(o))),"完整记录选项",5000);
+        click(one(all('[role="option"],mat-option').filter(o=>full.includes(actionLabel(o))),"Full Record"));
       }
       // Full-record page + exact one-record range only; never 'all marked'.
       const ranges=all('input[type="number"],input[type="text"]',dialog);
@@ -363,8 +402,7 @@ async function runWOSCommand(command) {
     if(!state || state.id!==command.sa_id || state.url!==recordURL || state.submitted || !visible(state.dialog))fail("导出预览失效或已提交");
     const selected=selection(state.select);
     if(!["Full Record","全记录","完整记录"].includes(selected) || state.ranges.some(el=>el.value!=="1"))fail("导出选项被修改");
-    // Browser Skill captures the one download from its freshly observed final
-    // button. This guard checks the same preview without submitting it again.
+    // Read-only preview validation never submits the prepared export twice.
     if(command.action==="wos_check_export")return {ok:true,data:{ready:true,record_url:recordURL}};
     state.submitted=true;
     click(button(["Export","导出"],state.dialog));

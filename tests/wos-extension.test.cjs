@@ -39,16 +39,21 @@ const fixture=fs.readFileSync(path.join(__dirname,'fixtures/wos-navigation.html'
     context=await chromium.launchPersistentContext(profile,{headless:true,acceptDownloads:true,downloadsPath:downloads,
       ...(process.env.SA_TEST_BROWSER?{executablePath:process.env.SA_TEST_BROWSER}:fs.existsSync(edge)?{executablePath:edge}:{}),
       args:[`--disable-extensions-except=${staged}`,`--load-extension=${staged}`]});
-    const searches=[],searchPageVisits=new Map();
+    const searches=[],queries=[],searchPageVisits=new Map();
     await context.route('**/*',route=>{
       const url=new URL(route.request().url());
       if(['www.webofscience.com','webofscience.clarivate.cn'].includes(url.hostname)){
+        if(url.pathname==='/offline-query'){
+          queries.push({origin:url.origin,query:route.request().postData()});
+          return route.fulfill({status:200,body:'ok'});
+        }
         if(url.pathname.includes('/summary/'))searches.push(url.origin);
         let body=fixture;
         if(url.pathname==='/wos/woscc/basic-search'){
           const visits=(searchPageVisits.get(url.origin)||0)+1;searchPageVisits.set(url.origin,visits);
-          if(visits>1)body=body.replace('const main=document.getElementById',
-            'window.__offlineSearchMountDelay=1300;const main=document.getElementById');
+          body=body.replace('const main=document.getElementById',visits>1?
+            'window.__offlineSearchMountDelay=1300;const main=document.getElementById':
+            'window.__offlineStartWithNavigation=true;const main=document.getElementById');
         }
         return route.fulfill({status:200,contentType:'text/html',body});
       }
@@ -77,10 +82,15 @@ const fixture=fs.readFileSync(path.join(__dirname,'fixtures/wos-navigation.html'
       assert.equal(ready.data.extension_version,JSON.parse(fs.readFileSync(path.join(root,'extension/manifest.json'),'utf8')).version);
       assert.equal(ready.data.result_reader,'shared-diagnostic');
       assert.equal(ready.data.page.core_search_route,true);
-      assert.equal(ready.data.page.query_input_count,1);
+      assert.equal(ready.data.page.query_input_count,0);
+      assert.equal(ready.data.search_prepare_protocol,1);
+      assert.equal(ready.data.page.site_timeout,false);
       assert.equal(ready.data.page.login_required,false);
       assert.equal(ready.data.page.dialog_count,0);
-      console.log(`PASS ${origin} actual extension capability handshake before any search`);
+      const preflight=await invoke('test_preflight',{});
+      assert.equal(preflight.ok,true,JSON.stringify(preflight));
+      assert.equal(queries.filter(item=>item.origin===origin).length,0);
+      console.log(`PASS ${origin} actual Python preflight with no input -> navigation preparation permitted, no Search yet`);
       const missing=await invoke('wos_search',{sa_id:'offline-missing',title:'Missing synthetic paper',doi:'',wos:''});
       assert.equal(missing.ok,false);assert.match(missing.error,/WOS 未找到记录/);
       console.log(`PASS ${origin} zero results return through real extension without losing pairing`);
@@ -93,6 +103,8 @@ const fixture=fs.readFileSync(path.join(__dirname,'fixtures/wos-navigation.html'
       assert.equal(searched.ok,true,JSON.stringify(searched));
       assert.equal(site.url(),origin+'/wos/woscc/full-record/WOS:000123456789012');
       assert.equal(searches.filter(value=>value===origin).length,1,'Search is not repeated across real navigations');
+      assert.deepEqual(queries.filter(item=>item.origin===origin).map(item=>item.query),
+        ['Missing synthetic paper','Missing synthetic paper','10.1234/test'],'exactly one Search per paper despite full-navigation preparation and slow hydration');
       assert.equal(searchPageVisits.get(origin),3,'one clean reload after each zero');
       console.log(`PASS ${origin} real navigation -> isolated record probe despite page DOM hook -> full record`);
       const exported=await invoke('wos_export',query);
@@ -109,7 +121,7 @@ const fixture=fs.readFileSync(path.join(__dirname,'fixtures/wos-navigation.html'
       assert.equal(await site.evaluate(()=>exportsMade),1,'a submitted export is not clicked twice');
       console.log(`PASS ${origin} one Full Record TXT download correlated and verified on disk; repeat submission refused`);
     }
-    console.log('WOS extension: 12 end-to-end checks passed across both origins. Synthetic pages/files only.');
+    console.log('WOS extension: 14 end-to-end checks passed across both origins. Navigation-only startup, real Python preflight, synthetic pages/files only.');
   }finally{
     if(context)await context.close();
     backend.stdin.end(JSON.stringify({exit:true})+'\n');
