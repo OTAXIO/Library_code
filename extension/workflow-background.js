@@ -155,20 +155,43 @@ async function dispatchWorkflow(command,pair) {
       if(!force&&alreadySearch)return;
       if(force&&new URL(tab.url).origin===workOrigin&&path==="/wos/woscc/basic-search"){
         await chrome.tabs.reload(id);
-        // Do not mistake the pre-reload `complete` state for the new document.
-        await new Promise(r=>setTimeout(r,350));
       } else await chrome.tabs.update(id,{url:workOrigin+"/wos/woscc/basic-search"});
-      const end=Math.min(Date.now()+25000,command.expires-10000);
+      const end=Math.min(Date.now()+25000,command.expires-12000);
       let ready=false;
       while(Date.now()<end){
         tab=await chrome.tabs.get(id);
         if(tab.url) {
           if(new URL(tab.url).origin!==workOrigin)throw new Error("WOS 跳转到了其他域名，请完成机构访问后重新绑定，未继续检索");
-          if(validRolePage(tab.url,role) && new URL(tab.url).pathname.endsWith("/woscc/basic-search")){ready=true;break;}
+          if(validRolePage(tab.url,role) && new URL(tab.url).pathname.endsWith("/woscc/basic-search")){
+            if(!force){ready=true;break;}
+            // A reload keeps the same URL and may return while the previous
+            // document/SPA is still mounted. Wait on semantic, read-only DOM
+            // evidence, not a fixed delay or tabs.status. No Search has been
+            // submitted for this paper, so only observation is retried here.
+            let observed;
+            try {observed=await execute(inspectWorkPage,{...command,action:"wos_diagnose"});}
+            catch(error){
+              if(transientInjectionError(error)){await new Promise(r=>setTimeout(r,200));continue;}
+              throw error;
+            }
+            if(observed.error)throw new Error(observed.error);
+            if(['core_search_route','zero_result','busy','wos_error','site_timeout','login_required']
+                .some(key=>typeof observed[key]!=="boolean") ||
+               ['query_input_count','dialog_count'].some(key=>!Number.isInteger(observed[key])||observed[key]<0||observed[key]>99999))
+              throw new Error("WOS 刷新诊断不完整，未提交当前论文检索");
+            if(observed.wos_error)throw new Error("WOS 刷新后网站报错，请恢复检索页；未提交当前论文检索");
+            if(observed.site_timeout)throw new Error("WOS 刷新后返回 5xx/连接超时页；未提交当前论文检索");
+            if(observed.login_required)throw new Error("WOS 刷新后需登录或人工验证；未提交当前论文检索");
+            if(observed.dialog_count)throw new Error("WOS 刷新后有操作弹窗，请人工处理；未提交当前论文检索");
+            if(observed.core_search_route && observed.query_input_count>0 && !observed.zero_result && !observed.busy){
+              ready=true;break;
+            }
+          }
         }
         await new Promise(r=>setTimeout(r,200));
       }
-      if(!ready)throw new Error("WOS 文献检索页未加载完成，请核验登录/页面后再继续");
+      if(!ready)throw new Error(force?"WOS 刷新后的检索页尚未就绪，上一条提示未清除或输入区仍在加载；未提交当前论文检索，请核验页面后继续":
+        "WOS 文献检索页未加载完成，请核验登录/页面后再继续");
     };
     await ensureSearchPage(false);
     // Search submission is deliberately a short injected step. The adapter

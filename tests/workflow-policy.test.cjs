@@ -120,12 +120,14 @@ test('only the pre-click stale-zero marker requests one clean WOS reload', async
     tabs:{get:async()=>tab,update:async()=>{},reload:async()=>{reloads++;tab={...tab,status:'complete'};}},
     scripting:{executeScript:async input=>{executions++;const action=input.args[0].action;
       if(action==='wos_start_search'&&executions===1)return [{result:{ok:false,error:stale}}];
+      if(action==='wos_diagnose')return [{result:{core_search_route:true,query_input_count:1,
+        zero_result:false,busy:false,wos_error:false,site_timeout:false,login_required:false,dialog_count:0}}];
       if(action==='wos_start_search'){tab={...tab,url:origins[0]+recordPath};return [{result:{ok:true,data:{submitted:true}}}];}
       return [{result:{ok:true,data:{state:'record',record_url:origins[0]+recordPath}}}];}},
   }};
   loadPolicy(sandbox);
   const result=await sandbox.dispatchWorkflow({action:'wos_search',expires:Date.now()+30000},{tabId:1,wosTabId:2});
-  assert.equal(result.ok,true);assert.equal(reloads,1);assert.equal(executions,3);
+  assert.equal(result.ok,true);assert.equal(reloads,1);assert.equal(executions,4);
 });
 
 test('one canonical result is navigated by the extension background, never clicked in-page', async()=>{
@@ -141,6 +143,76 @@ test('one canonical result is navigated by the extension background, never click
   loadPolicy(sandbox);
   const result=await sandbox.dispatchWorkflow({action:'wos_search',title:'Synthetic',expires:Date.now()+30000},{tabId:1,wosTabId:2});
   assert.equal(result.ok,true);assert.deepEqual(navigations,[origin+recordPath]);
+});
+
+test('slow zero-result reset waits for fresh search DOM before the next Search',async()=>{
+  const origin=origins[1],stale='[WOS 已暂停] WOS 检索页保留上一条零结果，需刷新检索页';
+  let tab={id:2,url:origin+'/wos/woscc/basic-search',status:'complete'};
+  let reloads=0,starts=0,refreshReads=0,searchClicks=0,clean=false;
+  const sandbox={URL,Date,setTimeout,runWOSCommand(){},chrome:{
+    tabs:{get:async()=>tab,update:async()=>{},reload:async()=>{reloads++;}},
+    scripting:{executeScript:async input=>{
+      const action=input.args[0].action;
+      if(action==='wos_diagnose'){
+        assert.equal(input.world,'ISOLATED');
+        if(++refreshReads>=4)clean=true;
+        return [{result:{core_search_route:true,query_input_count:clean?1:0,
+          zero_result:!clean,busy:false,wos_error:false,site_timeout:false,login_required:false,dialog_count:0}}];
+      }
+      if(action==='wos_start_search'){
+        starts++;
+        if(!clean)return [{result:{ok:false,error:stale}}];
+        searchClicks++;tab={...tab,url:origin+recordPath};
+        return [{result:{ok:true,data:{submitted:true}}}];
+      }
+      return [{result:{ok:true,data:{state:'record',record_url:origin+recordPath}}}];
+    }}
+  }};
+  loadPolicy(sandbox);
+  const result=await sandbox.dispatchWorkflow({action:'wos_search',title:'Next paper',expires:Date.now()+30000},
+    {tabId:1,wosTabId:2});
+  assert.equal(result.ok,true,JSON.stringify(result));
+  assert.equal(reloads,1);assert.equal(starts,2);assert.equal(searchClicks,1);assert.equal(refreshReads,4);
+});
+
+test('an uncleared zero banner after reload pauses without searching or claiming a new zero result',async()=>{
+  let now=Date.now(),reloads=0,starts=0;
+  const sandbox={URL,Date:{now:()=>now},setTimeout:(fn,ms)=>setTimeout(()=>{now+=ms;fn();},Math.min(ms,2)),
+    runWOSCommand(){},chrome:{
+    tabs:{get:async()=>({id:2,url:origins[0]+'/wos/woscc/basic-search'}),update:async()=>{},reload:async()=>{reloads++;}},
+    scripting:{executeScript:async input=>{
+      if(input.args[0].action==='wos_start_search'){
+        starts++;return [{result:{ok:false,error:'[WOS 已暂停] WOS 检索页保留上一条零结果，需刷新检索页'}}];
+      }
+      return [{result:{core_search_route:true,query_input_count:1,zero_result:true,busy:false,
+        wos_error:false,site_timeout:false,login_required:false,dialog_count:0}}];
+    }}
+  }};
+  loadPolicy(sandbox);
+  await assert.rejects(sandbox.dispatchWorkflow({action:'wos_search',title:'Next paper',expires:now+14000},
+    {tabId:1,wosTabId:2}),/刷新后的检索页尚未就绪.*未提交当前论文/);
+  assert.equal(reloads,1);assert.equal(starts,1);
+});
+
+test('login, site error and foreign dialogs after a zero-result reload never submit Search',async()=>{
+  for(const [flag,value,error] of [['login_required',true,/登录或人工验证/],['wos_error',true,/网站报错/],
+      ['site_timeout',true,/5xx\/连接超时/],['dialog_count',1,/操作弹窗/]]){
+    let starts=0,reloads=0;
+    const sandbox={URL,Date,setTimeout,runWOSCommand(){},chrome:{
+      tabs:{get:async()=>({id:2,url:origins[0]+'/wos/woscc/basic-search'}),update:async()=>{},reload:async()=>{reloads++;}},
+      scripting:{executeScript:async input=>{
+        if(input.args[0].action==='wos_start_search'){
+          starts++;return [{result:{ok:false,error:'[WOS 已暂停] WOS 检索页保留上一条零结果，需刷新检索页'}}];
+        }
+        return [{result:{core_search_route:true,query_input_count:1,zero_result:false,busy:false,
+          wos_error:false,site_timeout:false,login_required:false,dialog_count:0,[flag]:value}}];
+      }}
+    }};
+    loadPolicy(sandbox);
+    await assert.rejects(sandbox.dispatchWorkflow({action:'wos_search',expires:Date.now()+30000},
+      {tabId:1,wosTabId:2}),error);
+    assert.equal(reloads,1);assert.equal(starts,1);
+  }
 });
 
 test('binding errors distinguish SA reuse, wrong role, and wrong backend menu without echoing credentials', () => {

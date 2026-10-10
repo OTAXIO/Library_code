@@ -38,12 +38,20 @@ if(location.pathname.includes('/summary/')){
     };
   };
 }else{
-  main.innerHTML='<form><select><option>Topic</option><option>Title</option><option>DOI</option><option>Accession Number</option></select><input type="text"><button type="button"><mat-icon>search</mat-icon>'+(cn?'检索':'Search')+'</button></form>';
-  main.querySelector('button').onclick=()=>{
-    if(main.querySelector('input').value==='Missing synthetic paper'){
-      const banner=document.createElement('section');banner.setAttribute('role','alert');
-      banner.innerHTML=cn?'<span>您的</span><span>检索</span><span>未找到</span><span>结果</span>':'Your search found no results';main.prepend(banner);
-    }else location.assign('/wos/woscc/summary/offline');
+  const mountSearch=()=>{
+    main.innerHTML='<form><select><option>Topic</option><option>Title</option><option>DOI</option><option>Accession Number</option></select><input type="text"><button type="button"><mat-icon>search</mat-icon>'+(cn?'检索':'Search')+'</button></form>';
+    main.querySelector('button').onclick=()=>{
+      if(main.querySelector('input').value==='Missing synthetic paper'){
+        const banner=document.createElement('section');banner.setAttribute('role','alert');
+        banner.innerHTML=cn?'<span>您的</span><span>检索</span><span>未找到</span><span>结果</span>':'Your search found no results';main.prepend(banner);
+      }else location.assign('/wos/woscc/summary/offline');
+    };
   };
+  if(window.__offlineSearchMountDelay){
+    // Model a slow reset: the same URL still exposes the last no-result banner
+    // until the new fielded form mounts. Never uses a real WOS session.
+    main.innerHTML='<section role="alert">'+(cn?'您的检索未找到结果':'Your search found no results')+'</section>';
+    setTimeout(mountSearch,window.__offlineSearchMountDelay);
+  }else mountSearch();
 }
 </script></body></html>

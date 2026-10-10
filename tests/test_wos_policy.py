@@ -65,7 +65,9 @@ class WOSPolicyTests(unittest.TestCase):
                         '[WOS 已暂停] WOS 未找到记录。这不自动标记完成'):
             self.assertEqual(zero_result_note(message), 'wos未查询到')
         for message in ('未找到记录链接', 'WOS 未找到记录链接，页面未就绪', 'WOS 检索结果超时',
-                        'WOS 结果不是可确认的唯一记录', 'Oops, something went wrong!', '浏览器未连接'):
+                        'WOS 结果不是可确认的唯一记录', 'Oops, something went wrong!', '浏览器未连接',
+                        'WOS 检索页保留上一条零结果，需刷新检索页',
+                        'WOS 刷新后的检索页尚未就绪，上一条提示未清除或输入区仍在加载；未提交当前论文检索'):
             self.assertEqual(zero_result_note(message), '')
 
 

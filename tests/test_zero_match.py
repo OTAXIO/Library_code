@@ -189,6 +189,24 @@ class ZeroMatchTests(unittest.TestCase):
         self.assertIsNone(book["名单"]["A4"].value)
         self.assertIsNone(book["名单"]["O4"].value)
 
+    def test_refresh_timeout_after_zero_preserves_current_and_unexecuted_records(self):
+        self.download.fail["demo-001"] = "[WOS 已暂停] WOS 未找到记录；不自动标记完成"
+        self.download.fail["demo-002"] = (
+            "WOS 刷新后的检索页尚未就绪，上一条提示未清除或输入区仍在加载；未提交当前论文检索")
+        result = self.run_flow()
+        self.assertTrue(result.halted)
+        self.assertEqual(result.remaining, 1)
+        self.assertEqual([outcome["status"] for outcome in result.outcomes], ["skip", "halted"])
+        book = load_workbook(self.path)
+        self.addCleanup(book.close)
+        self.assertEqual(book["名单"]["A2"].value, "wos未查询到")
+        self.assertEqual(book["名单"]["O2"].value, 2)
+        for row in (3, 4):
+            self.assertIsNone(book["名单"].cell(row, 1).value)
+            self.assertIsNone(book["名单"].cell(row, 15).value)
+        self.assertNotIn("wos_export", self.download.calls)
+        self.assertNotIn("import_upload", self.sa.calls)
+
     def test_skip_save_failure_retains_prior_completion_and_stops_tail(self):
         records = select_records(self.roster, '谭勋策', 2)
         self.download.fail['demo-002'] = 'WOS 未找到记录'

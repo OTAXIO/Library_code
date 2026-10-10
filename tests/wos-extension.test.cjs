@@ -39,12 +39,18 @@ const fixture=fs.readFileSync(path.join(__dirname,'fixtures/wos-navigation.html'
     context=await chromium.launchPersistentContext(profile,{headless:true,acceptDownloads:true,downloadsPath:downloads,
       ...(process.env.SA_TEST_BROWSER?{executablePath:process.env.SA_TEST_BROWSER}:fs.existsSync(edge)?{executablePath:edge}:{}),
       args:[`--disable-extensions-except=${staged}`,`--load-extension=${staged}`]});
-    const searches=[];
+    const searches=[],searchPageVisits=new Map();
     await context.route('**/*',route=>{
       const url=new URL(route.request().url());
       if(['www.webofscience.com','webofscience.clarivate.cn'].includes(url.hostname)){
         if(url.pathname.includes('/summary/'))searches.push(url.origin);
-        return route.fulfill({status:200,contentType:'text/html',body:fixture});
+        let body=fixture;
+        if(url.pathname==='/wos/woscc/basic-search'){
+          const visits=(searchPageVisits.get(url.origin)||0)+1;searchPageVisits.set(url.origin,visits);
+          if(visits>1)body=body.replace('const main=document.getElementById',
+            'window.__offlineSearchMountDelay=1300;const main=document.getElementById');
+        }
+        return route.fulfill({status:200,contentType:'text/html',body});
       }
       if(url.hostname==='127.0.0.1'||url.protocol==='chrome-extension:')return route.continue();
       return route.abort();
@@ -78,11 +84,16 @@ const fixture=fs.readFileSync(path.join(__dirname,'fixtures/wos-navigation.html'
       const missing=await invoke('wos_search',{sa_id:'offline-missing',title:'Missing synthetic paper',doi:'',wos:''});
       assert.equal(missing.ok,false);assert.match(missing.error,/WOS 未找到记录/);
       console.log(`PASS ${origin} zero results return through real extension without losing pairing`);
+      const nextMissing=await invoke('wos_search',{sa_id:'offline-missing-2',title:'Missing synthetic paper',doi:'',wos:''});
+      assert.equal(nextMissing.ok,false);assert.match(nextMissing.error,/WOS 未找到记录/);
+      assert.equal(searchPageVisits.get(origin),2,'one clean reload after the first zero, no reload storm');
+      console.log(`PASS ${origin} second zero finishes after slow stale-banner reset without stopping the queue`);
       const query={sa_id:'offline-one',title:'Synthetic paper',doi:'10.1234/test',wos:''};
       const searched=await invoke('wos_search',query);
       assert.equal(searched.ok,true,JSON.stringify(searched));
       assert.equal(site.url(),origin+'/wos/woscc/full-record/WOS:000123456789012');
       assert.equal(searches.filter(value=>value===origin).length,1,'Search is not repeated across real navigations');
+      assert.equal(searchPageVisits.get(origin),3,'one clean reload after each zero');
       console.log(`PASS ${origin} real navigation -> isolated record probe despite page DOM hook -> full record`);
       const exported=await invoke('wos_export',query);
       if(!exported.ok)console.log('Offline download diagnosis',await worker.evaluate(async()=>
@@ -98,7 +109,7 @@ const fixture=fs.readFileSync(path.join(__dirname,'fixtures/wos-navigation.html'
       assert.equal(await site.evaluate(()=>exportsMade),1,'a submitted export is not clicked twice');
       console.log(`PASS ${origin} one Full Record TXT download correlated and verified on disk; repeat submission refused`);
     }
-    console.log('WOS extension: 10 end-to-end checks passed across both origins. Synthetic pages/files only.');
+    console.log('WOS extension: 12 end-to-end checks passed across both origins. Synthetic pages/files only.');
   }finally{
     if(context)await context.close();
     backend.stdin.end(JSON.stringify({exit:true})+'\n');
