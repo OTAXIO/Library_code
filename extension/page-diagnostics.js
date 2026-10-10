@@ -8,6 +8,7 @@ function inspectWorkPage(command) {
   const wos=["https://www.webofscience.com","https://webofscience.clarivate.cn"].includes(u.origin) && u.pathname.startsWith("/wos/");
   const admin=["http:","https:"].includes(u.protocol) && u.hostname==="admin.ir.lib.sjtu.edu.cn";
   if((!wos && !admin) || u.username || u.password)return fail('非工作网站');
+  if(probing&&u.pathname.startsWith('/wos/error/'))return fail('WOS 网站进入错误页；未确认当前论文，不重复检索或导出');
   if(probing&&(!wos||!u.pathname.startsWith('/wos/woscc/')))return fail('请在 WOS 核心合集的文献页面操作');
   if(probing&&(!Number.isFinite(command.expires)||Date.now()>=command.expires-12000))return fail('WOS 只读检查已超时，未重复检索');
   const visible=el=>el.getClientRects().length>0&&getComputedStyle(el).visibility!=="hidden";
@@ -56,7 +57,7 @@ function inspectWorkPage(command) {
   for(const anchor of linkControls){
     if(!renderedLink(anchor))continue;
     for(const attr of ['href','routerlink','ng-reflect-router-link']){
-      const value=anchor.getAttribute(attr);
+      const value=attr==='href'&&anchor.tagName==='A'?anchor.href:anchor.getAttribute(attr);
       if(!value)continue;
       try{
         const link=new URL(value,location.href);
@@ -112,8 +113,10 @@ function inspectWorkPage(command) {
   const loginRequired=Boolean(gateKind);
   const dialogCount=[...document.querySelectorAll('[role="dialog"],mat-dialog-container')]
     .filter(el=>visible(el)&&!el.closest('[hidden],[inert],[aria-hidden="true"]')).length;
-  let recordRoute=false;
-  try{recordRoute=!/%(?:2f|5c)/i.test(u.pathname)&&/^\/wos\/woscc\/full-record\/WOS:\d{15}\/?$/.test(decodeURIComponent(u.pathname));}catch{}
+  let recordPath='';
+  try{if(!/%(?:2f|5c)/i.test(u.pathname))recordPath=decodeURIComponent(u.pathname).match(
+    /^(\/wos\/woscc\/full-record\/WOS:\d{15})(?:\/|\(overlay:export\/ext\)\/?)?$/)?.[1]||'';}catch{}
+  const recordRoute=Boolean(recordPath);
   const dialogs=[...document.querySelectorAll('[role="dialog"],mat-dialog-container')].filter(visible);
   const exportHeadings=['Export Records to Tab Delimited File','将记录导出到制表符分隔文件','导出记录至制表符分隔文件',
     '导出记录到制表符分隔文件','导出记录到制表符分隔的文件'];
@@ -163,7 +166,7 @@ function inspectWorkPage(command) {
     const exports=[...document.querySelectorAll('button,[role="button"],a')].filter(el=>
       visible(el)&&['Export','导出'].includes(cleanText(el)||normal(el.getAttribute('aria-label'))));
     diagnostic.export_action_count=exports.length;
-    return busy||exports.length!==1?result('loading'):result('record',{record_url:u.origin+u.pathname});
+    return busy||exports.length!==1?result('loading'):result('record',{record_url:u.origin+recordPath});
   }
   if(noResult)return result('zero');
   if(!summary||busy)return result('loading');

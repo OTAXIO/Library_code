@@ -81,7 +81,7 @@ class WorkflowService:
             imports = ImportStore(self.base / "runtime" / "wos-imports")
             download = SerialWOS(bridge, default_store(self.base), stop, progress)
             result = run_batch(roster, records, bridge, download, imports,
-                WorkflowStore(imports.root), stop, progress, audit)
+                WorkflowStore(imports.root), stop, progress, audit, retry_skipped=scope == "skipped")
             messages = {e["sa_id"]: e["message"] for e in result.outcomes}
             completed = sum(e["status"] == "done" for e in result.outcomes)
             synced = sum(e["status"] == "synced" for e in result.outcomes)

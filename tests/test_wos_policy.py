@@ -63,7 +63,7 @@ class WOSPolicyTests(unittest.TestCase):
     def test_only_confirmed_zero_diagnostic_maps_to_requested_note(self):
         for message in ('WOS 未找到记录', '[扩展 0.4.1] [WOS 已暂停] WOS 未找到记录；这不等于未发表',
                         '[WOS 已暂停] WOS 未找到记录。这不自动标记完成'):
-            self.assertEqual(zero_result_note(message), 'wos未查询到')
+            self.assertEqual(zero_result_note(message), 'wos未收录')
         for message in ('未找到记录链接', 'WOS 未找到记录链接，页面未就绪', 'WOS 检索结果超时',
                         'WOS 结果不是可确认的唯一记录', 'Oops, something went wrong!', '浏览器未连接',
                         'WOS 检索页保留上一条零结果，需刷新检索页',

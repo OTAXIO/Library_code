@@ -9,6 +9,7 @@ from claim import sa_claim_source
 from core import SafetyStop
 from remarks import CLAIMED, detail_value
 from roster_write import mark_skipped_many, reconcile_processed
+from skip_notes import brief_skip_note
 
 
 @dataclass
@@ -96,10 +97,10 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
                     update = writer(current_roster, targets)
                 else:
                     update = writer(current_roster, targets,
-                                    reasons={item.sa_id: skipped[item.sa_id][:2000] for item in targets})
+                                    reasons={item.sa_id: brief_skip_note(skipped[item.sa_id]) for item in targets})
                 current_roster = update.roster
                 for item in targets:
-                    note("写入跳过标记", "已执行", item.sa_id)
+                    note("记录跳过：" + skipped[item.sa_id], "已跳过", item.sa_id)
             except Exception as exc:
                 halted = True
                 for item in targets:

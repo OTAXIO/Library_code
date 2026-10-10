@@ -91,9 +91,11 @@ def require_no_author_review(*reasons):
 
 
 def zero_result_note(message):
-    """Only the extension's confirmed zero-result diagnostic gets wos未查询到.
+    """Only the extension's confirmed zero-result diagnostic gets wos未收录.
 
     A missing control/link, timeout, Oops or multiple results is not zero results.
     Both language UIs converge on this explicit diagnostic in the adapter.
+    The user-selected label records this search outcome, not a universal assertion
+    about coverage in the database or whether the paper has been published.
     """
-    return 'wos未查询到' if re.search(r'(?:^|\]\s*)WOS\s*未找到记录(?:[；;。]|$)', str(message)) else ''
+    return 'wos未收录' if re.search(r'(?:^|\]\s*)WOS\s*未找到记录(?:[；;。]|$)', str(message)) else ''

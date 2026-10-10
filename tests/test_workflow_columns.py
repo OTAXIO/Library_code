@@ -5,6 +5,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 from core import SafetyStop, read_roster
 from roster_write import mark_complete, mark_skipped_many, clear_skipped_many, reconcile_processed, migrate_status_column
+from roster_write import cleanup_skipped_notes
 from tests.test_roster_write import make_roster
 
 
@@ -61,6 +62,47 @@ class WorkflowColumnsTests(unittest.TestCase):
         result=mark_skipped_many(roster,[item],reasons={item.sa_id:'重新核验仍无匹配'})
         self.assertTrue(result.roster.records[2].skipped)
         self.assertEqual(result.roster.records[2].remark,'重新核验仍无匹配')
+
+    def test_explicit_note_cleanup_clears_only_the_skipped_row(self):
+        import zipfile
+        roster = read_roster(self.path)
+        result = mark_skipped_many(roster, [roster.records[0]],
+            reasons={roster.records[0].sa_id: 'WOS 下载未完成：合成页面问题'})
+        before = result.roster
+        with zipfile.ZipFile(self.path) as archive:
+            parts = {name: archive.read(name) for name in archive.namelist()}
+        cleared = clear_skipped_many(before, [before.records[0]], clear_notes=True)
+        self.assertFalse(cleared.roster.records[0].skipped)
+        self.assertEqual(cleared.roster.records[0].remark, '')
+        self.assertEqual(cleared.roster.records[1:], before.records[1:])
+        self.assertEqual(read_roster(cleared.backup).records, before.records)
+        with zipfile.ZipFile(self.path) as archive:
+            self.assertEqual([name for name in parts if archive.read(name) != parts[name]],
+                             ['xl/worksheets/sheet1.xml'])
+
+    def test_combined_cleanup_retains_completed_and_other_owner_rows(self):
+        from dataclasses import replace
+        roster = read_roster(self.path)
+        result = mark_skipped_many(roster, [roster.records[0]],
+            reasons={roster.records[0].sa_id: '旧错误'})
+        # Row 3 is completed and row 4 belongs to another owner.
+        before = result.roster
+        cleared = cleanup_skipped_notes(before, [before.records[0]], {})
+        self.assertEqual(cleared.roster.records,
+            [replace(before.records[0], skipped=False, remark='')] + before.records[1:])
+        for record in cleared.roster.records[1:]:
+            with self.assertRaises(SafetyStop):
+                cleanup_skipped_notes(cleared.roster, [record], {})
+
+    def test_cleanup_short_note_keeps_numeric_two(self):
+        roster = read_roster(self.path)
+        result = mark_skipped_many(roster, [roster.records[0]],
+            reasons={roster.records[0].sa_id: '已补录/关联，第一单位待核验，暂不处理'})
+        before = result.roster
+        simplified = cleanup_skipped_notes(before, [], {before.records[0].sa_id: '第一单位待核验'})
+        self.assertTrue(simplified.roster.records[0].skipped)
+        self.assertEqual(simplified.roster.records[0].remark, '第一单位待核验')
+        self.assertEqual(simplified.roster.records[1:], before.records[1:])
 
     def test_state_requires_an_explanation(self):
         roster=read_roster(self.path)

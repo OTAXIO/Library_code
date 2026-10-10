@@ -26,6 +26,7 @@ async function runWOSCommand(command) {
     if(!["https://www.webofscience.com","https://webofscience.clarivate.cn"].includes(location.origin) || new URL(location.href).username || new URL(location.href).password)
       fail("WOS 网址不受支持，请在 www.webofscience.com 或 webofscience.clarivate.cn 的 HTTPS 文献检索页操作");
     if(!Number.isFinite(command.expires) || Date.now()>=command.expires-resultMargin)fail("WOS 操作超时，请人工查看网页");
+    if(location.pathname.startsWith('/wos/error/'))fail("WOS 网站进入错误页；未确认当前论文，不重复检索或导出");
     if(/Oops,?\s*something went wrong!?/i.test(document.body?.innerText||""))
       fail("WOS 网站自身报错：Oops, something went wrong! 这不是导入管理页的问题。请先点击 WOS 网页顶部 Search 或导航菜单重新进入检索；若仍报错，请人工检查登录、校园网/机构访问。网页恢复前不继续检索或导入");
     const errorHeadings=[norm(document.title),...all('h1,h2,[role="alert"]').map(el=>norm(el.innerText))];
@@ -127,7 +128,12 @@ async function runWOSCommand(command) {
   };
   const decodedPath = value => {try{return /%(?:2f|5c)/i.test(value)?"":decodeURIComponent(value);}catch{return "";}};
   const fullRecordPath = value => /^\/wos\/woscc\/full-record\/WOS:\d{15}\/?$/.test(decodedPath(value));
-  const fullRecord = () => fullRecordPath(location.pathname);
+  // The observed Angular Tab Delimited modal appends (overlay:export/ext).
+  // It is the same record, not a navigation to another paper. Canonical link
+  // targets remain strict above; only this exact page-side overlay is allowed.
+  const currentRecordPath = () => decodedPath(location.pathname).match(
+    /^(\/wos\/woscc\/full-record\/WOS:\d{15})(?:\/|\(overlay:export\/ext\)\/?)?$/)?.[1] || '';
+  const fullRecord = () => Boolean(currentRecordPath());
   // Some WOS title wrappers use display:contents: the anchor has no own box,
   // while its child text is rendered and clickable. Do not widen visibility for
   // search/export controls; only this read-only record-link reader needs it.
@@ -148,7 +154,10 @@ async function runWOSCommand(command) {
       // construct a record URL from title text, IDs in arbitrary attributes,
       // onclick code, or the first result. Different targets remain ambiguous.
       for(const attr of ['href','routerlink','ng-reflect-router-link']){
-        const value=anchor.getAttribute(attr);
+        // The DOM href property preserves the actual anchor route even when
+        // page-owned code decorates getAttribute. Still accept only a same-
+        // origin canonical UT; no URL is inferred from title text or page state.
+        const value=attr==='href'&&anchor.tagName==='A'?anchor.href:anchor.getAttribute(attr);
         if(!value)continue;
         try{
           const url=new URL(value,location.href);
@@ -216,10 +225,11 @@ async function runWOSCommand(command) {
     if(command.record_url){
       let expected;try{expected=new URL(command.record_url);}catch{fail("待导出单篇网址无效");}
       if(expected.origin!==location.origin||expected.search||expected.hash||
-          !fullRecordPath(expected.pathname)||decodedPath(expected.pathname).replace(/\/$/,'')!==decodedPath(location.pathname).replace(/\/$/,''))
+          expected.username||expected.password||!fullRecordPath(expected.pathname)||
+          decodedPath(expected.pathname).replace(/\/$/,'')!==currentRecordPath())
         fail("WOS 页面已不是本次检索确认的单篇记录，未导出");
     }
-    return location.origin+location.pathname;
+    return location.origin+currentRecordPath();
   };
   const resultState = () => {
     const urls=recordLinks();
@@ -248,7 +258,7 @@ async function runWOSCommand(command) {
   };
   try {
     check();
-    if(!["wos_prepare_search","wos_search","wos_start_search","wos_read_results","wos_verify_record","wos_export_probe","wos_export_status","wos_prepare_export","wos_check_export","wos_download"].includes(command.action))fail("未知 WOS 命令");
+    if(!["wos_prepare_search","wos_search","wos_start_search","wos_read_results","wos_open_result","wos_verify_record","wos_export_probe","wos_export_status","wos_prepare_export","wos_check_export","wos_download"].includes(command.action))fail("未知 WOS 命令");
     if(typeof command.title!=="string" || !command.title.trim() || command.title.length>1500)fail("题名缺失或过长");
     if(command.action==='wos_export_probe'){
       const recordURL=fingerprint();
@@ -266,6 +276,9 @@ async function runWOSCommand(command) {
         !busy&&!norm(document.body?.innerText)?'blank':'loading',record_url:recordURL}};
     }
     if(command.action==='wos_export_status'){
+      // A restart may leave the bound tab on Search, not the old export page.
+      // Read-only status must report unknown, never navigate or repeat Export.
+      if(!fullRecord())return {ok:true,data:{state:'unknown',reason:'record_page_changed'}};
       const recordURL=fingerprint(),state=window.__saWOSExport;
       if(!state||state.id!==command.sa_id||state.url!==recordURL)return {ok:true,data:{state:'unknown',record_url:recordURL}};
       if(state.submitted)return {ok:true,data:{state:'submitted',record_url:recordURL}};
@@ -277,6 +290,26 @@ async function runWOSCommand(command) {
     if(command.action==="wos_read_results") {
       if(all('[role="dialog"],mat-dialog-container').length)fail("WOS 有弹窗，请人工处理");
       return {ok:true,data:resultState()};
+    }
+    if(command.action==='wos_open_result') {
+      // WOS's own title handler retains the current search/session context.
+      // A tabs.update URL replacement reloads the app and can lose that context.
+      // Revalidate the one-result DOM immediately before this sole click.
+      if(all('[role="dialog"],mat-dialog-container').length)fail("WOS 有弹窗，未打开单篇记录");
+      let expected;
+      try{expected=new URL(command.navigate_url);}catch{fail("WOS 待打开单篇网址无效");}
+      if(expected.origin!==location.origin||expected.username||expected.password||expected.search||expected.hash||
+          !fullRecordPath(expected.pathname))fail("WOS 待打开单篇网址未通过安全校验");
+      const target=expected.origin+decodedPath(expected.pathname).replace(/\/$/,'');
+      const state=resultState();
+      if(state.state!=='single'||state.navigate_url!==target)fail("WOS 唯一结果已变化或尚未就绪，未点击论文链接");
+      const link=recordLinks().get(target)?.element;
+      if(!link?.isConnected||link.disabled||link.getAttribute('aria-disabled')==='true'||
+          link.hasAttribute('download')||!['','_self'].includes(link.getAttribute('target')||''))
+        fail("WOS 论文链接不能在当前工作页安全打开，未点击");
+      const pageURL=location.href;
+      setTimeout(()=>{if(link.isConnected&&location.href===pageURL)link.click();},0);
+      return {ok:true,data:{submitted:true,navigate_url:command.navigate_url}};
     }
     if(command.action==="wos_verify_record")return {ok:true,data:{state:"record",record_url:fingerprint()}};
     if(command.action==="wos_prepare_search") {

@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from openpyxl import Workbook
-from bridge import Bridge
+from bridge import Bridge, BrowserRejected
 from core import HEADERS, QUERY_HEADER, Journal, SafetyStop, fixed_roster_path, guide, read_roster
 
 
@@ -41,6 +41,32 @@ class CoreTests(unittest.TestCase):
         r = read_roster(self.roster()).records[0]
         self.assertEqual(r.item_ids, "1234567890123456789")
         self.assertEqual(r.staff_id, "00001")
+
+    def test_optional_dimension_and_blank_trailing_status_are_padded_from_header(self):
+        import io
+        import copy
+        import re
+        import zipfile
+        from openpyxl import load_workbook
+        path = self.roster()
+        book = load_workbook(path)
+        book.active['N1'] = '是否识别'
+        book.save(path)
+        book.close()
+        original = path.read_bytes()
+        with zipfile.ZipFile(io.BytesIO(original)) as source, zipfile.ZipFile(path, 'w') as target:
+            for entry in source.infolist():
+                data = source.read(entry)
+                if entry.filename == 'xl/worksheets/sheet1.xml':
+                    data = re.sub(rb'<dimension\b[^>]*/>', b'', data)
+                target.writestr(copy.copy(entry), data)
+        roster = read_roster(path)
+        self.assertTrue(roster.status_separate)
+        self.assertEqual(roster.completion_column, 14)
+        self.assertFalse(roster.records[0].done)
+        self.assertFalse(roster.records[0].skipped)
+        self.assertEqual(roster.records[0].item_ids, '1234567890123456789')
+        self.assertEqual(roster.records[0].staff_id, '00001')
 
     def test_duplicate_id_stops(self):
         with self.assertRaises(SafetyStop):
@@ -171,6 +197,29 @@ class BridgeTests(unittest.TestCase):
     def test_offline_stops(self):
         with self.assertRaises(SafetyStop):
             self.bridge.call("search", {})
+
+    def test_completed_negative_reply_is_distinct_from_unknown_timeout(self):
+        self.post("/poll", {"client": "1"})
+        errors = []
+        def invoke():
+            try:
+                self.bridge.call("wos_export", {}, 3)
+            except SafetyStop as exc:
+                errors.append(exc)
+        worker = threading.Thread(target=invoke)
+        worker.start()
+        command = None
+        deadline = time.monotonic() + 2
+        while not command and time.monotonic() < deadline:
+            command = self.post("/poll", {"client": "1"})["command"]
+        self.assertIsNotNone(command)
+        self.post("/result", {"id": command["id"], "client": "1", "result":
+                              {"ok": False, "error": "explicit rejection"}})
+        worker.join(4)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], BrowserRejected)
+        self.assertEqual(errors[0].action, "wos_export")
+        self.assertEqual(str(errors[0]), "explicit rejection")
 
 
 if __name__ == "__main__":

@@ -153,7 +153,9 @@ def read_roster(path):
             raise SafetyStop("无法唯一识别查询方式列。")
         mapping["query"] = query_cols[0]
         records, seen = [], set()
-        for number, cells in enumerate(sheet.iter_rows(min_row=2), 2):
+        # OOXML's dimension is optional. A sparse row can end before the status
+        # column even when the header declares it; explicitly pad to the schema.
+        for number, cells in enumerate(sheet.iter_rows(min_row=2, max_col=len(labels)), 2):
             if all(c.value is None for c in cells):
                 continue
             values = {}

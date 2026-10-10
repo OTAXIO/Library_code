@@ -81,6 +81,16 @@ for (const origin of origins) {
     assert.equal(policy.isExpectedWOSDownload({url:blob, referrer:encodedRecord}, encodedRecord), true);
     assert.equal(policy.isExpectedWOSDownload({url:blob, referrer:record}, encodedRecord), true);
     assert.equal(policy.isExpectedWOSDownload({url:blob, referrer:encodedRecord}, record), true);
+    const exportOverlay=record+'(overlay:export/ext)';
+    assert.equal(policy.isWOSRecordPage(exportOverlay,origin),true);
+    assert.equal(policy.isExpectedWOSDownload({url:blob,referrer:exportOverlay},record),true);
+    for(const suffix of ['(overlay:export/excel)','(overlay:export/ext//other:x)',
+      '(overlay:export/ext)(other:x)','(overlay:export/ext)/extra','(overlay:export/ext)junk']){
+      assert.equal(policy.isWOSRecordPage(record+suffix,origin),false);
+      assert.equal(policy.isExpectedWOSDownload({url:blob,referrer:record+suffix},record),false);
+    }
+    assert.equal(policy.isExpectedWOSDownload({url:blob,
+      referrer:exportOverlay.replace('789012','789013')},record),false);
     assert.equal(policy.isExpectedWOSDownload({url:origin + '/export.txt', referrer:record}, record), true);
     assert.equal(policy.isExpectedWOSDownload({url:origin + '/export.txt', referrer:''}, record), false);
     assert.equal(policy.isExpectedWOSDownload({url:blob, referrer:origin + '/wos/woscc/basic-search'}, record), false);
@@ -143,20 +153,86 @@ test('only the pre-click stale-zero marker requests one clean WOS reload', async
   assert.equal(result.ok,true);assert.equal(reloads,1);assert.equal(executions,5);
 });
 
-test('one canonical result is navigated by the extension background, never clicked in-page', async()=>{
-  const origin=origins[0], navigations=[];
+test('one canonical result follows its own page link once, without a hard URL replacement', async()=>{
+  const origin=origins[0], clicks=[];
   let tab={id:2,url:origin+'/wos/woscc/basic-search',status:'complete'}, reads=0;
   const sandbox={URL,Date,setTimeout,runWOSCommand(){},chrome:{
-    tabs:{get:async()=>tab,update:async(id,change)=>{navigations.push(change.url);tab={...tab,...change,status:'complete'};}},
+    tabs:{get:async()=>tab,update:async()=>{throw Error('must not replace the result URL');}},
     scripting:{executeScript:async input=>{const action=input.args[0].action;
       if(prepared(input))return prepared(input);
       if(action==='wos_start_search')return [{result:{ok:true,data:{submitted:true}}}];
+      if(action==='wos_open_result'){
+        assert.equal(input.world,'MAIN');assert.equal(input.args[0].navigate_url,origin+recordPath);
+        clicks.push(input.args[0].navigate_url);tab={...tab,url:origin+recordPath};
+        return [{result:{ok:true,data:{submitted:true,navigate_url:origin+recordPath}}}];
+      }
       if(action==='wos_read_results'&&reads++===0)return [{result:{ok:true,data:{state:'single',navigate_url:origin+recordPath}}}];
       return [{result:{ok:true,data:{state:'record',record_url:origin+recordPath}}}];}},
   }};
   loadPolicy(sandbox);
   const result=await sandbox.dispatchWorkflow({action:'wos_search',title:'Synthetic',expires:Date.now()+30000},{tabId:1,wosTabId:2});
-  assert.equal(result.ok,true);assert.deepEqual(navigations,[origin+recordPath]);
+  assert.equal(result.ok,true);assert.deepEqual(clicks,[origin+recordPath]);
+});
+
+function missingLinkProbe(overrides={}) {
+  return {summary_route:true,record_route:false,result_total:1,result_total_conflict:false,
+    canonical_record_link_count:0,busy:false,...overrides};
+}
+function corroborationSandbox(isolated,main) {
+  const origin=origins[1], calls=[],navigations=[];
+  let starts=0,tab={id:2,url:origin+'/wos/woscc/basic-search'};
+  const sandbox={URL,Date,setTimeout:(fn,ms)=>setTimeout(fn,Math.min(ms,5)),runWOSCommand(){},chrome:{
+    tabs:{get:async()=>tab,update:async(id,change)=>{navigations.push(change.url);tab={...tab,...change};}},
+    scripting:{executeScript:async input=>{
+      const action=input.args[0].action;
+      if(prepared(input))return prepared(input);
+      if(action==='wos_start_search'){starts++;return [{result:{ok:true,data:{submitted:true}}}];}
+      if(action==='wos_open_result'){
+        assert.equal(input.world,'MAIN');navigations.push(input.args[0].navigate_url);
+        tab={...tab,url:input.args[0].navigate_url};
+        return [{result:{ok:true,data:{submitted:true,navigate_url:input.args[0].navigate_url}}}];
+      }
+      assert.equal(action,'wos_read_results');calls.push(input.world);
+      if(tab.url===origin+recordPath)return [{result:{ok:true,data:{state:'record',record_url:tab.url}}}];
+      return [{result:input.world==='MAIN'?main:isolated}];
+    }}
+  }};
+  loadPolicy(sandbox);
+  return {sandbox,calls,navigations,starts:()=>starts};
+}
+test('one-result missing-link probe may corroborate the same DOM in MAIN without repeating Search',async()=>{
+  const isolated={ok:true,data:{state:'loading',diagnostic:missingLinkProbe()}};
+  const main={ok:true,data:{state:'single',navigate_url:origins[1]+recordPath,
+    diagnostic:missingLinkProbe({canonical_record_link_count:1})}};
+  const run=corroborationSandbox(isolated,main);
+  const result=await run.sandbox.dispatchWorkflow({action:'wos_search',expires:Date.now()+30000},{tabId:1,wosTabId:2});
+  assert.equal(result.ok,true);assert.equal(run.starts(),1);
+  assert.deepEqual(run.calls,['ISOLATED','MAIN','ISOLATED']);
+  assert.deepEqual(run.navigations,[origins[1]+recordPath]);
+});
+test('MAIN corroboration cannot turn conflicting or gated page evidence into a chosen record',async()=>{
+  for(const state of ['zero','multiple','record']){
+    const isolated={ok:true,data:{state:'loading',diagnostic:missingLinkProbe()}};
+    const main={ok:true,data:{state,record_url:origins[1]+recordPath,diagnostic:missingLinkProbe()}};
+    const run=corroborationSandbox(isolated,main);
+    await assert.rejects(run.sandbox.dispatchWorkflow({action:'wos_search',expires:Date.now()+30000},
+      {tabId:1,wosTabId:2}),/两次只读结果证据不一致/);
+    assert.equal(run.starts(),1);assert.deepEqual(run.navigations,[]);
+  }
+  const run=corroborationSandbox({ok:true,data:{state:'loading',diagnostic:missingLinkProbe()}},
+    {ok:false,error:'[WOS 已暂停] WOS 显示人工验证'});
+  const result=await run.sandbox.dispatchWorkflow({action:'wos_search',expires:Date.now()+30000},{tabId:1,wosTabId:2});
+  assert.equal(result.ok,false);assert.match(result.error,/人工验证/);assert.deepEqual(run.navigations,[]);
+});
+test('corroborated DOM URL still requires the exact origin and canonical single-record path',async()=>{
+  for(const url of [origins[0]+recordPath,origins[1]+'/wos/woscc/basic-search',
+    'https://publisher.example.invalid'+recordPath]){
+    const run=corroborationSandbox({ok:true,data:{state:'loading',diagnostic:missingLinkProbe()}},
+      {ok:true,data:{state:'single',navigate_url:url,diagnostic:missingLinkProbe({canonical_record_link_count:1})}});
+    await assert.rejects(run.sandbox.dispatchWorkflow({action:'wos_search',expires:Date.now()+30000},
+      {tabId:1,wosTabId:2}),/唯一结果链接未通过安全校验/);
+    assert.equal(run.starts(),1);assert.deepEqual(run.navigations,[]);
+  }
 });
 
 test('slow zero-result reset waits for fresh search DOM before the next Search',async()=>{
@@ -279,18 +355,22 @@ test('WOS probes read a rendered loading tab immediately instead of waiting for 
         tab={...tab,url:origin+'/wos/woscc/summary/new',status:'loading'};
         return [{result:{ok:true,data:{submitted:true}}}];
       }
+      if(options.args[0].action==='wos_open_result'){
+        tab={...tab,url:options.args[0].navigate_url};
+        return [{result:{ok:true,data:{submitted:true,navigate_url:options.args[0].navigate_url}}}];
+      }
       return [{result:{ok:true,data:tab.url.includes('/summary/')?
         {state:'single',navigate_url:origin+recordPath}:{state:'record',record_url:origin+recordPath}}}];
     }}
   }};
   loadPolicy(sandbox);
   const result=await sandbox.dispatchWorkflow({action:'wos_search',title:'Synthetic',expires:Date.now()+30000},{tabId:1,wosTabId:2});
-  assert.equal(result.ok,true);assert.equal(calls.length,5);
+  assert.equal(result.ok,true);assert.equal(calls.length,6);
   assert.ok(calls.every(call=>call.injectImmediately===true));
-  assert.deepEqual(navigations,[origin+'/wos/woscc/basic-search',origin+recordPath]);
+  assert.deepEqual(navigations,[origin+'/wos/woscc/basic-search']);
 });
 
-test('a list still mounted after tabs.update is polled, not navigated twice', async()=>{
+test('a list still mounted after its title click is polled, not clicked twice', async()=>{
   const origin=origins[0],navigations=[];
   let tab={id:2,url:origin+'/wos/woscc/basic-search',status:'complete'},reads=0,starts=0;
   const sandbox={URL,Date,setTimeout,runWOSCommand(){},chrome:{
@@ -298,6 +378,10 @@ test('a list still mounted after tabs.update is polled, not navigated twice', as
     scripting:{executeScript:async options=>{
       if(prepared(options))return prepared(options);
       if(options.args[0].action==='wos_start_search'){starts++;return [{result:{ok:true,data:{submitted:true}}}];}
+      if(options.args[0].action==='wos_open_result'){
+        navigations.push(options.args[0].navigate_url);tab={...tab,url:options.args[0].navigate_url};
+        return [{result:{ok:true,data:{submitted:true,navigate_url:options.args[0].navigate_url}}}];
+      }
       reads++;
       return [{result:{ok:true,data:reads<=2?{state:'single',navigate_url:origin+recordPath}:
         {state:'record',record_url:origin+recordPath}}}];
@@ -336,6 +420,10 @@ test('a previous full-record DOM is not accepted for the new navigation target',
     scripting:{executeScript:async options=>{
       if(prepared(options))return prepared(options);
       if(options.args[0].action==='wos_start_search')return [{result:{ok:true,data:{submitted:true}}}];
+      if(options.args[0].action==='wos_open_result'){
+        navigations++;tab={...tab,url:options.args[0].navigate_url};
+        return [{result:{ok:true,data:{submitted:true,navigate_url:options.args[0].navigate_url}}}];
+      }
       reads++;
       return [{result:{ok:true,data:reads===1?{state:'single',navigate_url:origin+recordPath}:
         {state:'record',record_url:reads===2?other:origin+recordPath}}}];
@@ -345,6 +433,29 @@ test('a previous full-record DOM is not accepted for the new navigation target',
   const result=await sandbox.dispatchWorkflow({action:'wos_search',title:'Synthetic',expires:Date.now()+30000},{tabId:1,wosTabId:2});
   assert.equal(result.ok,true);assert.equal(result.data.record_url,origin+recordPath);
   assert.equal(reads,3);assert.equal(navigations,1);
+});
+
+test('a lost or mismatched title-click acknowledgement never causes another click or URL replacement',async()=>{
+  for(const reply of [null,{ok:true,data:{submitted:false}},
+      {ok:true,data:{submitted:true,navigate_url:origins[0]+recordPath.replace('789012','789013')}}]){
+    let clicks=0,starts=0;
+    const sandbox={URL,Date,setTimeout,runWOSCommand(){},chrome:{
+      tabs:{get:async()=>({id:2,url:origins[0]+'/wos/woscc/basic-search'}),
+        update:async()=>{throw Error('must not replace the URL');}},
+      scripting:{executeScript:async options=>{
+        if(prepared(options))return prepared(options);
+        if(options.args[0].action==='wos_start_search'){starts++;return [{result:{ok:true,data:{submitted:true}}}];}
+        if(options.args[0].action==='wos_open_result'){
+          clicks++;if(reply===null)throw Error('Execution context was destroyed');return [{result:reply}];
+        }
+        return [{result:{ok:true,data:{state:'single',navigate_url:origins[0]+recordPath}}}];
+      }}
+    }};
+    loadPolicy(sandbox);
+    await assert.rejects(sandbox.dispatchWorkflow({action:'wos_search',title:'Synthetic',expires:Date.now()+30000},
+      {tabId:1,wosTabId:2}),/context|回执未确认/);
+    assert.equal(clicks,1);assert.equal(starts,1);
+  }
 });
 
 test('timeout diagnostics distinguish missing totals/links without exposing arbitrary page data',()=>{

@@ -26,6 +26,13 @@ async function runImportCommand(command) {
   const one = (items, label) => { if(items.length!==1)fail(label+"不是唯一对象，请人工处理"); return items[0]; };
   try {
     check();
+    const vms=descendants([...document.querySelectorAll("*")].map(el=>el.__vue__).filter(Boolean));
+    // Several unrelated components also use the name BatchManage; require refs.
+    const vm=one(vms.filter(v=>v.$options?.name==="BatchManage" && v.$refs?.wosDataText && v.$refs?.batchPushModal),"导入管理页");
+    const drawer=vm.$refs.wosDataText, push=vm.$refs.batchPushModal, view=vm.$refs.batchViewModal;
+    if (!vm.page || !Array.isArray(vm.tableData) || typeof vm.getData!=="function" || !view ||
+        typeof vm.importWosDataText!=="function" || typeof drawer.onSubmit!=="function" ||
+        typeof push.onSubmit!=="function") fail("批次页面结构发生变化");
     if(command.action==='import_capabilities')return {ok:true,data:{zero_match_protocol:1,library_resolution:true}};
     if (!["import_scan","import_upload","import_submit","import_check","import_push"].includes(command.action)) fail("未知导入命令");
     if (typeof command.sa_id!=="string" || !/^[\w-]{1,160}$/.test(command.sa_id) ||
@@ -33,11 +40,6 @@ async function runImportCommand(command) {
     const candidate=command.candidate;
     if (!candidate || !candidate.title || !/^WOS:\d{15}$/.test(candidate.wos) || candidate.sjtu!==true ||
         !/^[a-f0-9]{64}$/.test(candidate.sha256)) fail("缺少已核验的单篇 WOS 证据");
-    const vms=descendants([...document.querySelectorAll("*")].map(el=>el.__vue__).filter(Boolean));
-    // Several unrelated components also use the name BatchManage; require refs.
-    const vm=one(vms.filter(v=>v.$options?.name==="BatchManage" && v.$refs?.wosDataText && v.$refs?.batchPushModal),"导入管理页");
-    const drawer=vm.$refs.wosDataText, push=vm.$refs.batchPushModal, view=vm.$refs.batchViewModal;
-    if (!vm.page || !Array.isArray(vm.tableData) || typeof vm.getData!=="function" || !view) fail("批次页面结构发生变化");
     for (const child of Object.values(vm.$refs)) {
       if (child?.drawer && !(child.__saImport?.sa_id===command.sa_id && [drawer,push,view].includes(child)))
         fail("存在人工打开的导入/编辑窗口，请关闭后再操作");
@@ -60,11 +62,14 @@ async function runImportCommand(command) {
       await wait(()=>!vm.loading && vm.tableData!==old,"刷新批次列表");
       if(!Number.isInteger(Number(vm.page.total)) || Number(vm.page.total)<0)fail("批次数量未知");
     };
-    const scan = async () => {
+    class BatchScanChanged extends Error {
+      constructor() { super("扫描期间批次总数持续变化，请等待后只读重查"); }
+    }
+    const scanOnce = async () => {
       const result=[],seen=new Set(); let total;
       for(let p=1;p<=50;p++) {
         await query(p);
-        if(total!==undefined && total!==Number(vm.page.total))fail("扫描期间批次总数变化，请只读重查");
+        if(total!==undefined && total!==Number(vm.page.total))throw new BatchScanChanged();
         total=Number(vm.page.total);
         if(total>5000)fail("WOS 批次超过安全扫描上限，请人工查找目标批次");
         for(const row of vm.tableData){
@@ -74,6 +79,18 @@ async function runImportCommand(command) {
         if(p*100>=total){if(seen.size!==total)fail("批次扫描不完整");return result;}
       }
       fail("批次扫描未完成");
+    };
+    const scan = async () => {
+      // A just-submitted import, or another librarian's batch, can change the
+      // total between pages. Discard that partial read and restart from page 1
+      // at most twice. Only a complete, stable scan can authorize any write.
+      for(let attempt=0;attempt<3;attempt++) {
+        try { return await scanOnce(); }
+        catch(error) {
+          if(!(error instanceof BatchScanChanged) || attempt===2 || Date.now()>command.expires-6000)throw error;
+          check(); await new Promise(resolve=>setTimeout(resolve,350));
+        }
+      }
     };
     const verify = async batch => {
       snapshot(batch);

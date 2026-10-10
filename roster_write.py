@@ -379,7 +379,10 @@ def _mark_values(roster, updates, backup_dir=None, notes=None):
                     changed = patch_cell(changed, reference, record.row, value)
                     if roster.status_separate and record.sa_id in notes:
                         note_ref = f"{column_name(roster.remark_column)}{record.row}"
-                        changed = patch_text_cell(changed, note_ref, record.row, notes[record.sa_id].strip())
+                        note = notes[record.sa_id].strip()
+                        changed = (patch_cell(changed, note_ref, record.row, None)
+                                   if value is None and not note else
+                                   patch_text_cell(changed, note_ref, record.row, note))
                         references.append(note_ref)
                 output.comment = source.comment
                 for entry in source.infolist():
@@ -512,9 +515,41 @@ def mark_skipped_many(roster, records, backup_dir=None, reasons=None):
     return _mark_values(roster, [(record, 2) for record in records], backup_dir, reasons)
 
 
-def clear_skipped_many(roster, records, backup_dir=None):
-    """Back up and clear existing numeric-2 workflow flags only."""
-    return _mark_values(roster, [(record, None) for record in records], backup_dir)
+def clear_skipped_many(roster, records, backup_dir=None, *, clear_notes=False):
+    """Clear numeric-2 flags; clearing their notes additionally requires opt-in.
+
+    Never accepts completed records. Ordinary retry callers retain their original
+    notes; an explicitly requested cleanup can clear only the same target cells.
+    """
+    if type(clear_notes) is not bool or clear_notes and not roster.status_separate:
+        raise SafetyStop("清理备注须有独立是否识别列且明确指定清理，未回写。")
+    records = list(records)
+    return _mark_values(roster, [(record, None) for record in records], backup_dir,
+                        {record.sa_id: "" for record in records} if clear_notes else None)
+
+
+def cleanup_skipped_notes(roster, clear_records, short_notes, backup_dir=None):
+    """Explicit, atomic local cleanup; never clears a completion or other owner.
+
+    ``clear_records`` clears both the remark and 2. ``short_notes`` changes only
+    the explanation of another skipped row, retaining its numeric-2 protection.
+    No source, browser state, TXT, or operation journal is removed.
+    """
+    clear_records = list(clear_records)
+    short_notes = dict(short_notes)
+    clear_ids = {record.sa_id for record in clear_records}
+    if len(clear_ids) != len(clear_records) or clear_ids & set(short_notes):
+        raise SafetyStop("清理目标重复或交叉，未回写。")
+    by_id = {record.sa_id: record for record in roster.records}
+    if set(short_notes) - set(by_id) or not roster.status_separate or roster.remark_column != 1:
+        raise SafetyStop("无法确认第一列备注、独立状态或清理目标，未回写。")
+    targets = clear_records + [by_id[sa_id] for sa_id in short_notes]
+    if any(record not in roster.records or record.owner != '谭勋策' or
+           record.done or not record.skipped for record in targets):
+        raise SafetyStop("只允许清理谭勋策已跳过记录，完成项和其他负责人不变。")
+    return _mark_values(roster, [(record, None) for record in clear_records] +
+                        [(by_id[sa_id], 2) for sa_id in short_notes], backup_dir,
+                        {**short_notes, **{sa_id: '' for sa_id in clear_ids}})
 
 
 def reconcile_processed(roster, record, remote_row, owner="谭勋策"):

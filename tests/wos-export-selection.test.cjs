@@ -4,6 +4,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const {chromium}=require('playwright');
 const {runWOSCommand}=require('../extension/wos-adapter.js');
+const {inspectWorkPage}=require('../extension/page-diagnostics.js');
 const fixture=fs.readFileSync(path.join(__dirname,'fixtures/wos-navigation.html'),'utf8');
 const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const origins=['https://www.webofscience.com','https://webofscience.clarivate.cn'];
@@ -34,6 +35,9 @@ const command=action=>({action,sa_id:'offline-material-export',title:'Synthetic 
           main.append(format);
           format.onclick=()=>{
             format.remove();
+            // WOS uses an Angular auxiliary route for this SAME record's
+            // modal. The final Export must survive this observed route change.
+            history.pushState({},'',location.pathname+'(overlay:export/ext)');
             const panel=document.createElement('mat-dialog-container');
             panel.setAttribute('role','dialog');
             panel.innerHTML='<h2>Export Records to Tab Delimited File</h2><mat-select role="combobox" aria-label="Record Content" tabindex="0">'+
@@ -64,6 +68,7 @@ const command=action=>({action,sa_id:'offline-material-export',title:'Synthetic 
               const text='TI\tAU\tAF\tSO\tPY\tC1\tUT\tDI\r\nSynthetic paper\tTest, A\tAlice Test\tSynthetic Journal\t2026\tShanghai Jiao Tong Univ\tWOS:000123456789012\t10.1234/test\r\n';
               const file=document.createElement('a');file.href=URL.createObjectURL(new Blob([text],{type:'text/plain'}));
               file.download='material-synthetic.txt';file.click();panel.remove();
+              history.replaceState({},'',location.pathname.replace('(overlay:export/ext)',''));
             };
           };
         };
@@ -95,6 +100,10 @@ const command=action=>({action,sa_id:'offline-material-export',title:'Synthetic 
       });
       const resumed=await page.evaluate(runWOSCommand,{...command('wos_prepare_export'),record_url:expected});
       assert.equal(resumed.ok,true,JSON.stringify(resumed));
+      assert.equal(resumed.data.record_url,expected,'the export overlay retains the canonical UT');
+      const diagnostic=await page.evaluate(inspectWorkPage,{action:'wos_diagnose'});
+      assert.equal(diagnostic.record_route,true);
+      assert.equal(diagnostic.export_dialog,true,'the exact overlay permits safe unsubmitted preview recovery');
       assert.equal(await page.evaluate(()=>contentSelections),1,'an already selected Full Record is not reopened');
       assert.equal((await page.evaluate(runWOSCommand,{...command('wos_export_status'),record_url:expected})).data.state,'unsubmitted');
       const resumedDownload=page.waitForEvent('download');
@@ -111,6 +120,14 @@ const command=action=>({action,sa_id:'offline-material-export',title:'Synthetic 
       const foreign=await page.evaluate(runWOSCommand,{...command('wos_prepare_export'),record_url:expected});
       assert.equal(foreign.ok,false);assert.equal(await page.evaluate(()=>exportsMade),0);
       console.log(`PASS ${new URL(origin).hostname} another export format is not adopted`);checks++;
+
+      for(const suffix of ['(overlay:export/excel)','(overlay:export/ext//other:x)',
+        '(overlay:export/ext)(other:x)','(overlay:export/ext)/extra','(overlay:export/ext)junk']){
+        await reset(origin);assert.equal((await prepare()).ok,true);
+        await page.evaluate(path=>history.replaceState({},'',path),recordPath+suffix);
+        await refuseDownload();
+        console.log(`PASS ${new URL(origin).hostname} unknown auxiliary route is refused`);checks++;
+      }
 
       await reset(origin);assert.equal((await prepare()).ok,true);
       const wrong=await page.evaluate(runWOSCommand,{...command('wos_prepare_export'),record_url:expected.replace('000123456789012','000999999999999')});

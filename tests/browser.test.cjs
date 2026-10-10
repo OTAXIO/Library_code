@@ -51,6 +51,59 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.match((await execute(command('status'))).error,/未关闭的窗口/);
     assert.equal(await page.evaluate(()=>writeCount),0);
   });
+  test('status resumes the same readonly record without opening or closing a window',async()=>{
+    assert.equal((await execute(command('search'))).ok,true);
+    const queries=await page.evaluate(()=>window.queryCount);
+    const result=await execute(command('status'));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.row.saLzkId,'demo-001');
+    assert.equal(await page.evaluate(()=>window.queryCount),queries+1);
+    assert.equal(await page.evaluate(()=>detail.dialogVisible),true);
+    assert.equal(await page.evaluate(()=>window.closeCalls||0),0);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('status does not refresh behind another record or an unbound drawer',async()=>{
+    for(const change of ['other-record','other-panel','duplicate-owner','loading']) {
+      await reset();assert.equal((await execute(command('search'))).ok,true);
+      await page.evaluate(change=>{
+        if(change==='other-record')detail.currentSaLzkId='other-id';
+        if(change==='other-panel')detail.$children[0].$refs.drawer=document.getElementById('claim');
+        if(change==='duplicate-owner')detail.$children.push(detail.$children[0]);
+        if(change==='loading')detail.dialogLoading=true;
+      },change);
+      const before=await page.evaluate(()=>window.queryCount);
+      assert.match((await execute(command('status'))).error,/未关闭的窗口/);
+      assert.equal(await page.evaluate(()=>window.queryCount),before);
+      assert.equal(await page.evaluate(()=>window.closeCalls||0),0);
+      assert.equal(await page.evaluate(()=>writeCount),0);
+    }
+  });
+  test('status never dismisses or reads through claim selections or editing windows',async()=>{
+    for(const change of ['claim','edit','confirm','foreign']) {
+      await reset();assert.equal((await execute(command('search'))).ok,true);
+      await page.evaluate(change=>{
+        if(change==='claim')claimWindow.drawer=true;
+        if(change==='edit')detail.$refs.itemEdit={drawer:true};
+        if(change==='confirm')vm.$refs.compareStatusDialog.dialogVisible=true;
+        if(change==='foreign')document.getElementById('status').style.display='block';
+      },change);
+      const before=await page.evaluate(()=>window.queryCount);
+      assert.match((await execute(command('status'))).error,/未关闭的窗口/);
+      assert.equal(await page.evaluate(()=>window.queryCount),before);
+      assert.equal(await page.evaluate(()=>window.closeCalls||0),0);
+      assert.equal(await page.evaluate(()=>writeCount),0);
+    }
+  });
+  test('status revalidates readonly ownership after its asynchronous query',async()=>{
+    assert.equal((await execute(command('search'))).ok,true);
+    await page.evaluate(()=>{
+      const getData=vm.getData;
+      vm.getData=async function(){await getData.call(this);detail.currentSaLzkId='other-id';};
+    });
+    assert.match((await execute(command('status'))).error,/未关闭的窗口/);
+    assert.equal(await page.evaluate(()=>window.closeCalls||0),0);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
   test('same-record readonly drawer is refreshed without a close cycle',async()=>{
     const first=await execute(command('search'));assert.equal(first.ok,true,JSON.stringify(first));
     await page.evaluate(()=>testConfig.drawerCloseDelay=20000);

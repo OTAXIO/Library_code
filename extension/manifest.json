@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SA 比对半自动助手",
-  "version": "0.4.5",
+  "version": "0.4.10",
   "description": "自动认领与 WOS 自动导入；通过桌面助手串行执行，核验网页及名单回写，未知情况暂停。",
   "permissions": ["storage", "scripting", "activeTab", "downloads"],
   "host_permissions": [

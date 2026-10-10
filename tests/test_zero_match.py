@@ -155,6 +155,21 @@ class ZeroMatchTests(unittest.TestCase):
         self.assertIsNone(book["名单"]["O4"].value)
         book.close()
 
+    def test_executor_does_not_process_already_skipped_or_done_even_from_explicit_queue(self):
+        from dataclasses import replace
+        skipped = replace(self.roster.records[0], skipped=True, remark="已跳过原因")
+        done = replace(self.roster.records[1], done=True)
+        self.roster.records[:2] = [skipped, done]
+        before = file_hash(self.path)
+        result = run_batch(self.roster, [skipped, done], self.sa, self.download,
+                           self.imports, self.workflow, self.stop)
+        self.assertFalse(result.halted)
+        self.assertEqual(result.remaining, 0)
+        self.assertEqual([x["status"] for x in result.outcomes], ["already_skipped", "already_done"])
+        self.assertEqual(self.sa.calls, [])
+        self.assertEqual(self.download.calls, [])
+        self.assertEqual(file_hash(self.path), before)
+
     def test_verification_pauses_without_marking_current_or_tail_two(self):
         before = file_hash(self.path)
         self.download.fail["demo-001"] = "WOS 显示人工验证"
@@ -170,7 +185,7 @@ class ZeroMatchTests(unittest.TestCase):
         result = self.run_flow()
         self.assertFalse(result.halted, result.reason)
         self.assertTrue(result.roster.records[0].skipped)
-        self.assertEqual(result.roster.records[0].remark, "wos未查询到")
+        self.assertEqual(result.roster.records[0].remark, "wos未收录")
         self.assertTrue(result.roster.records[1].done)
 
     def test_extension_zero_result_saves_requested_note_and_flag_before_next_paper(self):
@@ -180,11 +195,12 @@ class ZeroMatchTests(unittest.TestCase):
         self.assertFalse(result.halted, result.reason)
         self.assertEqual(result.remaining, 0)
         self.assertEqual([outcome["status"] for outcome in result.outcomes], ["skip", "done"])
-        self.assertEqual(result.outcomes[0]["message"], "wos未查询到")
+        self.assertEqual(result.outcomes[0]["message"], "wos未收录")
+        self.assertIn("WOS 未找到记录", result.outcomes[0]["detail"])
         self.assertFalse(result.roster.records[0].done)
         book = load_workbook(self.path)
         self.addCleanup(book.close)
-        self.assertEqual(book["名单"]["A2"].value, "wos未查询到")
+        self.assertEqual(book["名单"]["A2"].value, "wos未收录")
         self.assertEqual(book["名单"]["O2"].value, 2)
         self.assertEqual(book["名单"]["O3"].value, 1)
         self.assertIsNone(book["名单"]["A4"].value)
@@ -200,7 +216,7 @@ class ZeroMatchTests(unittest.TestCase):
         self.assertEqual([outcome["status"] for outcome in result.outcomes], ["skip", "halted"])
         book = load_workbook(self.path)
         self.addCleanup(book.close)
-        self.assertEqual(book["名单"]["A2"].value, "wos未查询到")
+        self.assertEqual(book["名单"]["A2"].value, "wos未收录")
         self.assertEqual(book["名单"]["O2"].value, 2)
         for row in (3, 4):
             self.assertIsNone(book["名单"].cell(row, 1).value)
@@ -466,6 +482,9 @@ class ZeroMatchTests(unittest.TestCase):
                 self.assertFalse(result.halted, result.reason)
                 self.assertTrue(result.roster.records[0].skipped)
                 self.assertNotIn('complete', self.sa.calls)
+                self.assertEqual(result.roster.records[0].remark,
+                    '第一单位待核验' if label == '交大是否第一单位' else '作者角色待核验')
+                self.assertIn('不自动', result.outcomes[0]['detail'])
                 # Explicit retry is separate from the default pending queue.
                 from roster_write import clear_skipped_many
                 self.roster = clear_skipped_many(self.roster, [self.roster.records[0]]).roster

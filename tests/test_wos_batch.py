@@ -8,20 +8,21 @@ from unittest.mock import Mock, patch
 
 from automation import ImportStore
 from core import Record, SafetyStop
+from bridge import BrowserRejected
 from tests.test_automation import sample
 from wos_batch import WOSDownload, default_store, preflight
 
 
 class PreflightTests(unittest.TestCase):
     def capabilities(self, **page):
-        return {"extension_version": "0.4.4", "wos_download_protocol": 1, "search_prepare_protocol": 1, "export_prepare_protocol": 1,
+        return {"extension_version": "0.4.9", "wos_download_protocol": 1, "search_prepare_protocol": 1, "export_prepare_protocol": 1,
                 "result_reader": "shared-diagnostic", "read_results_world": "ISOLATED",
                 "page": {"core_search_route": True, "query_input_count": 1,
                          "wos_error": False, "site_timeout": False, "login_required": False, "dialog_count": 0, "busy": False, **page}}
 
     def test_extension_protocol_checked_before_search(self):
         bridge = Mock(call=Mock(return_value=self.capabilities()))
-        self.assertEqual(preflight(bridge), {"extension_version": "0.4.4"})
+        self.assertEqual(preflight(bridge), {"extension_version": "0.4.9"})
         bridge.call.assert_called_once_with("wos_diagnose", {}, timeout=25)
 
     def test_old_incompatible_and_alternate_transport_fail_without_search(self):
@@ -30,6 +31,11 @@ class PreflightTests(unittest.TestCase):
                        {**self.capabilities(), "extension_version": "0.4.1"},
                        {**self.capabilities(), "extension_version": "0.4.2"},
                        {**self.capabilities(), "extension_version": "0.4.3"},
+                       {**self.capabilities(), "extension_version": "0.4.4"},
+                       {**self.capabilities(), "extension_version": "0.4.5"},
+                       {**self.capabilities(), "extension_version": "0.4.6"},
+                       {**self.capabilities(), "extension_version": "0.4.7"},
+                       {**self.capabilities(), "extension_version": "0.4.8"},
                        {**self.capabilities(), "export_prepare_protocol": True},
                        {**self.capabilities(), "search_prepare_protocol": True},
                        {**self.capabilities(), "search_prepare_protocol": None},
@@ -68,16 +74,16 @@ class PreflightTests(unittest.TestCase):
 
     def test_result_page_does_not_require_search_inputs(self):
         self.assertEqual(preflight(Mock(call=Mock(return_value=self.capabilities(
-            core_search_route=False, query_input_count=0)))), {"extension_version": "0.4.4"})
+            core_search_route=False, query_input_count=0)))), {"extension_version": "0.4.9"})
 
     def test_smart_navigation_only_and_delayed_inputs_do_not_block_preparation(self):
         bridge = Mock(call=Mock(return_value=self.capabilities(query_input_count=0, busy=True)))
-        self.assertEqual(preflight(bridge), {"extension_version": "0.4.4"})
+        self.assertEqual(preflight(bridge), {"extension_version": "0.4.9"})
         bridge.call.assert_called_once_with("wos_diagnose", {}, timeout=25)
 
     def test_only_known_tab_delimited_preview_can_pass_dialog_gate(self):
         self.assertEqual(preflight(Mock(call=Mock(return_value=self.capabilities(
-            dialog_count=2, export_dialog=True))), resume_export=True), {"extension_version": "0.4.4"})
+            dialog_count=2, export_dialog=True))), resume_export=True), {"extension_version": "0.4.9"})
         with self.assertRaisesRegex(SafetyStop, "操作弹窗"):
             preflight(Mock(call=Mock(return_value=self.capabilities(dialog_count=2, export_dialog=True))))
         for flag in (None, False, "true", 1):
@@ -183,10 +189,49 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual([c.args[0] for c in self.bridge.call.call_args_list], ["wos_export_status"])
         self.assertEqual(self.store.get(self.record)["phase"], "export_intent")
 
+    def test_explicit_pre_click_rejection_keeps_a_safe_preparing_checkpoint(self):
+        error = "[扩展 0.4.9] [WOS 已暂停] 未处于 WOS 核心合集单篇完整记录页"
+        self.bridge.call.side_effect = [dict(ready=True, record_url=self.url),
+            dict(ready=True, record_url=self.url), BrowserRejected("wos_export", error)]
+        with self.assertRaises(BrowserRejected):
+            self.flow.prepare(self.record)
+        state = self.store.get(self.record)
+        self.assertEqual(state["phase"], "export_preparing")
+        self.assertEqual(state["rejected_before_click"], error)
+        self.bridge.call.side_effect = None
+        self.flow.prepare(self.record)
+        self.assertEqual([c.args[0] for c in self.bridge.call.call_args_list][-2:],
+                         ["wos_export_prepare", "wos_export"])
+
+    def test_unknown_replies_and_timeouts_never_rewind_final_export(self):
+        pre_click = "[扩展 0.4.9] [WOS 已暂停] 未处于 WOS 核心合集单篇完整记录页"
+        errors = [SafetyStop(pre_click), BrowserRejected("other_action", pre_click),
+                  BrowserRejected("wos_export", "导出预览失效或已提交"),
+                  BrowserRejected("wos_export", "命令超时"),
+                  BrowserRejected("wos_export", pre_click + " extra")]
+        for index, error in enumerate(errors):
+            with self.subTest(error=str(error)):
+                self.flow.store = ImportStore(self.root / f"unknown-{index}")
+                self.bridge.call.side_effect = [dict(ready=True, record_url=self.url),
+                    dict(ready=True, record_url=self.url), error]
+                with patch("wos_batch.time.sleep"), patch.object(self.stop, "wait", return_value=False):
+                    with self.assertRaises(SafetyStop):
+                        self.flow.prepare(self.record)
+                self.assertEqual(self.flow.store.get(self.record)["phase"], "export_intent")
+
     def test_uncertain_export_then_manual_file_resumes_without_any_browser_action(self):
         self.store.save(self.record, {"phase": "export_intent", "record_url": self.url})
         self.make_download()
         self.assertEqual(self.flow.prepare(self.record)["phase"], "downloaded")
+        self.bridge.call.assert_not_called()
+
+    def test_title_only_old_intent_recovers_correlated_txt_on_search_page_without_browser(self):
+        record = replace(self.record, doi="")
+        self.store.save(record, {"phase": "export_intent", "record_url": self.url})
+        self.make_download()
+        result = self.flow.prepare(record)
+        self.assertEqual(result["phase"], "downloaded")
+        self.assertFalse(result["identity_confirmed"], "recovery is not automatic import authorization")
         self.bridge.call.assert_not_called()
 
     def test_unsubmitted_owned_preview_is_only_permitted_export_resume(self):
@@ -200,6 +245,28 @@ class DownloadTests(unittest.TestCase):
         self.store.save(self.record, {"phase": "export_preparing", "record_url": self.url})
         self.flow.prepare(self.record)
         self.assertEqual([c.args[0] for c in self.bridge.call.call_args_list], ["wos_export_prepare", "wos_export"])
+
+    def test_lost_preparing_page_can_find_same_ut_once_then_export(self):
+        self.store.save(self.record, {"phase": "export_preparing", "record_url": self.url})
+        error = BrowserRejected("wos_export_prepare", "[扩展 0.4.9] [WOS 已暂停] 未处于 WOS 核心合集单篇完整记录页")
+        self.bridge.call.side_effect = [error, {"record_url": self.url},
+            {"ready": True, "record_url": self.url}, {"sa_id": self.record.sa_id, "path": str(self.path)}]
+        self.assertEqual(self.flow.prepare(self.record)["phase"], "downloaded")
+        self.assertEqual([c.args[0] for c in self.bridge.call.call_args_list],
+                         ["wos_export_prepare", "wos_search", "wos_export_prepare", "wos_export"])
+
+    def test_lost_preparation_cannot_select_a_new_ut_or_loop(self):
+        error = BrowserRejected("wos_export_prepare", "[WOS 已暂停] 未处于 WOS 核心合集单篇完整记录页")
+        for search, last in (({"record_url": self.url.replace('789012', '789013')}, None),
+                             ({"record_url": self.url}, error)):
+            self.store.save(self.record, {"phase": "export_preparing", "record_url": self.url})
+            self.bridge.call.reset_mock()
+            self.bridge.call.side_effect = [error, search] + ([last] if last else [])
+            with self.assertRaises(SafetyStop):
+                self.flow.prepare(self.record)
+            calls = [c.args[0] for c in self.bridge.call.call_args_list]
+            self.assertEqual(calls.count("wos_search"), 1)
+            self.assertNotIn("wos_export", calls)
 
     def test_unrelated_file_cannot_resolve_unknown_export(self):
         self.store.save(self.record, {"phase": "export_intent", "record_url": self.url})

@@ -87,14 +87,29 @@ async function runSACommand(command) {
       snap(row);
       return row;
     };
-    // Status precheck deliberately does not open or close a detail drawer.
-    // It can continue when a read-only drawer is lazily unrendered, but never
-    // changes the list search while a visible edit/confirmation UI is open.
+    // Status never opens/closes a drawer. A previous read of THIS record can
+    // leave its read-only detail visible; that must not block journal recovery.
+    // Other records, edits, claim selections and unknown windows still stop.
     if (command.action === "status") {
-      if (visibleAll(".el-dialog, .el-message-box, .el-drawer").length)
-        stop("网页有未关闭的窗口，请人工处理后再预检");
+      const guardSurface = () => {
+        const windows = visibleAll(".el-dialog, .el-message-box, .el-drawer");
+        if (!windows.length) return;
+        const detail = vm.$refs?.compareDetailDrawer;
+        const surfaces = (detail?.$children || []).filter(child => child.$options?.name === "ElDrawer");
+        const ui = surfaces.length === 1 ? surfaces[0] : null, panel = ui?.$refs?.drawer;
+        const childOpen = Object.values(detail?.$refs || {}).some(child =>
+          child?.drawer === true || child?.dialogVisible === true || child?.dialogModalVisible === true);
+        if (windows.length !== 1 || windows[0] !== panel || !panel?.isConnected ||
+            !panel.matches(".el-drawer") || !ui.$el?.contains?.(panel) || ui.visible !== true ||
+            detail.dialogVisible !== true || detail.currentSaLzkId !== command.sa_id ||
+            detail.dialogLoading || childOpen || vm.$refs?.compareStatusDialog?.dialogVisible)
+          stop("网页有未关闭的窗口，请人工处理后再预检");
+      };
+      guardSurface();
       if (vm.loading) stop("列表仍在加载，请等待后重查");
-      return {ok: true, data: {row: snap(await fresh()), non_sjtu_completion_protocol: 1}};
+      const row = snap(await fresh());
+      guardSurface();
+      return {ok: true, data: {row, non_sjtu_completion_protocol: 1}};
     }
     const drawer = vm.$refs?.compareDetailDrawer;
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");

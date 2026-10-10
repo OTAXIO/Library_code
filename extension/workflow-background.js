@@ -18,8 +18,10 @@ const decodedWOSPath = url => {
   try {const u=new URL(url);return /%(?:2f|5c)/i.test(u.pathname)?"":decodeURIComponent(u.pathname);}
   catch {return "";}
 };
+const wosRecordPagePath = url => decodedWOSPath(url).match(
+  /^(\/wos\/woscc\/full-record\/WOS:\d{15})(?:\/|\(overlay:export\/ext\)\/?)?$/)?.[1] || '';
 const isWOSRecordPage = (url,origin) => {
-  try {const u=new URL(url);return isWOSPage(url) && u.origin===origin && /^\/wos\/woscc\/full-record\/WOS:\d{15}\/?$/.test(decodedWOSPath(url));}
+  try {const u=new URL(url);return isWOSPage(url) && u.origin===origin && Boolean(wosRecordPagePath(url));}
   catch {return false;}
 };
 const transientInjectionError = error => /(?:execution context (?:was )?destroyed|frame (?:with ID \d+ )?(?:was removed|is not ready)|no frame with id|cannot find context with specified id|WOS 只读探针在页面切换期间未返回结果|WOS 只读探针响应超时)/i.test(String(error?.message||error));
@@ -70,8 +72,8 @@ function isExpectedWOSDownload(item,recordURL) {
     else if(download.protocol!=="https:" || download.username || download.password)return false;
     if(item.referrer) {
       const ref=new URL(item.referrer);
-      const refPath=/%(?:2f|5c)/i.test(ref.pathname)?"":decodeURIComponent(ref.pathname);
-      return !ref.username && !ref.password && ref.origin===record.origin && refPath===recordPath;
+      const refPath=wosRecordPagePath(item.referrer);
+      return !ref.username && !ref.password && ref.origin===record.origin && refPath===recordPath.replace(/\/$/,'');
     }
     return download.protocol==="blob:";
   } catch {return false;}
@@ -88,7 +90,7 @@ async function dispatchWorkflow(command,pair) {
   // are not throttled. Diagnostics remain read-only and do not switch tabs.
   if(command.action!=="wos_diagnose" && tab.active===false)
     await chrome.tabs.update(id,{active:true});
-  const execute=async(fn,cmd)=>{
+  const execute=async(fn,cmd,probeWorld)=>{
     const current=await chrome.tabs.get(id);
     if(!validRolePage(current.url,role))throw new Error("工作标签页目标发生变化");
     if(role==="wosTabId" && new URL(current.url).origin!==workOrigin)throw new Error("WOS 域名在执行中发生变化，请核验页面后重新绑定");
@@ -96,12 +98,13 @@ async function dispatchWorkflow(command,pair) {
     // have not finished. Do not defer its semantic DOM checks to document_idle.
     // The adapter itself waits for the required controls. Backend import timing
     // remains unchanged. See Chrome's ScriptInjection.injectImmediately API.
-    // Result probes are read-only. Use the same isolated JS environment as
-    // inspectWorkPage so the site's overridden globals/DOM prototypes cannot
-    // make a visible record readable in diagnostics but absent during a run.
-    // Search/export/import interactions retain their existing MAIN environment.
+    // Result probes normally use ISOLATED. A narrowly scoped MAIN read may
+    // corroborate a mounted one-result page when that probe misses its link.
+    // Neither probe clicks, navigates or reads private page state.
     const readOnly=["wos_read_results","wos_diagnose","wos_export_probe"].includes(cmd.action);
-    const world=readOnly?"ISOLATED":"MAIN";
+    if(probeWorld!==undefined&&(!readOnly||cmd.action!=="wos_read_results"||probeWorld!=="MAIN"))
+      throw new Error("未知只读探针环境，未执行");
+    const world=probeWorld||(readOnly?"ISOLATED":"MAIN");
     const pending=chrome.scripting.executeScript({target:{tabId:id},world,func:fn,args:[cmd],
       ...(role==="wosTabId"?{injectImmediately:true}:{})});
     const results=readOnly?await boundedWOSProbe(pending,cmd.expires):await pending;
@@ -254,6 +257,28 @@ async function dispatchWorkflow(command,pair) {
       }
       if(!probe.ok)return probe;
       lastDiagnostic=probe.data?.diagnostic;
+      if(probe.data?.state==="loading"&&lastDiagnostic?.summary_route===true&&
+          lastDiagnostic.result_total===1&&lastDiagnostic.result_total_conflict===false&&
+          lastDiagnostic.canonical_record_link_count===0&&lastDiagnostic.busy===false){
+        // Live WOS returned one document but its title route was readable only
+        // in MAIN. Read the SAME bounded DOM-only function there; do not infer
+        // a URL from a title, attributes unrelated to routes, or card count.
+        let corroboration;
+        try{corroboration=await execute(inspectWorkPage,{...command,action:"wos_read_results"},"MAIN");}
+        catch(error){
+          if(transientInjectionError(error)){await new Promise(r=>setTimeout(r,500));continue;}
+          throw error;
+        }
+        if(!corroboration.ok)return corroboration;
+        const evidence=corroboration.data?.diagnostic;
+        if(corroboration.data?.state==="single"&&evidence?.summary_route===true&&
+            evidence.result_total===1&&evidence.result_total_conflict===false&&
+            evidence.canonical_record_link_count===1&&evidence.busy===false){
+          probe=corroboration;
+          lastDiagnostic={...evidence,corroborated_main:true};
+        }else if(["zero","multiple","record"].includes(corroboration.data?.state))
+          throw new Error("WOS 两次只读结果证据不一致，未导出或入库");
+      }
       const state=probe.data?.state;
       if(state==="zero")return {ok:false,error:"[WOS 已暂停] WOS 未找到记录；这不等于未发表，也不自动标记完成"};
       if(state==="multiple")return {ok:false,error:"[WOS 已暂停] WOS 结果不是可确认的唯一记录，请人工选择并核对后使用“只下载 WOS 当前打开的论文”"};
@@ -281,7 +306,10 @@ async function dispatchWorkflow(command,pair) {
           // click again, and do not classify this normal transition as a failure.
         }else{
           navigated=true;navigationTarget=target;
-          await chrome.tabs.update(id,{url:target});
+          const opened=await execute(runWOSCommand,{...command,action:'wos_open_result',navigate_url:target});
+          if(!opened.ok)return opened;
+          if(opened.data?.submitted!==true||opened.data?.navigate_url!==target)
+            throw new Error('WOS 单篇链接点击回执未确认，未重复点击；请核验当前网页');
         }
       } else if(!["loading","record"].includes(state))throw new Error("WOS 返回了未知检索状态，请人工核验");
       await new Promise(r=>setTimeout(r,500));
@@ -310,7 +338,7 @@ async function dispatchWorkflow(command,pair) {
         if(!reloaded&&Date.now()-blankSince>=1500){
           const current=await chrome.tabs.get(id);
           if(!isWOSRecordPage(current.url,workOrigin)||
-              command.record_url&&decodedWOSPath(current.url).replace(/\/$/,'')!==decodedWOSPath(command.record_url).replace(/\/$/,''))
+              command.record_url&&wosRecordPagePath(current.url)!==wosRecordPagePath(command.record_url))
             throw new Error('白屏恢复目标与已核验的 WOS 单篇记录不一致，未刷新');
           reloaded=true;await chrome.tabs.reload(id);
         }

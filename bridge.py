@@ -16,6 +16,13 @@ from core import SafetyStop
 HEARTBEAT_TIMEOUT = 30
 
 
+class BrowserRejected(SafetyStop):
+    """An explicit completed negative reply, distinct from a lost/unknown ACK."""
+    def __init__(self, action, message):
+        super().__init__(message)
+        self.action = action
+
+
 class LoopbackServer(ThreadingHTTPServer):
     # Windows SO_REUSEADDR can silently share a listener with another assistant,
     # sending pairing requests to the wrong process. Fail safely instead.
@@ -135,6 +142,9 @@ class Bridge:
                             "deadline": time.monotonic() + timeout}
         try:
             response = result.get(timeout=timeout)
+            if (isinstance(response, dict) and response.get("ok") is False
+                    and isinstance(response.get("error"), str) and response["error"]):
+                raise BrowserRejected(action, response["error"])
             if not isinstance(response, dict) or not response.get("ok"):
                 raise SafetyStop(str(response.get("error", "浏览器返回未知结果")) if isinstance(response, dict) else "浏览器结果格式异常")
             return response.get("data", {})

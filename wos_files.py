@@ -51,11 +51,11 @@ def read_export(path):
     return raw, parse_wos(raw)
 
 
-def matches(record, candidate, expected_url=""):
+def matches(record, candidate, expected_url="", *, correlated=False):
     identifiers = {"doi": doi(record.doi), "wos": wos(record.wos)}
     if expected_url and candidate["wos"] != record_ut(expected_url):
         return False
-    return bool((identifiers["doi"] or identifiers["wos"])
+    return bool((identifiers["doi"] or identifiers["wos"] or correlated and expected_url)
                 and norm(record.title) == norm(candidate["title"])
                 and all(not value or candidate[key] == value for key, value in identifiers.items()))
 
@@ -70,11 +70,11 @@ def download_paths(folder):
                    and p.is_file() and not p.is_symlink()), key=lambda p: p.name.casefold())
 
 
-def find_export(record, folders, expected_url=""):
+def find_export(record, folders, expected_url="", *, correlated=False):
     """Conflicting Full Records stop; equivalent copies do not cause re-export."""
     if expected_url:
         record_ut(expected_url)
-    if not (doi(record.doi) or wos(record.wos)):
+    if not (doi(record.doi) or wos(record.wos) or correlated and expected_url):
         return None  # A title alone never adopts an unrelated historical download.
     found = []
     for folder in folders:
@@ -83,7 +83,7 @@ def find_export(record, folders, expected_url=""):
                 raw, candidate = read_export(path)
             except SafetyStop:
                 continue
-            if matches(record, candidate, expected_url):
+            if matches(record, candidate, expected_url, correlated=correlated):
                 found.append((path, raw, candidate))
     if not found:
         return None

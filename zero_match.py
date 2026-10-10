@@ -23,6 +23,7 @@ from core import SafetyStop
 from roster_write import mark_skipped_many, reconcile_processed, record_data_sources
 from wos_batch import WOSDownload, preflight
 from wos_policy import WOSPolicyStop, require_no_author_review, zero_result_note
+from skip_notes import brief_skip_note
 
 OWNER = "谭勋策"
 COMPLETION_NOTE = "WOS补充入库；已核验平台关联"
@@ -184,11 +185,12 @@ def verify_comparison(comparison, candidate, record, allow_unclaimed=False):
 
 
 def run_batch(roster, records, sa, download, imports, workflow, stop,
-              progress=lambda _: None, audit=lambda *args: None):
+              progress=lambda _: None, audit=lambda *args: None, *, retry_skipped=False):
     """Explicitly authorized one-click workflow; a write failure halts, not retries."""
     records = list(records)
     if (not 1 <= len(records) <= 100 or len({r.sa_id for r in records}) != len(records) or
-            any(r not in roster.records or r.owner != OWNER or r.done or r.matches != 0 for r in records)):
+            type(retry_skipped) is not bool or
+            any(r not in roster.records or r.owner != OWNER or r.matches != 0 for r in records)):
         raise SafetyStop("补录范围包含重复、他人或非零匹配任务，未开始。")
     result = BatchResult(roster, remaining=len(records))
     def record_operation(action, outcome, sa_id):
@@ -271,6 +273,14 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
     for position, original in enumerate(records, 1):
         evidence = {}
         record = next(r for r in result.roster.records if r.sa_id == original.sa_id)
+        # Enforce the scope at the executor too, not only in the UI's selector.
+        # Never open/search/download a skipped task from a stale ordinary queue.
+        if record.done or record.skipped and not retry_skipped:
+            result.outcomes.append({"sa_id": record.sa_id, "title": record.title,
+                "status": "already_done" if record.done else "already_skipped",
+                "message": "名单已完成，未重复执行" if record.done else "名单已跳过，未重复执行：" + record.remark})
+            result.remaining -= 1
+            continue
         if stop.is_set():
             result.halted, result.reason = True, "已暂停；未执行项目保持原样。"
             break
@@ -453,6 +463,7 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
         except SafetyStop as exc:
             note = exc.note if isinstance(exc, (WOSPolicyStop, PaperSkip)) else zero_result_note(str(exc))
             if note and (isinstance(exc, (PaperSkip, WOSPolicyStop)) or stage == "下载并核验 TXT"):
+                note = brief_skip_note(note)
                 try:
                     saved = mark_skipped_many(result.roster, [record], reasons={record.sa_id: note})
                 except Exception as write_error:
@@ -460,8 +471,9 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
                     result.outcomes.append({"sa_id": record.sa_id, "title": record.title, "status": "halted", "message": result.reason})
                     break
                 result.roster = saved.roster
-                record_operation("记录跳过原因及状态", "已执行", record.sa_id)
-                result.outcomes.append({"sa_id": record.sa_id, "title": record.title, "status": "skip", "message": note, **evidence})
+                record_operation("记录跳过：" + str(exc), "已跳过", record.sa_id)
+                result.outcomes.append({"sa_id": record.sa_id, "title": record.title,
+                    "status": "skip", "message": note, "detail": str(exc), **evidence})
                 result.remaining -= 1
                 continue
             result.halted, result.reason = True, f"{stage}：{exc}"

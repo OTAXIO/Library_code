@@ -101,7 +101,9 @@ const fixture=fs.readFileSync(path.join(__dirname,'fixtures/wos-navigation.html'
       const query={sa_id:'offline-one',title:'Synthetic paper',doi:'10.1234/test',wos:''};
       const searched=await invoke('wos_search',query);
       assert.equal(searched.ok,true,JSON.stringify(searched));
-      assert.equal(site.url(),origin+'/wos/woscc/full-record/WOS:000123456789012');
+      assert.equal(new URL(site.url()).origin,origin);
+      assert.equal(decodeURIComponent(new URL(site.url()).pathname),'/wos/woscc/full-record/WOS:000123456789012',
+        'the site title link may preserve the encoded colon; the exact UT must remain the same');
       assert.equal(searches.filter(value=>value===origin).length,1,'Search is not repeated across real navigations');
       assert.deepEqual(queries.filter(item=>item.origin===origin).map(item=>item.query),
         ['Missing synthetic paper','Missing synthetic paper','10.1234/test'],'exactly one Search per paper despite full-navigation preparation and slow hydration');

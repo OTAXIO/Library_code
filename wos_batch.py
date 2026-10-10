@@ -6,8 +6,19 @@ import time
 from pathlib import Path
 
 from automation import ImportStore, doi, wos, norm
+from bridge import BrowserRejected
 from core import SafetyStop
 from wos_files import archive_export, find_export, read_export, record_ut
+
+
+def rejected_before_export(message):
+    # These fixed adapter failures are emitted by fingerprint(), before
+    # wos_check_export/wos_download can submit. A post-click context failure,
+    # submitted/invalid preview or any unrecognized error remains uncertain.
+    return bool(re.fullmatch(
+        r"(?:\[扩展 \d+\.\d+\.\d+\] )?\[WOS 已暂停\] "
+        r"(?:未处于 WOS 核心合集单篇完整记录页|WOS 页面已不是本次检索确认的单篇记录，未导出)",
+        str(message)))
 
 
 def preflight(bridge, *, resume_export=False):
@@ -18,7 +29,7 @@ def preflight(bridge, *, resume_export=False):
         result = bridge.call("wos_diagnose", {}, timeout=25)
     except SafetyStop as exc:
         if "未知 WOS 调度命令" in str(exc):
-            raise SafetyStop("当前插件仍是旧版本，请重载 0.4.4、刷新工作页并重新绑定；尚未提交检索。") from exc
+            raise SafetyStop("当前插件仍是旧版本，请重载 0.4.10、刷新工作页并重新绑定；尚未提交检索。") from exc
         raise
     if (not isinstance(result, dict) or type(result.get("wos_download_protocol")) is not int
             or result.get("wos_download_protocol") != 1
@@ -29,8 +40,8 @@ def preflight(bridge, *, resume_export=False):
             or result.get("result_reader") != "shared-diagnostic"
             or result.get("read_results_world") != "ISOLATED"
             or not re.fullmatch(r"\d+\.\d+\.\d+", str(result.get("extension_version", "")))
-            or tuple(map(int, result["extension_version"].split("."))) < (0, 4, 4)):
-        raise SafetyStop("插件下载接口不兼容，请重载 0.4.4、刷新 WOS 页并重新绑定；未提交检索或下载。")
+            or tuple(map(int, result["extension_version"].split("."))) < (0, 4, 9)):
+        raise SafetyStop("插件下载接口不兼容，请重载 0.4.10、刷新 WOS 页并重新绑定；未提交检索或下载。")
     page = result.get("page")
     if (not isinstance(page, dict)
             or any(type(page.get(k)) is not bool for k in ("core_search_route", "wos_error", "site_timeout", "login_required", "busy"))
@@ -75,9 +86,10 @@ class WOSDownload:
         self.audit("核验并存档 WOS TXT", "已执行", record.sa_id)
         return state
 
-    def _recover_file(self, record, expected_url="", expected_sha=""):
+    def _recover_file(self, record, expected_url="", expected_sha="", *, correlated=False):
         self._guard()
-        found = find_export(record, (self.download_dir, self.store.root / "未关联下载"), expected_url)
+        found = find_export(record, (self.download_dir, self.store.root / "未关联下载"), expected_url,
+                            correlated=correlated)
         if found and expected_sha and found[2]["sha256"] != expected_sha:
             raise SafetyStop("下载目录 TXT 与原存档校验码不一致，不替换历史文件。")
         return self._save_file(record, *found, expected_url) if found else None
@@ -95,7 +107,8 @@ class WOSDownload:
             try:
                 self.store.bytes(cached)
             except OSError:
-                recovered = self._recover_file(record, cached.get("record_url", ""), cached["candidate"]["sha256"])
+                recovered = self._recover_file(record, cached.get("record_url", ""), cached["candidate"]["sha256"],
+                                               correlated=bool(cached.get("record_url")))
                 if recovered:
                     return recovered
                 raise SafetyStop("已存档 TXT 缺失，下载目录也未找到原文件；不重复导出，请检查备份。") from None
@@ -103,7 +116,12 @@ class WOSDownload:
             return cached
         progress("核查下载目录中已完成的 WOS TXT（按内容匹配，不按最新文件）")
         expected_url = cached.get("record_url", "") if cached else ""
-        recovered = self._recover_file(record, expected_url)
+        # The durable journal is keyed to these unchanged SA facts and its UT
+        # came from this task's unique WOS search. It can recover the matching
+        # download even when SA omitted both identifiers. This does NOT promote
+        # title-only evidence into permission to import or close a task.
+        correlated = bool(cached and expected_url and cached.get("phase") in ("export_preparing", "export_intent"))
+        recovered = self._recover_file(record, expected_url, correlated=correlated)
         if recovered:
             progress("已接回下载目录中的同篇 TXT，原件保留；继续核验交大归属")
             return recovered
@@ -132,7 +150,26 @@ class WOSDownload:
         else:
             self._guard()
             progress("准备 Tab delimited / Full Record；白屏时仅在导出前恢复一次")
-            prepared = self.bridge.call("wos_export_prepare", query, timeout=75)
+            try:
+                prepared = self.bridge.call("wos_export_prepare", query, timeout=75)
+            except BrowserRejected as exc:
+                if exc.action != "wos_export_prepare" or not rejected_before_export(exc):
+                    raise
+                # Preparation has never reached final Export. If a refresh or
+                # page change lost the record, repeat only this completed search
+                # once, require the SAME prior UT, then prepare a fresh preview.
+                # export_intent / unknown ACKs never enter this branch.
+                self._guard()
+                progress("尚未提交最终 Export，重新检索找回同一入藏号；不会导出别篇论文")
+                searched = self.bridge.call("wos_search", query, timeout=120)
+                if (not isinstance(searched, dict)
+                        or record_ut(searched.get("record_url", "")) != record_ut(expected_url)):
+                    raise SafetyStop("找回的 WOS 入藏号与导出断点不一致，未导出。")
+                expected_url = searched["record_url"]
+                query["record_url"] = expected_url
+                self.store.save(record, {"phase": "export_preparing", "record_url": expected_url})
+                self._guard()
+                prepared = self.bridge.call("wos_export_prepare", query, timeout=75)
             if (not isinstance(prepared, dict) or prepared.get("ready") is not True
                     or record_ut(prepared.get("record_url", "")) != record_ut(expected_url)):
                 raise SafetyStop("未确认完整记录导出预览，未点击最终 Export。")
@@ -141,13 +178,20 @@ class WOSDownload:
         progress("点击弹窗最终 Export 并等待 TXT；不会重复提交")
         try:
             result = self.bridge.call("wos_export", {**query, "prepared": True}, timeout=75)
-        except SafetyStop:
+        except SafetyStop as exc:
+            if (isinstance(exc, BrowserRejected) and exc.action == "wos_export"
+                    and rejected_before_export(exc)):
+                # The authenticated reply proves the final click never began.
+                # Retain that receipt; a refreshed modal may be prepared again.
+                self.store.save(record, {"phase": "export_preparing", "record_url": expected_url,
+                                         "rejected_before_click": str(exc)})
+                raise
             # Some genuine HTTPS downloads have no full-record referrer. Keep
             # the browser boundary strict; adopt local bytes only by exact
             # title + supplied identifier + the searched UT, never by recency.
             progress("导出回执未完成，核查本地对应 TXT（不重新点击 Export）")
             for _ in range(6):
-                recovered = self._recover_file(record, expected_url)
+                recovered = self._recover_file(record, expected_url, correlated=True)
                 if recovered:
                     return recovered
                 if self.stop is not None:

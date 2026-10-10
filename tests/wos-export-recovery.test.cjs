@@ -112,11 +112,15 @@ test('only a searched canonical target can hand a blank record to export prepara
   const calls=[];
   const sandbox={URL,Date,setTimeout,clearTimeout,runWOSCommand(){},inspectWorkPage(){},chrome:{
     tabs:{get:async()=>({id:2,active:true,url:navigated?record:origin+'/wos/woscc/basic-search'}),
-      update:async(id,change)=>{assert.equal(change.url,record);navigated=true;}},
+      update:async()=>{throw Error('must follow the title link, not hard-reload the result');}},
     scripting:{executeScript:async input=>{
       const cmd=input.args[0];calls.push(cmd.action);
       if(cmd.action==='wos_prepare_search')return [{result:ok({state:'ready'})}];
       if(cmd.action==='wos_start_search'){started=true;return [{result:ok({submitted:true})}];}
+      if(input.args[0].action==='wos_open_result'){
+        assert.equal(input.args[0].navigate_url,record);navigated=true;
+        return [{result:ok({submitted:true,navigate_url:record})}];
+      }
       return [{result:ok(navigated?{state:'loading',diagnostic:{record_route:true,blank_record:true,busy:false}}:
         {state:'single',navigate_url:record})}];
     }}

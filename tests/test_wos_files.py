@@ -67,6 +67,13 @@ class IntakeTests(unittest.TestCase):
     def test_search_record_ut_also_required(self):
         self.assertIsNone(find_export(self.record, [self.root], self.url.replace("000123456789012", "000999999999999")))
 
+    def test_title_only_recovery_needs_explicit_journal_correlation_and_exact_ut(self):
+        record = replace(self.record, doi="")
+        self.assertIsNone(find_export(record, [self.root], self.url))
+        self.assertIsNone(find_export(record, [self.root], correlated=True))
+        self.assertEqual(find_export(record, [self.root], self.url, correlated=True)[0], self.path)
+        self.assertIsNone(find_export(record, [self.root], self.url.replace("000123456789012", "000999999999999"), correlated=True))
+
     def test_conflicting_exports_stop_even_if_same_title_and_doi(self):
         (self.root / "savedrecs (1).txt").write_bytes(sample(PY="2025"))
         with self.assertRaisesRegex(SafetyStop, "内容不同"):

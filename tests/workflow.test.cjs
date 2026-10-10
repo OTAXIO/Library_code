@@ -34,6 +34,59 @@ const cmd=(action,more={})=>({action,sa_id:'demo-001',instructions:'SA补充-dem
     assert.deepEqual((await execute(cmd('import_scan'))).data.batches,[]);
     assert.deepEqual(await page.evaluate(()=>writes),{upload:0,import:0,push:0});
   });
+  test('changing batch total discards a partial scan and restarts read-only from page one',async()=>{
+    await page.evaluate(()=>{
+      const filler=i=>({id:'other-'+i,instructions:'Other task',source:'WOS'});
+      batches.push(...Array.from({length:101},(_,i)=>filler(i)));
+      window.batchPages=[];let changed=false;const getData=vm.getData;
+      vm.getData=function(page,size,form){
+        batchPages.push(page);
+        if(page===2&&!changed){changed=true;batches.push(filler(101));}
+        return getData.call(this,page,size,form);
+      };
+    });
+    const result=await execute(cmd('import_scan'));
+    assert.equal(result.ok,true,JSON.stringify(result));assert.deepEqual(result.data.batches,[]);
+    assert.deepEqual(await page.evaluate(()=>batchPages),[1,2,1,2]);
+    assert.deepEqual(await page.evaluate(()=>writes),{upload:0,import:0,push:0});
+  });
+  test('continued batch changes stop after two read-only restarts without any upload or import',async()=>{
+    await page.evaluate(()=>{
+      const filler=i=>({id:'other-'+i,instructions:'Other task',source:'WOS'});
+      batches.push(...Array.from({length:101},(_,i)=>filler(i)));
+      window.batchPages=[];const getData=vm.getData;
+      vm.getData=function(page,size,form){
+        batchPages.push(page);if(page===2)batches.push(filler(batches.length));
+        return getData.call(this,page,size,form);
+      };
+    });
+    const result=await execute(cmd('import_scan'));
+    assert.equal(result.ok,false);assert.match(result.error,/批次总数持续变化/);
+    assert.deepEqual(await page.evaluate(()=>batchPages),[1,2,1,2,1,2]);
+    assert.deepEqual(await page.evaluate(()=>writes),{upload:0,import:0,push:0});
+  });
+  test('a submitted import resumes verification after a total change and pushes exactly once',async()=>{
+    await submit();await execute(cmd('import_scan'));
+    await page.evaluate(()=>{
+      const filler=i=>({id:'other-'+i,instructions:'Other task',source:'WOS'});
+      batches.push(...Array.from({length:100},(_,i)=>filler(i)));
+      window.batchPages=[];let changed=false;const getData=vm.getData;
+      vm.getData=function(page,size,form){
+        batchPages.push(page);
+        if(page===2&&!changed){changed=true;batches.push(filler(100));}
+        return getData.call(this,page,size,form);
+      };
+    });
+    const checked=await execute(cmd('import_check'));
+    assert.equal(checked.ok,true,JSON.stringify(checked));assert.equal(checked.data.batch.id,'batch-001');
+    assert.deepEqual(await page.evaluate(()=>batchPages),[1,2,1,2]);
+    assert.deepEqual(await page.evaluate(()=>writes),{upload:1,import:1,push:0});
+    const pushed=await execute(cmd('import_push',{batch:checked.data.batch}));
+    assert.equal(pushed.ok,true,JSON.stringify(pushed));
+    const verified=await execute(cmd('import_check',{batch_id:'batch-001',expect_pushed:true}));
+    assert.equal(verified.ok,true,JSON.stringify(verified));assert.equal(verified.data.batch.status,2);
+    assert.deepEqual(await page.evaluate(()=>writes),{upload:1,import:1,push:1});
+  });
   test('complete import and priority-merge push verify original title and identifiers',async()=>{
     await submit();
     const checked=await execute(cmd('import_check'));
@@ -190,7 +243,8 @@ const cmd=(action,more={})=>({action,sa_id:'demo-001',instructions:'SA补充-dem
       };
     });
     const r=await page.evaluate(runWOSCommand,{...cmd('wos_search'),title:'Synthetic paper'});
-    assert.equal(r.ok,true,JSON.stringify(r));assert.match(r.data.record_url,/WOS%3A000123456789012/i);
+    assert.equal(r.ok,true,JSON.stringify(r));
+    assert.equal(r.data.record_url,'https://www.webofscience.com/wos/woscc/full-record/WOS:000123456789012');
     assert.equal(await page.evaluate(()=>searches),1);
   });
   test('WOS encoded multiple records remain ambiguous and none is opened',async()=>{
