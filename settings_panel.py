@@ -92,8 +92,19 @@ class SettingsPanel:
         instance = ttk.Entry(row, textvariable=self.browser_instance)
         instance.pack(side='left', fill='x', expand=True)
         self.controls.extend([selector,instance])
-        app.button(browser_frame, '保存下载连接', self.save_browser).pack(anchor='w', pady=(8,0))
-        ttk.Label(browser_frame,text='技能通道：使用指定浏览器的新窗口下载。\n后台入库：仍需原插件配对。',
+        browser_actions = ttk.Frame(browser_frame)
+        browser_actions.pack(fill='x', pady=(8,0))
+        save_browser = app.button(browser_actions, '保存下载连接', self.save_browser)
+        check_browser = app.button(browser_actions, '检查下载连接', self.check_browser)
+        save_browser.grid(row=0, column=0, sticky='w')
+        check_browser.grid(row=0, column=1, sticky='w', padx=(8,0))
+        def fit_browser_actions(event):
+            # Keep the explicit labels legible in both compact and wide windows.
+            stacked = event.width < save_browser.winfo_reqwidth()+check_browser.winfo_reqwidth()+8
+            check_browser.grid_configure(row=1 if stacked else 0, column=0 if stacked else 1,
+                                         padx=0 if stacked else (8,0), pady=(6,0) if stacked else 0)
+        browser_actions.bind('<Configure>', fit_browser_actions)
+        ttk.Label(browser_frame,text='技能通道：后台服务和指定浏览器均须在线。\n后台入库：仍需原插件配对。',
                   wraplength=360,style='Muted.TLabel').pack(anchor='w',pady=(8,0))
         ttk.Label(page, textvariable=self.status, wraplength=850).pack(anchor="w", pady=6)
         try:
@@ -177,3 +188,28 @@ class SettingsPanel:
         def ready(models):
             self.status.set("连接成功 · " + "、".join(models) if models else "连接成功，但未返回支持的模型名。")
         self.app.run(self.app.model_client.models, ready, "测试模型服务连接…", log_action="测试模型连接")
+
+    def check_browser(self):
+        if self.app.busy:
+            return
+        from wos_browser import BrowserSkillWOS, validate_settings
+        try:
+            if self.browser_mode.get() == '原插件配对':
+                online = bool(self.app.bridge and self.app.bridge.online)
+                self.status.set('原插件已连接；仍需核对 WOS 页绑定。' if online else '原插件未连接，请先配对。')
+                return
+            if self.browser_mode.get() != '浏览器技能（无需配对）':
+                raise ValueError('请选择支持的下载连接。')
+            values = validate_settings({'transport':'browser-skill',
+                'instance_id':self.browser_instance.get().strip(), 'origin':self.browser_origin})
+        except ValueError as exc:
+            self.status.set(str(exc))
+            return
+        def check():
+            # No new Agent Window, WOS traffic, borrowing, daemon startup or secrets.
+            client = BrowserSkillWOS(self.browser_path.parent.parent, values['instance_id'], values['origin'])
+            return client.check_connection()
+        def ready(result):
+            self.status.set('Browser Skill '+result['browser_skill_version']+' 已连接；尚未检索或下载。')
+        self.status.set('正在检查下载后台服务与指定浏览器，不检索论文…')
+        self.app.run(check, ready, '检查 WOS 下载连接…', log_action='检查 WOS 下载连接')

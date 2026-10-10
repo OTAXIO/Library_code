@@ -21,6 +21,23 @@ from core import SafetyStop
 ORIGINS = ("https://webofscience.clarivate.cn", "https://www.webofscience.com")
 DEFAULTS = {"transport": "extension", "instance_id": "", "origin": ORIGINS[0]}
 
+# Never echo arbitrary CLI messages: an error may contain a page, URL or secret.
+_CLI_CODES = {"timeout", "session_busy", "not_found", "invalid_params",
+              "browser_disconnected", "extension_disconnected", "protocol_mismatch",
+              "permission_denied", "unsupported", "cancelled", "tab_not_owned",
+              "borrow_outcome_unknown"}
+_OPERATIONS = {
+    ("status",): "检查后台服务", ("browsers",): "检查浏览器连接",
+    ("session", "list"): "检查专用会话", ("session", "start"): "创建下载窗口",
+    ("session", "stop"): "关闭下载窗口", ("tab", "list"): "确认下载标签页",
+    ("debug", "start"): "开启下载诊断", ("debug", "stop"): "结束下载诊断",
+    ("debug", "export"): "保存下载诊断", ("debug", "activity"): "检查操作状态",
+    ("navigate",): "打开 WOS 页面", ("reload",): "刷新 WOS 页面",
+    ("observe",): "读取网页", ("evaluate",): "检查 WOS 页面",
+    ("click",): "点击已核验控件", ("download",): "保存 TXT",
+    ("request-help",): "等待人工处理",
+}
+
 
 class WOSBrowserStop(SafetyStop):
     """The shared browser page/session is blocked; do not dispatch another paper."""
@@ -111,14 +128,73 @@ class BrowserSkillWOS:
             data = json.loads(completed.stdout)
         except ValueError:
             raise WOSBrowserStop("浏览器技能没有返回有效 JSON；未继续下一篇。") from None
-        if completed.returncode or (isinstance(data, dict) and data.get("code")):
-            # No raw stderr, URLs, request bodies, cookies or page content in errors.
-            code = data.get("code", "cli_error") if isinstance(data, dict) else "cli_error"
-            raise WOSBrowserStop(f"浏览器技能操作失败（{code}）；当前论文未确认，已暂停整批。", code=code)
+        reported_exit = data.get("exit_code") if isinstance(data, dict) else None
+        if (completed.returncode or (isinstance(data, dict) and data.get("code"))
+                or (type(reported_exit) is int and reported_exit != 0)):
+            raise self._cli_failure(args, data, completed.returncode)
         expects_list = args[0] == "browsers" or list(args[:2]) == ["session", "list"]
         if not isinstance(data, list if expects_list else dict):
             raise WOSBrowserStop("浏览器技能返回结构不兼容；未继续下一篇。")
         return data
+
+    def _cli_failure(self, args, data, returncode):
+        """Explain local connection failures without leaking raw CLI output.
+
+        bsk's local startup/IPC errors have code=null and exit_code=2. They
+        must not become 'None', be treated as success, or as missing literature.
+        """
+        data = data if isinstance(data, dict) else {}
+        raw_code = data.get("code")
+        exit_code = returncode or data.get("exit_code")
+        if type(exit_code) is not int:
+            exit_code = 0
+        code = raw_code if isinstance(raw_code, str) and raw_code in _CLI_CODES else (
+            f"cli_exit_{exit_code}" if exit_code else "cli_error")
+        message = data.get("message")
+        message = message.lower() if isinstance(message, str) else ""
+        # Only recognize fixed local CLI prefixes, never arbitrary WOS text.
+        if message.startswith("ensure daemon is running:"):
+            if "automatic daemon startup is disabled" in message:
+                code = "daemon_unavailable"
+            elif "connect ipc named pipe" in message and any(
+                    part in message for part in ("拒绝访问", "permission denied", "access is denied", "access denied")):
+                code = "ipc_permission_denied"
+        operation = _OPERATIONS.get(tuple(args[:2]), _OPERATIONS.get(tuple(args[:1]), "浏览器操作"))
+        if code == "daemon_unavailable":
+            reason = ("浏览器技能后台服务未运行（daemon_unavailable）。\n"
+                      "请先启动服务，再到“设置 → 检查下载连接”验证；仅打开网页还不够。")
+        elif code == "ipc_permission_denied":
+            reason = ("浏览器技能的本地通信通道被拒绝访问（ipc_permission_denied）。\n"
+                      "请确认助手和服务在同一 Windows 账号的普通终端环境运行；不要重启共享服务或反复提交。")
+        else:
+            reason = f"浏览器技能在“{operation}”时失败（{code}）。"
+        if self.session is None and self.query is None:
+            reason += "\n尚未开始 WOS 检索或下载，本次不修改名单。"
+        else:
+            reason += "\n当前操作未确认，已暂停整批；先检查网页，不要重复提交。"
+        diagnostic = {"time": int(time.time()), "operation": operation, "code": code,
+                      "exit_code": exit_code, "session_created": self.session is not None,
+                      "search_pending": self.search_pending, "export_attempted": self.export_attempted,
+                      "message": reason}
+        try:
+            from paper_classify import atomic_json
+            path = self.base / "runtime" / "wos-browser" / "last-connection-error.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_json(path, diagnostic)
+        except (OSError, ValueError):
+            pass  # A diagnostic write failure must never hide the original error.
+        return WOSBrowserStop(reason, code=code)
+
+    def check_connection(self):
+        """Read-only service/profile check; no session, navigation or download."""
+        browsers = self._run(["browsers"])
+        selected = [b for b in browsers if isinstance(b, dict)
+                    and b.get("instance_id") == self.instance_id and not b.get("unresponsive")]
+        if len(selected) != 1:
+            raise WOSBrowserStop("所配置的 Browser Skill 浏览器未连接；未切换到其他浏览器。")
+        version = selected[0].get("extension_version")
+        self.version = version if isinstance(version, str) and re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", version) else "未记录"
+        return {"transport": self.transport, "browser_skill_version": self.version}
 
     def _args(self, command):
         return [command, "--session", self.session, "--tab-id", self.tab_id]
@@ -245,11 +321,7 @@ class BrowserSkillWOS:
         self._observe()
 
     def _start(self):
-        browsers = self._run(["browsers"])
-        selected = [b for b in browsers if b.get("instance_id") == self.instance_id and not b.get("unresponsive")]
-        if len(selected) != 1:
-            raise WOSBrowserStop("所配置的 Browser Skill 浏览器未连接；未切换到其他浏览器。")
-        self.version = selected[0].get("extension_version", "未记录")
+        self.check_connection()
         # A second task on the same site shares login state. Don't disturb it.
         for session in self._run(["session", "list"]):
             if session.get("browser_instance_id") != self.instance_id:

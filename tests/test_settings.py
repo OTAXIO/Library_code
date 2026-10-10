@@ -61,9 +61,36 @@ class SettingsTests(unittest.TestCase):
         self.panel.save_key()
         self.panel.save_models()
         self.panel.test_connection()
+        self.panel.check_browser()
         self.client.key_store.save.assert_not_called()
         self.client.models.assert_not_called()
         self.assertFalse(self.panel.path.exists())
+
+    def test_browser_check_is_read_only_uses_explicit_profile_and_does_not_save(self):
+        self.panel.browser_mode.set('浏览器技能（无需配对）')
+        self.panel.browser_instance.set('synthetic-profile')
+        self.panel.browser_path=self.folder/'runtime/wos_browser.json'
+        def sync(job,ready,*args,**kwargs):
+            ready(job())
+        with patch.object(self.app,'run',side_effect=sync), patch('wos_browser.BrowserSkillWOS') as factory:
+            client=factory.return_value
+            client.check_connection.return_value={'browser_skill_version':'0.3.2'}
+            self.panel.check_browser()
+            self.assertEqual(factory.call_args.args[1],'synthetic-profile')
+            client.check_connection.assert_called_once()
+            client.call.assert_not_called()
+            client._start.assert_not_called()
+        self.assertIn('尚未检索或下载',self.panel.status.get())
+        self.assertFalse(self.panel.browser_path.exists())
+        self.client.key_store.load.assert_not_called()
+
+    def test_original_plugin_connection_check_does_not_call_browser_skill(self):
+        self.panel.browser_mode.set('原插件配对')
+        with patch('wos_browser.BrowserSkillWOS') as factory, patch.object(self.app,'run') as run:
+            self.panel.check_browser()
+            factory.assert_not_called()
+            run.assert_not_called()
+        self.assertIn('原插件',self.panel.status.get())
 
     def test_empty_owner_message_is_generic(self):
         panel = self.app.automation_panel

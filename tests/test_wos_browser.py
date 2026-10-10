@@ -167,6 +167,79 @@ class BrowserFlowTests(unittest.TestCase):
         self.assertEqual(invoked.call_args.kwargs['env']['BSK_AUTO_START'],'0')
         self.assertNotIn('shell',invoked.call_args.kwargs)
 
+    def test_null_code_missing_daemon_explains_pre_search_failure_without_leaking_hint(self):
+        bridge=BrowserSkillWOS(self.base,'synthetic-profile',DEFAULTS['origin'],cli='synthetic-bsk')
+        payload={'code':None,'exit_code':2,
+                 'message':'ensure daemon is running: automatic daemon startup is disabled (BSK_AUTO_START=0)',
+                 'hint':'PRIVATE_BODY Bearer secret-value sk-private-secret-value'}
+        response=Mock(returncode=1,stdout=json.dumps(payload))
+        with patch('wos_browser.subprocess.run',return_value=response) as invoked, self.assertRaises(WOSBrowserStop) as caught:
+            bridge._run(['browsers'])
+        self.assertEqual(caught.exception.code,'daemon_unavailable')
+        self.assertIn('后台服务未运行',str(caught.exception))
+        self.assertIn('尚未开始 WOS 检索或下载',str(caught.exception))
+        self.assertNotIn('None',str(caught.exception))
+        diagnostic=(self.base/'runtime/wos-browser/last-connection-error.json').read_text(encoding='utf-8')
+        self.assertNotIn('PRIVATE_BODY',diagnostic)
+        self.assertNotIn('secret-value',diagnostic)
+        self.assertEqual(json.loads(diagnostic)['exit_code'],1)
+        self.assertEqual(invoked.call_count,1)
+        self.assertEqual(invoked.call_args.kwargs['env']['BSK_AUTO_START'],'0')
+
+    def test_permission_failure_is_not_misclassified_as_missing_daemon(self):
+        bridge=BrowserSkillWOS(self.base,'synthetic-profile',DEFAULTS['origin'],cli='synthetic-bsk')
+        response=Mock(returncode=1,stdout=json.dumps({'code':None,'exit_code':2,
+            'message':'ensure daemon is running: connect to existing daemon: connect IPC named pipe PRIVATE_PATH: 拒绝访问。 (os error 5)'}))
+        with patch('wos_browser.subprocess.run',return_value=response), self.assertRaises(WOSBrowserStop) as caught:
+            bridge._run(['browsers'])
+        self.assertEqual(caught.exception.code,'ipc_permission_denied')
+        self.assertNotIn('PRIVATE_PATH',str(caught.exception))
+        self.assertNotIn('后台服务未运行',str(caught.exception))
+
+    def test_null_unknown_error_keeps_nonzero_exit_and_does_not_assume_success(self):
+        bridge=BrowserSkillWOS(self.base,'synthetic-profile',DEFAULTS['origin'],cli='synthetic-bsk')
+        bridge.session,bridge.query='synthetic-session',self.query
+        for payload,rc,expected in (({'code':None,'message':'PRIVATE_BODY'},1,'cli_exit_1'),
+                                    ({'code':None,'exit_code':2},0,'cli_exit_2'),
+                                    ({'code':'sk-private-secret-value'},0,'cli_error')):
+            with self.subTest(payload=payload), patch('wos_browser.subprocess.run',return_value=Mock(returncode=rc,stdout=json.dumps(payload))), self.assertRaises(WOSBrowserStop) as caught:
+                bridge._run(['download','@e1'])
+            self.assertEqual(caught.exception.code,expected)
+            self.assertIn('保存 TXT',str(caught.exception))
+            self.assertIn('不要重复提交',str(caught.exception))
+            self.assertNotIn('尚未开始',str(caught.exception))
+            self.assertNotIn('PRIVATE_BODY',str(caught.exception))
+            self.assertNotIn('sk-private-secret-value',str(caught.exception))
+        response=Mock(returncode=0,stdout='{"code":null,"exit_code":0,"tabs":[]}')
+        with patch('wos_browser.subprocess.run',return_value=response):
+            self.assertEqual(bridge._run(['tab','list'])['tabs'],[])
+
+    def test_connection_check_only_reads_browser_list_never_starts_or_navigates(self):
+        bridge=BrowserSkillWOS(self.base,'synthetic-profile',DEFAULTS['origin'],cli='synthetic-bsk')
+        bridge._run=Mock(return_value=[{'instance_id':'synthetic-profile','extension_version':'0.3.2'}])
+        self.assertEqual(bridge.check_connection(),{'transport':'browser-skill','browser_skill_version':'0.3.2'})
+        bridge._run.assert_called_once_with(['browsers'])
+        self.assertIsNone(bridge.session)
+        self.assertIsNone(bridge.query)
+        bridge._run=Mock(return_value=[{'instance_id':'other-profile','extension_version':'0.3.2'}])
+        with self.assertRaisesRegex(WOSBrowserStop,'未切换'):
+            bridge.check_connection()
+
+    def test_failed_start_never_searches_exports_or_changes_a_roster(self):
+        bridge=BrowserSkillWOS(self.base,'synthetic-profile',DEFAULTS['origin'],cli='synthetic-bsk')
+        response=Mock(returncode=1,stdout='{"code":null,"exit_code":2,"message":"ensure daemon is running: automatic daemon startup is disabled"}')
+        bridge._page_action=Mock()
+        with patch('wos_browser.subprocess.run',return_value=response) as invoked, self.assertRaisesRegex(WOSBrowserStop,'后台服务未运行'):
+            preflight(bridge)
+        self.assertTrue(bridge.blocked)
+        self.assertIsNone(bridge.session)
+        self.assertIsNone(bridge.query)
+        bridge._page_action.assert_not_called()
+        self.assertEqual(invoked.call_count,1)
+        bridge.close()
+        self.assertEqual(invoked.call_count,1)
+        self.assertFalse((self.base/'list.xlsx').exists())
+
     def test_healthy_initial_form_is_reused_without_navigation(self):
         bridge=BrowserSkillWOS(self.base,'synthetic-profile',DEFAULTS['origin'],cli='synthetic-bsk')
         bridge._probe=Mock(return_value={'core_search_route':True,'query_input_count':1})
