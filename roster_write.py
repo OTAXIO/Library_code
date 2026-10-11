@@ -337,13 +337,16 @@ def record_data_sources(roster, records=(), source="WOS", backup_dir=None):
             temporary.unlink(missing_ok=True)
 
 
-def _mark_values(roster, updates, backup_dir=None, notes=None):
+def _mark_values(roster, updates, backup_dir=None, notes=None, *, preserve_notes=False):
     """Atomically write one or more workflow states after full-file verification."""
     path = roster.path
     if path.name.lower() != "list.xlsx" or not roster.completion_column:
         raise SafetyStop("只允许回写当前 list.xlsx 的完成备注列。")
     updates = list(updates)
     notes = dict(notes or {})
+    if (type(preserve_notes) is not bool or preserve_notes and
+            (not roster.status_separate or notes or any(value != 2 for _, value in updates))):
+        raise SafetyStop("不写备注的跳过须使用独立是否识别列，不能写完成或同时改备注。")
     if not updates:
         raise SafetyStop("没有需要写入的名单状态。")
     rows = set()
@@ -353,7 +356,7 @@ def _mark_values(roster, updates, backup_dir=None, notes=None):
             raise SafetyStop("任务已完成、状态无效或不属于当前名单，请重新读取。")
         if record.row in rows or (value == 2 and record.skipped and record.sa_id not in notes) or (value is None and not record.skipped):
             raise SafetyStop("跳过任务已标记或目标行重复，请重新读取。")
-        if roster.status_separate and value in (1, 2):
+        if roster.status_separate and value in (1, 2) and not preserve_notes:
             note = notes.get(record.sa_id)
             if not isinstance(note, str) or not note.strip() or len(note) > 2000:
                 raise SafetyStop("请填写本次完成备注或跳过原因，再写入是否识别。")
@@ -513,6 +516,12 @@ def migrate_status_column(roster):
 def mark_skipped_many(roster, records, backup_dir=None, reasons=None):
     """Back up and mark several safely skipped records with numeric 2."""
     return _mark_values(roster, [(record, 2) for record in records], backup_dir, reasons)
+
+
+def mark_skipped_without_note(roster, records, backup_dir=None):
+    """Write only numeric 2 in the separate flag; preserve both remark columns."""
+    return _mark_values(roster, [(record, 2) for record in records], backup_dir,
+                        preserve_notes=True)
 
 
 def clear_skipped_many(roster, records, backup_dir=None, *, clear_notes=False):

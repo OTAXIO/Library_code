@@ -20,9 +20,11 @@ from claim import sa_claim_source
 from claim_batch import automatic_claim_selection
 from approval import verify_claim_result
 from core import SafetyStop
-from roster_write import mark_skipped_many, reconcile_processed, record_data_sources
+from roster_write import (mark_skipped_many, mark_skipped_without_note,
+                          reconcile_processed, record_data_sources)
 from wos_batch import WOSDownload, preflight
-from wos_policy import WOSPolicyStop, require_no_author_review, zero_result_note
+from wos_policy import (WOSPolicyStop, NonZeroMatchSkip, match_count,
+                        require_no_author_review, zero_result_note)
 from skip_notes import brief_skip_note
 
 OWNER = "谭勋策"
@@ -34,6 +36,18 @@ class PaperSkip(SafetyStop):
     def __init__(self, message, note):
         super().__init__(message)
         self.note = note
+
+
+def verify_import_match(row, state):
+    count = match_count(row)
+    own_link = (count == 1 and state.get("phase") in
+        ("link_intent", "linked", "claim_intent", "claimed", "complete_intent", "done")
+        and isinstance(state.get("item_id"), str) and state["item_id"]
+        and str(row.get("itemId", "")).lstrip(",") == state["item_id"])
+    # Only a durable, exact association from this workflow can resume closure.
+    # Existing or unrelated matches must not download, claim or import anything.
+    if count and not own_link:
+        raise NonZeroMatchSkip("匹配数非 0，已跳过；未修改备注。")
 
 
 class WorkflowStore:
@@ -194,8 +208,9 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
     records = list(records)
     if (not 1 <= len(records) <= 100 or len({r.sa_id for r in records}) != len(records) or
             type(retry_skipped) is not bool or
-            any(r not in roster.records or r.owner != OWNER or r.matches != 0 for r in records)):
-        raise SafetyStop("补录范围包含重复、他人或非零匹配任务，未开始。")
+            any(r not in roster.records or r.owner != OWNER or
+                type(r.matches) is not int or r.matches < 0 for r in records)):
+        raise SafetyStop("补录范围包含重复、他人或无效匹配数任务，未开始。")
     result = BatchResult(roster, remaining=len(records))
     def record_operation(action, outcome, sa_id):
         try:
@@ -346,6 +361,8 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
         stage = "核验后台状态"
         progress(f"零匹配补录 {position}/{len(records)} · {stage} · {record.sa_id}")
         try:
+            if record.matches != 0:
+                raise NonZeroMatchSkip("名单匹配数非 0，已跳过；未修改备注。")
             fresh = call("status", {"sa_id": record.sa_id})
             row = fresh.get("row")
             # Already-processed rows are mirrored by their exact SA ID, even
@@ -363,6 +380,7 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
             if state.get("phase") in ("non_sjtu_complete_intent", "non_sjtu_done"):
                 raise SafetyStop("上次非交大结案尚未回读为已处理；只读续验，不重复提交或导入。")
             import_state = imports.get(record)
+            verify_import_match(row, state)
             if not import_state or import_state.get("phase") != "pushed":
                 require_no_author_review(record.reason, row.get("reason"))
             if not state and classify(record, fresh).route != "wos":
@@ -422,6 +440,11 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
                 if state["phase"] in ("link_intent", "linked", "claim_intent", "claimed", "complete_intent", "done"):
                     raise SafetyStop("曾关联的本库文献暂未查到，未重新导入或结案。")
                 stage = "上传、导入及推送"
+                latest = call("status", {"sa_id": record.sa_id})
+                verify_sa(record, latest.get("row"))
+                if latest["row"]["markStatus"] != "待处理":
+                    raise SafetyStop("导入前处理状态已改变，未上传；请只读重查。")
+                verify_import_match(latest["row"], state)
                 flow.prepare_file(record, path, candidate["sha256"])
                 imported_state = flow.proceed(record)
                 if imported_state.get("phase") != "pushed":
@@ -447,7 +470,9 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
                 if proof.get("verified") is not True:
                     raise SafetyStop("平台号关联结果未核验，不结案。")
             elif count != "1" or existing != item["id"]:
-                raise SafetyStop("SA 已关联其他/多个平台条目，停止避免覆盖。")
+                if match_count(row) > 0:
+                    raise NonZeroMatchSkip("SA 已有其他或多个匹配，已跳过；未修改备注。")
+                raise SafetyStop("SA 平台关联状态未确认，未覆盖。")
             state = {**state, "phase": state["phase"] if state["phase"] in ("claim_intent", "complete_intent") else "linked", "item_id": item["id"],
                      "note": state.get("note") or (COMPLETION_NOTE if imported else EXISTING_NOTE)}
             workflow.save(record, state)
@@ -528,6 +553,24 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
             workflow.save(record, {**state, "phase": "done"})
             result.outcomes.append({"sa_id": record.sa_id, "title": record.title, "status": "done", "message": state["note"], **evidence})
             result.remaining -= 1
+        except NonZeroMatchSkip as exc:
+            try:
+                # Explicit skipped-only retries retain their existing flag.
+                if not record.skipped:
+                    saved = mark_skipped_without_note(result.roster, [record])
+                    result.roster = saved.roster
+                else:
+                    result.roster.assert_unchanged()
+            except Exception as write_error:
+                result.halted, result.reason = True, f"跳过标记未能保存（{type(write_error).__name__}）；备注未修改，请先重读名单。"
+                result.outcomes.append({"sa_id": record.sa_id, "title": record.title,
+                    "status": "halted", "message": result.reason})
+                break
+            record_operation("匹配数非零，保留备注并标记跳过", "已跳过", record.sa_id)
+            result.outcomes.append({"sa_id": record.sa_id, "title": record.title,
+                "status": "skip", "message": str(exc), **evidence})
+            result.remaining -= 1
+            continue
         except SafetyStop as exc:
             note = exc.note if isinstance(exc, (WOSPolicyStop, PaperSkip)) else zero_result_note(str(exc))
             if note and (isinstance(exc, (PaperSkip, WOSPolicyStop)) or stage == "下载并核验 TXT"):

@@ -25,6 +25,19 @@ class WOSPolicyStop(SafetyStop):
         self.note = note
 
 
+class NonZeroMatchSkip(SafetyStop):
+    """Existing matches skip intake without changing spreadsheet/site remarks."""
+
+
+def match_count(row):
+    value = row.get("matchCount")
+    if type(value) is int and value >= 0:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[0-9]{1,10}", value.strip()):
+        return int(value)
+    raise SafetyStop("后台匹配数未确认；未跳过或修改备注。")
+
+
 def author_review_reason(*reasons):
     for reason in reasons:
         if isinstance(reason, str) and any(word in reason for word in AUTHOR_ISSUES):

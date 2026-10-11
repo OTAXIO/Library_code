@@ -10,7 +10,7 @@ from openpyxl.styles import PatternFill
 
 from core import HEADERS, QUERY_HEADER, SafetyStop, file_hash, read_roster
 from roster_write import (clear_skipped_many, mark_complete, mark_skipped_many,
-                          reconcile_processed, record_data_sources)
+                          mark_skipped_without_note, reconcile_processed, record_data_sources)
 
 
 def make_roster(path, flags=(None, 1, "1", 0, True)):
@@ -142,6 +142,46 @@ class RosterWriteTests(unittest.TestCase):
         self.assertFalse(completed.roster.records[0].skipped)
         self.assertEqual(completed.roster.records[0].remark, "1")
         self.assertTrue(completed.roster.records[2].skipped)
+
+    def test_note_free_skip_only_changes_separate_flag_and_preserves_existing_notes(self):
+        from xml.etree import ElementTree as ET
+        make_roster(self.path, [None, None, None])
+        book = load_workbook(self.path)
+        sheet = book["名单"]
+        sheet.cell(1, 14, "数据来源")
+        sheet.cell(1, 15, "是否识别")
+        sheet["A2"] = "已有备注，不覆盖"
+        sheet["N2"] = "已有来源"
+        book.save(self.path)
+        book.close()
+        roster = read_roster(self.path)
+        before = self.path.read_bytes()
+        with zipfile.ZipFile(self.path) as archive:
+            parts = {name: archive.read(name) for name in archive.namelist()}
+        saved = mark_skipped_without_note(roster, roster.records[:2])
+        self.assertEqual(saved.cells, ("O2", "O3"))
+        self.assertEqual(saved.backup.read_bytes(), before)
+        self.assertEqual([r.remark for r in saved.roster.records], ["已有备注，不覆盖", "", ""])
+        self.assertEqual([r.skipped for r in saved.roster.records], [True, True, False])
+        self.assertEqual(saved.roster.records[0].source, "已有来源")
+        with zipfile.ZipFile(self.path) as archive:
+            self.assertEqual([name for name in archive.namelist() if archive.read(name) != parts[name]],
+                             ["xl/worksheets/sheet1.xml"])
+            ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+            cells = lambda raw: {c.attrib["r"]: ET.tostring(c) for c in ET.fromstring(raw).iter(ns + "c")}
+            old, new = cells(parts["xl/worksheets/sheet1.xml"]), cells(archive.read("xl/worksheets/sheet1.xml"))
+            self.assertEqual({k: v for k, v in old.items() if k not in ("O2", "O3")},
+                             {k: v for k, v in new.items() if k not in ("O2", "O3")})
+        # Existing normal skip calls still require a meaningful reason.
+        with self.assertRaises(SafetyStop):
+            mark_skipped_many(saved.roster, [saved.roster.records[2]])
+
+    def test_note_free_skip_refuses_legacy_first_column_flag(self):
+        roster = read_roster(self.path)
+        before = file_hash(self.path)
+        with self.assertRaises(SafetyStop):
+            mark_skipped_without_note(roster, [roster.records[0]])
+        self.assertEqual(file_hash(self.path), before)
 
     def test_clear_skipped_many_only_clears_numeric_two(self):
         make_roster(self.path, [2, "2", 2.0, 1, None])

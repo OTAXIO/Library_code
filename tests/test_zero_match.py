@@ -264,6 +264,137 @@ class ZeroMatchTests(unittest.TestCase):
         self.assertEqual(self.download.calls, [])
         self.assertEqual(file_hash(self.path), before)
 
+    def test_remote_nonzero_match_marks_skip_without_notes_and_continues(self):
+        first = self.roster.records[0]
+        self.sa.rows[first.sa_id].update(matchCount=2, remark="网页原批注")
+        book = load_workbook(self.path)
+        book["名单"]["A2"] = "名单原备注"
+        book.save(self.path)
+        book.close()
+        self.roster = read_roster(self.path)
+        result = self.run_flow()
+        self.assertFalse(result.halted, result.reason)
+        self.assertEqual([o["status"] for o in result.outcomes], ["skip", "done"])
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertFalse(result.roster.records[0].done)
+        self.assertEqual(result.roster.records[0].remark, "名单原备注")
+        self.assertEqual(result.roster.records[0].source, "")
+        self.assertEqual(self.sa.rows[first.sa_id]["remark"], "网页原批注")
+        self.assertEqual(self.sa.rows[first.sa_id]["markStatus"], "待处理")
+        self.assertTrue(result.roster.records[1].done)
+        self.assertEqual(self.download.calls.count("wos_search"), 1)
+        self.assertEqual(self.sa.calls.count("complete"), 1)
+        book = load_workbook(self.path)
+        self.assertEqual(book["名单"]["O2"].value, 2)
+        self.assertEqual(book["名单"]["M2"].value, "网页备注保留")
+        self.assertIsNone(book["名单"]["O4"].value)
+        book.close()
+        self.assertEqual(select_records(result.roster, "谭勋策", 2), [])
+
+    def test_local_nonzero_in_explicit_queue_is_skipped_without_browser_actions(self):
+        book = load_workbook(self.path)
+        book["名单"].cell(2, 2 + list(HEADERS).index("matches"), 1)
+        book["名单"].cell(2, 2 + list(HEADERS).index("item_ids"), "1234567890123456789")
+        book.save(self.path)
+        book.close()
+        self.roster = read_roster(self.path)
+        result = run_batch(self.roster, [self.roster.records[0]], self.sa, self.download,
+                           self.imports, self.workflow, self.stop)
+        self.assertFalse(result.halted, result.reason)
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertEqual(result.roster.records[0].remark, "")
+        self.assertEqual(result.remaining, 0)
+        self.assertEqual(self.sa.calls, [])
+        self.assertEqual(self.download.calls, [])
+
+    def test_nonzero_skip_in_explicit_retry_keeps_flag_and_notes_unchanged(self):
+        from roster_write import mark_skipped_many
+        first = self.roster.records[0]
+        self.roster = mark_skipped_many(self.roster, [first], reasons={first.sa_id: "旧备注"}).roster
+        self.sa.rows[first.sa_id]["matchCount"] = "1"
+        before = file_hash(self.path)
+        result = run_batch(self.roster, [self.roster.records[0]], self.sa, self.download,
+                           self.imports, self.workflow, self.stop, retry_skipped=True)
+        self.assertFalse(result.halted, result.reason)
+        self.assertEqual(result.outcomes[0]["status"], "skip")
+        self.assertEqual(file_hash(self.path), before)
+        self.assertEqual(result.roster.records[0].remark, "旧备注")
+        self.assertEqual(self.sa.calls, ["status"])
+        self.assertEqual(self.download.calls, [])
+
+    def test_unknown_matching_count_pauses_without_flag_or_note(self):
+        before = file_hash(self.path)
+        for value in (None, True, -1, "unknown", "1.0"):
+            with self.subTest(count=value):
+                self.sa.rows[self.roster.records[0].sa_id]["matchCount"] = value
+                result = self.run_flow(1)
+                self.assertTrue(result.halted)
+                self.assertEqual(file_hash(self.path), before)
+                self.assertFalse(result.roster.records[0].skipped)
+                self.assertEqual(self.download.calls, [])
+
+    def test_matching_change_after_download_skips_before_upload_without_notes(self):
+        original = self.sa.call
+        status_reads = 0
+        def call(action, payload, timeout=75):
+            nonlocal status_reads
+            if action == "status":
+                status_reads += 1
+                if status_reads == 2:
+                    self.sa.rows[payload["sa_id"]]["matchCount"] = 1
+            return original(action, payload, timeout)
+        self.sa.call = call
+        result = self.run_flow(1)
+        self.assertFalse(result.halted, result.reason)
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertEqual(result.roster.records[0].remark, "")
+        self.assertNotIn("import_upload", self.sa.calls)
+        self.assertNotIn("link", self.sa.calls)
+        self.assertNotIn("complete", self.sa.calls)
+
+    def test_nonzero_skip_save_failure_pauses_and_leaves_tail_untouched(self):
+        self.sa.rows[self.roster.records[0].sa_id]["matchCount"] = 1
+        before = file_hash(self.path)
+        with patch("zero_match.mark_skipped_without_note", side_effect=SafetyStop("locked")):
+            result = self.run_flow()
+        self.assertTrue(result.halted)
+        self.assertEqual(result.remaining, 2)
+        self.assertEqual(file_hash(self.path), before)
+        self.assertEqual(self.sa.calls, ["status"])
+        self.assertEqual(self.download.calls, [])
+
+    def test_last_upload_readback_nonzero_skips_without_upload_or_note(self):
+        original = self.sa.call
+        def call(action, payload, timeout=75):
+            if action == "search":
+                self.sa.rows[payload["sa_id"]]["matchCount"] = 1
+            return original(action, payload, timeout)
+        self.sa.call = call
+        result = self.run_flow(1)
+        self.assertFalse(result.halted, result.reason)
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertEqual(result.roster.records[0].remark, "")
+        self.assertNotIn("import_upload", self.sa.calls)
+        self.assertNotIn("complete", self.sa.calls)
+        self.assertEqual(self.imports.get(result.roster.records[0])["phase"], "exported")
+
+    def test_foreign_match_after_push_skips_without_link_or_note_and_preserves_import(self):
+        original = self.sa.call
+        def call(action, payload, timeout=75):
+            if action == "search" and self.sa.phase == 2:
+                self.sa.rows[payload["sa_id"]].update(matchCount=2,
+                    itemId="1111111111111111111,2222222222222222222", remark="原网页备注")
+            return original(action, payload, timeout)
+        self.sa.call = call
+        result = self.run_flow(1)
+        self.assertFalse(result.halted, result.reason)
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertEqual(result.roster.records[0].remark, "")
+        self.assertEqual(self.sa.rows[result.roster.records[0].sa_id]["remark"], "原网页备注")
+        self.assertNotIn("link", self.sa.calls)
+        self.assertNotIn("complete", self.sa.calls)
+        self.assertEqual(self.imports.get(result.roster.records[0])["phase"], "pushed")
+
     def test_verification_pauses_without_marking_current_or_tail_two(self):
         before = file_hash(self.path)
         self.download.fail["demo-001"] = "WOS 显示人工验证"

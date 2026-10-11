@@ -19,7 +19,8 @@ from pathlib import Path
 
 from claim import sa_claim_source
 from core import SafetyStop
-from wos_policy import SJTU, affiliation_status, author_review_reason, require_no_author_review, require_sjtu
+from wos_policy import (SJTU, NonZeroMatchSkip, match_count, affiliation_status,
+                        author_review_reason, require_no_author_review, require_sjtu)
 
 MAX_TXT = 512 * 1024
 
@@ -320,6 +321,10 @@ class WOSFlow:
             if others:
                 raise SafetyStop("同一论文已有导入或提交记录（" + "、".join(others) + "），请核对并关联已有条目，不重复导入。")
             result = self.call("search", {"sa_id": record.sa_id})
+            row = result.get("row")
+            if isinstance(row, dict) and row.get("saLzkId") == record.sa_id and row.get("markStatus") == "待处理":
+                if match_count(row) > 0:
+                    raise NonZeroMatchSkip("上传前匹配数已非 0，已跳过；未修改备注。")
             fresh_plan = classify(record, result)
             if fresh_plan.route != "wos":
                 raise SafetyStop("比对状态已变化，不再符合缺失条目的导入条件：" + fresh_plan.reason)
