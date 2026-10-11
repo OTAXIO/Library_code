@@ -282,6 +282,36 @@ class ZeroMatchTests(unittest.TestCase):
         self.assertEqual(result.roster.records[0].remark, "wos未收录")
         self.assertTrue(result.roster.records[1].done)
 
+    def test_downloaded_title_mismatch_skips_only_current_and_imports_next_from_code_archive(self):
+        original = self.download.call
+        wrong = sample(TI="Synthetic paper injection")
+        uploaded = []
+        backend = self.sa.call
+        def download(action, payload, timeout=120):
+            if action == "wos_export":
+                self.download.path.write_bytes(wrong if payload["sa_id"] == "demo-001" else sample())
+            return original(action, payload, timeout)
+        def backend_call(action, payload, timeout=75):
+            if action == "import_upload":
+                import base64
+                uploaded.append((payload["sa_id"], base64.b64decode(payload["content"])))
+            return backend(action, payload, timeout)
+        self.download.call, self.sa.call = download, backend_call
+        result = self.run_flow()
+        self.assertFalse(result.halted, result.reason)
+        self.assertEqual([o["status"] for o in result.outcomes], ["skip", "done"])
+        self.assertEqual(result.roster.records[0].remark, "题名待核验")
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertFalse(result.roster.records[0].done)
+        self.assertTrue(result.roster.records[1].done)
+        self.assertEqual(self.sa.calls.count("import_upload"), 1)
+        self.assertEqual(uploaded, [("demo-002", sample())])
+        state = self.download.store.get(result.roster.records[0])
+        self.assertEqual(state["phase"], "downloaded_unlinked")
+        self.assertEqual(self.download.store.bytes(state), wrong)
+        self.assertIsNone(self.imports.get(result.roster.records[0]))
+        self.assertEqual(select_records(result.roster, "谭勋策", 2), [])
+
     def test_extension_zero_result_saves_requested_note_and_flag_before_next_paper(self):
         self.download.fail["demo-001"] = (
             "[扩展 0.4.1] [WOS 已暂停] WOS 未找到记录；这不等于未发表，也不自动标记完成")

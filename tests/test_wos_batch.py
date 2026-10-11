@@ -1,4 +1,5 @@
 """Extension-only download boundary; all TXT files are disposable fixtures."""
+import json
 import tempfile
 import threading
 import unittest
@@ -11,6 +12,7 @@ from core import Record, SafetyStop
 from bridge import BrowserRejected
 from tests.test_automation import sample
 from wos_batch import WOSDownload, default_store, preflight
+from wos_policy import WOSPolicyStop
 
 
 class PreflightTests(unittest.TestCase):
@@ -133,9 +135,10 @@ class DownloadTests(unittest.TestCase):
 
     def test_conflicting_doi_not_adopted(self):
         self.path.write_bytes(sample(DI="10.1234/other"))
-        with self.assertRaisesRegex(SafetyStop, "与名单冲突"):
+        with self.assertRaises(WOSPolicyStop) as rejected:
             self.flow.prepare(self.record)
-        self.assertEqual(self.store.get(self.record)["phase"], "export_intent")
+        self.assertEqual(rejected.exception.note, "标识待核验")
+        self.assertEqual(self.store.get(self.record)["phase"], "downloaded_unlinked")
 
     def test_no_results_does_not_attempt_export(self):
         self.bridge.call.side_effect = SafetyStop("WOS 未找到记录")
@@ -283,15 +286,70 @@ class DownloadTests(unittest.TestCase):
         self.assertFalse(result["identity_confirmed"])
         self.assertEqual([c.args[0] for c in self.bridge.call.call_args_list][0], "wos_search")
 
-    def test_changed_title_or_search_ut_cannot_save_returned_file(self):
-        for index, raw in enumerate((sample(TI="Different paper"), sample(UT="WOS:000999999999999"))):
-            with self.subTest(raw=raw):
-                self.path.write_bytes(raw)
-                self.store = ImportStore(self.root / ("mismatch-" + str(index)))
-                self.flow.store = self.store
-                with self.assertRaisesRegex(SafetyStop, "不一致"):
-                    self.flow.prepare(self.record)
-                self.assertEqual(self.store.get(self.record)["phase"], "export_intent")
+    def test_changed_title_is_preserved_unlinked_and_never_uploaded_or_reexported(self):
+        raw = sample(TI="Different paper")
+        self.path.write_bytes(raw)
+        with self.assertRaises(WOSPolicyStop) as rejected:
+            self.flow.prepare(self.record)
+        self.assertEqual(rejected.exception.note, "题名待核验")
+        state = self.store.get(self.record)
+        self.assertEqual(state["phase"], "downloaded_unlinked")
+        self.assertFalse(state["identity_confirmed"])
+        self.assertEqual(self.store.bytes(state), raw)
+        target = Path(state["saved_path"])
+        self.assertEqual(target.parent, self.store.root / "未关联下载")
+        info = json.loads(target.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertIsNone(info["sa_id"])
+        self.assertIsNone(info["record_key"])
+        self.assertFalse(info["linked_to_roster"])
+        self.assertEqual(self.path.read_bytes(), raw)
+        self.bridge.call.reset_mock()
+        with self.assertRaises(WOSPolicyStop):
+            self.flow.prepare(self.record)
+        self.bridge.call.assert_not_called()
+
+    def test_wrong_search_ut_keeps_unknown_export_intent_and_does_not_archive(self):
+        self.path.write_bytes(sample(UT="WOS:000999999999999"))
+        with self.assertRaisesRegex(SafetyStop, "不一致"):
+            self.flow.prepare(self.record)
+        self.assertEqual(self.store.get(self.record)["phase"], "export_intent")
+        self.assertEqual(list(self.store.root.rglob("*.txt")), [])
+
+    def test_old_title_only_intent_recovers_completed_mismatched_title_without_browser(self):
+        record = replace(self.record, doi="")
+        self.store.save(record, {"phase": "export_intent", "record_url": self.url})
+        raw = sample(TI="Synthetic paper injection", AF="Test, Alice",
+                     C1="[Test, Alice] Other University, China")
+        original = self.make_download(raw)
+        with self.assertRaises(WOSPolicyStop) as rejected:
+            self.flow.prepare(record)
+        self.assertEqual(rejected.exception.note, "题名待核验", "never label an unconfirmed paper as non-SJTU")
+        state = self.store.get(record)
+        self.assertEqual(state["phase"], "downloaded_unlinked")
+        self.assertEqual(self.store.bytes(state), raw)
+        self.assertEqual(original.read_bytes(), raw)
+        self.bridge.call.assert_not_called()
+
+    def test_correlated_ut_with_different_exports_remains_a_safety_stop(self):
+        record = replace(self.record, doi="")
+        self.store.save(record, {"phase": "export_intent", "record_url": self.url})
+        self.make_download()
+        (self.flow.download_dir / "savedrecs (2).txt").write_bytes(sample(TI="Different paper"))
+        with self.assertRaisesRegex(SafetyStop, "内容不同"):
+            self.flow.prepare(record)
+        self.assertEqual(self.store.get(record)["phase"], "export_intent")
+        self.bridge.call.assert_not_called()
+
+    def test_unlinked_hash_change_does_not_allow_any_browser_retry(self):
+        self.path.write_bytes(sample(TI="Different paper"))
+        with self.assertRaises(WOSPolicyStop):
+            self.flow.prepare(self.record)
+        state = self.store.get(self.record)
+        (self.store.root / (state["candidate"]["sha256"] + ".txt")).write_bytes(b"tampered")
+        self.bridge.call.reset_mock()
+        with self.assertRaisesRegex(SafetyStop, "发生变化"):
+            self.flow.prepare(self.record)
+        self.bridge.call.assert_not_called()
 
     def test_invalid_scope_does_not_even_search_or_adopt_local_file(self):
         self.make_download()

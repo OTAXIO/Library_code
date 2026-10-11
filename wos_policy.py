@@ -13,7 +13,8 @@ from core import SafetyStop
 SJTU = re.compile(r"\bShanghai\s+(?:Jiao\s*Tong|Jiaotong)\s+Univ(?:ersity)?\b|上海交通大学", re.I)
 AUTHOR_ISSUES = ('第一作者', '共同一作', '共同第一', '首位作者', '作者顺序',
                  '通讯作者', '通信作者', '第一单位', '第一署名单位')
-POLICY_NOTES = ('非交大', '交大署名待核验', '涉及作者或第一单位判断，暂不处理')
+POLICY_NOTES = ('非交大', '交大署名待核验', '涉及作者或第一单位判断，暂不处理',
+                '题名待核验', '标识待核验')
 
 
 class WOSPolicyStop(SafetyStop):

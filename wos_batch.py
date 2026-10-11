@@ -8,7 +8,8 @@ from pathlib import Path
 from automation import ImportStore, doi, wos, norm
 from bridge import BrowserRejected
 from core import SafetyStop
-from wos_files import archive_export, find_export, read_export, record_ut
+from wos_files import archive_export, find_correlated_export, find_export, read_export, record_ut
+from wos_policy import WOSPolicyStop
 
 
 def rejected_before_export(message):
@@ -71,13 +72,27 @@ class WOSDownload:
 
     def _save_file(self, record, path, raw, candidate, expected_url=""):
         self._guard()
-        for name, expected in (("doi", doi(record.doi)), ("wos", wos(record.wos))):
-            if expected and candidate[name] != expected:
-                raise SafetyStop(f"下载记录的 {name.upper()} 与名单冲突，未采纳。")
-        if norm(record.title) != norm(candidate["title"]):
-            raise SafetyStop("下载 TXT 题名与名单不一致，未建立关联或上传。")
+        # A wrong download path/UT is a session failure, not a paper decision.
         if expected_url and candidate["wos"] != record_ut(expected_url):
             raise SafetyStop("下载 TXT 与本次 WOS 单篇页面入藏号不一致，未采纳。")
+        conflict = ""
+        for name, expected in (("doi", doi(record.doi)), ("wos", wos(record.wos))):
+            if expected and candidate[name] != expected:
+                conflict = "标识待核验"
+        if not conflict and norm(record.title) != norm(candidate["title"]):
+            conflict = "题名待核验"
+        if conflict:
+            if not expected_url:
+                raise SafetyStop("下载 TXT 与名单不一致且缺少本次导出入藏号，未建立关联或上传。")
+            # The searched UT proves a real download completed, but never
+            # overrides conflicting SA facts. Keep the genuine bytes unlinked
+            # under code, leave the backend untouched and skip only this task.
+            saved_path = archive_export(self.store, path, raw, candidate)
+            self.store.save(record, {"phase": "downloaded_unlinked", "candidate": candidate,
+                "identity_confirmed": False, "linked_to_roster": False, "note": conflict,
+                "saved_path": saved_path, "original_path": str(path), "record_url": expected_url})
+            self.audit("保存未关联 WOS TXT：" + conflict, "已跳过", record.sa_id)
+            raise WOSPolicyStop("本次 TXT 已下载并保存在 code，但与名单不一致；未建立关联或上传。", conflict)
         saved_path = archive_export(self.store, path, raw, candidate, record)
         state = {"phase": "downloaded", "candidate": candidate,
                  "identity_confirmed": bool(doi(record.doi) or wos(record.wos)),
@@ -88,8 +103,9 @@ class WOSDownload:
 
     def _recover_file(self, record, expected_url="", expected_sha="", *, correlated=False):
         self._guard()
-        found = find_export(record, (self.download_dir, self.store.root / "未关联下载"), expected_url,
-                            correlated=correlated)
+        folders = (self.store.root / "未关联下载", self.download_dir)
+        found = (find_correlated_export(folders, expected_url) if correlated and expected_url else
+                 find_export(record, folders, expected_url, correlated=correlated))
         if found and expected_sha and found[2]["sha256"] != expected_sha:
             raise SafetyStop("下载目录 TXT 与原存档校验码不一致，不替换历史文件。")
         return self._save_file(record, *found, expected_url) if found else None
@@ -101,6 +117,14 @@ class WOSDownload:
         cached = self.store.get(record)
         if cached is not None and not isinstance(cached, dict):
             raise SafetyStop("TXT 下载日志结构异常，未执行浏览器操作。")
+        if cached and cached.get("phase") == "downloaded_unlinked":
+            if (cached.get("note") not in ("题名待核验", "标识待核验")
+                    or cached.get("identity_confirmed") is not False
+                    or cached.get("linked_to_roster") is not False
+                    or cached.get("candidate", {}).get("wos") != record_ut(cached.get("record_url", ""))):
+                raise SafetyStop("未关联 TXT 断点不完整，未再次检索或导入。")
+            self.store.bytes(cached)
+            raise WOSPolicyStop("此前 TXT 已完成下载，但与名单不一致；未重新导出或上传。", cached["note"])
         if cached and cached.get("phase") == "downloaded":
             # A journal alone does not prove the file still exists. Restore only
             # identical original bytes, never replace a historical hash silently.

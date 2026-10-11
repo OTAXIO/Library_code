@@ -29,7 +29,8 @@ EXACT = {
 }
 SHORT = frozenset(EXACT.values()) | {"WOS控件未识别", "WOS检索超时", "WOS页面待核验",
     "WOS单篇页待核验", "WOS检索页待核验", "WOS登录/验证", "WOS结果待核验",
-    "WOS导出待核验", "浏览器连接异常", "命令回执待核验", "待人工核验"}
+    "WOS导出待核验", "浏览器连接异常", "命令回执待核验", "待人工核验",
+    "题名待核验", "标识待核验"}
 
 
 def known_skip_note(note):

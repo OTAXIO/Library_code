@@ -20,6 +20,7 @@ from automation import ImportStore
 from bridge import Bridge
 from core import SafetyStop, fixed_roster_path, read_roster
 from operation_log import OperationLog
+from pairing_ui import copy_pairing_code
 from wos_batch import default_store
 from zero_match import OWNER, SerialWOS, WorkflowStore, run_batch
 
@@ -59,10 +60,22 @@ def main():
     # Keep the Tk variable alive for the window's lifetime; an anonymous
     # StringVar is garbage-collected and silently clears a readonly Entry.
     pair_code = tk.StringVar(value=bridge.token)
-    ttk.Entry(panel, textvariable=pair_code, state="readonly").pack(fill="x", pady=8)
+    code_entry = ttk.Entry(panel, textvariable=pair_code, state="readonly")
+    code_entry.pack(fill="x", pady=8)
+    def select_code(event=None):
+        code_entry.selection_range(0, tk.END)
+        return "break"
+    code_entry.bind("<Control-a>", select_code)
+    code_entry.bind("<Control-A>", select_code)
     def copy_token():
-        root.clipboard_clear()
-        root.clipboard_append(bridge.token)
+        try:
+            copy_pairing_code(root, bridge.token)
+        except Exception:
+            code_entry.focus_set()
+            select_code()
+            status.set("剪贴板暂不可用，配对码已全选；未假报复制成功。")
+            print("PAIR_CODE_COPY_FAILED (value not logged)", flush=True)
+            return
         status.set("配对码已复制；请在 SA 页扩展连接，再绑定另外两个工作页。")
         print("PAIR_CODE_COPIED (value not logged)", flush=True)
     ttk.Button(panel, text="复制本次配对码", command=copy_token).pack(anchor="w")
@@ -119,6 +132,27 @@ def main():
             print(json.dumps({"error": message}, ensure_ascii=False), flush=True)
             messages.put(("finish", {"imported_and_closed": False, "reason": message}))
 
+    def diagnose():
+        """Only documented read-only commands, before a separate RUN attempt."""
+        results = {}
+        for action, payload in (
+            ("status", {"sa_id": record.sa_id}),
+            ("wos_diagnose", {}),
+            ("import_capabilities", {"sa_id": record.sa_id}),
+        ):
+            try:
+                results[action] = bridge.call(action, payload, timeout=25)
+            except SafetyStop as exc:
+                results[action] = {"error": str(exc)}
+                break  # A lost result is not permission to send another command.
+        stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d-%H%M%S-%f")
+        report = BASE / "runtime" / "live-acceptance" / (stamp + "-diagnostics.json")
+        report.parent.mkdir(parents=True, exist_ok=True)
+        with report.open("x", encoding="utf-8") as stream:
+            json.dump(results, stream, ensure_ascii=False, indent=2)
+        print(json.dumps({"diagnostics": results, "report": str(report)}, ensure_ascii=False), flush=True)
+        messages.put(("diagnostic_finish", results))
+
     def pump():
         nonlocal busy, finished, passed, attempt
         while not commands.empty():
@@ -140,12 +174,22 @@ def main():
             elif command == "STATUS":
                 print(json.dumps({"connected": bridge.online, "busy": busy, "finished": finished,
                                   "passed": passed, "attempt": attempt}), flush=True)
+            elif command == "DIAG" and not busy:
+                if not bridge.online:
+                    print("NOT_CONNECTED", flush=True)
+                    continue
+                busy = True
+                threading.Thread(target=diagnose, daemon=True).start()
             elif command == "QUIT" and not busy:
                 root.destroy()
                 return
         while not messages.empty():
             value = messages.get_nowait()
             if isinstance(value, tuple):
+                if value[0] == "diagnostic_finish":
+                    busy = False
+                    status.set("只读连接诊断结束；尚未启动入库验收。")
+                    continue
                 busy, finished = False, True
                 passed = value[1]["imported_and_closed"]
                 status.set("已完成真实入库及批注回读。" if passed else

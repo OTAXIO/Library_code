@@ -11,6 +11,7 @@ from tkinter import ttk
 from bridge import Bridge
 from core import SafetyStop
 from notices import messages
+from pairing_ui import copy_pairing_code
 from ui_theme import P, install_theme, style_text
 from workflow_service import WorkflowService
 
@@ -267,10 +268,21 @@ class App:
                   "2. 自动导入另需绑定 WOS 文献页和后台导入页。\n"
                   "三个网页保持打开。认领只需要第一步。", wraplength=425).pack(anchor="w", pady=(0, 12))
         token = tk.StringVar(value=self.bridge.token)
-        ttk.Entry(frame, textvariable=token, state="readonly").pack(fill="x")
+        token_entry = ttk.Entry(frame, textvariable=token, state="readonly")
+        token_entry.pack(fill="x")
+        def select_token(event=None):
+            token_entry.selection_range(0, tk.END)
+            return "break"
+        token_entry.bind("<Control-a>", select_token)
+        token_entry.bind("<Control-A>", select_token)
         def copy():
-            self.root.clipboard_clear()
-            self.root.clipboard_append(token.get())
+            try:
+                copy_pairing_code(window, token.get())
+            except Exception:
+                token_entry.focus_set()
+                select_token()
+                self.status.set("剪贴板暂不可用，配对码已全选；未假报复制成功。")
+                return
             self.status.set("配对码已复制，请在 SA 比对页扩展中粘贴。")
         def reset():
             if self.busy:

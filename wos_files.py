@@ -94,6 +94,30 @@ def find_export(record, folders, expected_url="", *, correlated=False):
     return found[0]
 
 
+def find_correlated_export(folders, expected_url):
+    """Recover the searched UT, NOT an association or permission to import.
+
+    This is only called with a durable export intent for this unchanged task.
+    A completed TXT can prove the download finished even when its title differs
+    from SA. Conflicting bytes still stop; no recency or fuzzy-title choice.
+    """
+    expected_ut = record_ut(expected_url)
+    found = []
+    for folder in folders:
+        for path in download_paths(folder):
+            try:
+                raw, candidate = read_export(path)
+            except SafetyStop:
+                continue
+            if candidate["wos"] == expected_ut:
+                found.append((path, raw, candidate))
+    if not found:
+        return None
+    if any(raw != found[0][1] for _, raw, _ in found[1:]):
+        raise SafetyStop("本次入藏号存在内容不同的完整 TXT；未自动选择或重复导出。")
+    return found[0]
+
+
 def _copy_exact(path, content):
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_symlink():
