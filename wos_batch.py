@@ -27,10 +27,10 @@ def preflight(bridge, *, resume_export=False):
     # Read-only capability/access handshake, not search-form readiness. The
     # bound tab is activated and prepared by the extension before any Search.
     try:
-        result = bridge.call("wos_diagnose", {}, timeout=25)
+        result = bridge.call("wos_diagnose", {}, timeout=45)
     except SafetyStop as exc:
         if "未知 WOS 调度命令" in str(exc):
-            raise SafetyStop("当前插件仍是旧版本，请重载 0.4.11、刷新工作页并重新绑定；尚未提交检索。") from exc
+            raise SafetyStop("当前插件仍是旧版本，请重载 0.4.12、刷新工作页并重新绑定；尚未提交检索。") from exc
         raise
     if (not isinstance(result, dict) or type(result.get("wos_download_protocol")) is not int
             or result.get("wos_download_protocol") != 1
@@ -38,11 +38,15 @@ def preflight(bridge, *, resume_export=False):
             or result.get("search_prepare_protocol") != 1
             or type(result.get("export_prepare_protocol")) is not int
             or result.get("export_prepare_protocol") != 1
+            or type(result.get("export_submission_protocol")) is not int
+            or result.get("export_submission_protocol") != 1
+            or type(result.get("download_wait_protocol")) is not int
+            or result.get("download_wait_protocol") != 1
             or result.get("result_reader") != "shared-diagnostic"
             or result.get("read_results_world") != "ISOLATED"
             or not re.fullmatch(r"\d+\.\d+\.\d+", str(result.get("extension_version", "")))
-            or tuple(map(int, result["extension_version"].split("."))) < (0, 4, 9)):
-        raise SafetyStop("插件下载接口不兼容，请重载 0.4.11、刷新 WOS 页并重新绑定；未提交检索或下载。")
+            or tuple(map(int, result["extension_version"].split("."))) < (0, 4, 12)):
+        raise SafetyStop("插件下载接口不兼容，请重载 0.4.12、刷新 WOS 页并重新绑定；未提交检索或下载。")
     page = result.get("page")
     if (not isinstance(page, dict)
             or any(type(page.get(k)) is not bool for k in ("core_search_route", "wos_error", "site_timeout", "login_required", "busy"))
@@ -168,7 +172,7 @@ class WOSDownload:
             # A lost ACK must never trigger another Export. Only the same page's
             # unsubmitted owned preview can prove the old command never clicked.
             progress("续查上一轮导出：只读确认，不重复点击 Export")
-            status = self.bridge.call("wos_export_status", query, timeout=25)
+            status = self.bridge.call("wos_export_status", query, timeout=45)
             if not isinstance(status, dict) or status.get("state") != "unsubmitted":
                 raise SafetyStop("上一轮 Export 已提交或结果不明；尚未找到对应 TXT。请等待下载或人工导出后再继续，不重复导出。")
         else:
@@ -199,9 +203,9 @@ class WOSDownload:
                 raise SafetyStop("未确认完整记录导出预览，未点击最终 Export。")
         self._guard()
         self.store.save(record, {"phase": "export_intent", "record_url": expected_url})
-        progress("点击弹窗最终 Export 并等待 TXT；不会重复提交")
+        progress("点击最终 Export，等待本篇 TXT（最多 3 分钟）；不重复点击或检索")
         try:
-            result = self.bridge.call("wos_export", {**query, "prepared": True}, timeout=75)
+            result = self.bridge.call("wos_export", {**query, "prepared": True}, timeout=210)
         except SafetyStop as exc:
             if (isinstance(exc, BrowserRejected) and exc.action == "wos_export"
                     and rejected_before_export(exc)):

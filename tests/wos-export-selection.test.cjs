@@ -116,6 +116,42 @@ const command=action=>({action,sa_id:'offline-material-export',title:'Synthetic 
       console.log(`PASS ${new URL(origin).hostname} existing Tab Delimited / Full Record modal resumes exactly once`);checks++;
 
       await reset(origin);assert.equal((await prepare()).ok,true);
+      await page.evaluate(()=>{
+        const title=document.querySelector('mat-dialog-container h2');
+        const replacement=document.createElement('div');replacement.textContent=title.textContent;title.replaceWith(replacement);
+      });
+      const divHeading=await page.evaluate(inspectWorkPage,{action:'wos_diagnose'});
+      assert.equal(divHeading.export_dialog,true,'a known exact export heading is not limited to h2 tags');
+      assert.equal((await page.evaluate(runWOSCommand,{...command('wos_prepare_export'),record_url:expected})).ok,true);
+      console.log(`PASS ${new URL(origin).hostname} fixed export heading in a DIV preserves safe preview recovery`);checks++;
+
+      await reset(origin);assert.equal((await prepare()).ok,true);
+      await page.evaluate(()=>{
+        window.blockedZeroTimers=0;const original=window.setTimeout;
+        window.setTimeout=(fn,ms,...args)=>{
+          if(ms===0){blockedZeroTimers++;return -1;}
+          return original(fn,ms,...args);
+        };
+      });
+      const immediateDownload=page.waitForEvent('download');
+      const immediate=await page.evaluate(runWOSCommand,{...command('wos_download'),record_url:expected});
+      assert.equal(immediate.ok,true);assert.equal(immediate.data.click_observed,true);
+      assert.equal(immediate.data.export_submission_protocol,1);
+      assert.equal(await page.evaluate(()=>blockedZeroTimers),0,'actual final Export must not be delegated to a late zero timer');
+      await immediateDownload;assert.equal(await page.evaluate(()=>exportsMade),1);
+      console.log(`PASS ${new URL(origin).hostname} successful reply proves an immediate final Export click`);checks++;
+
+      await reset(origin);assert.equal((await prepare()).ok,true);
+      await page.evaluate(()=>document.querySelector('mat-dialog-container > button').click=()=>{});
+      const noClick=await page.evaluate(runWOSCommand,{...command('wos_download'),record_url:expected});
+      assert.equal(noClick.ok,false);assert.match(noClick.error,/点击事件未确认/);
+      assert.equal(await page.evaluate(()=>exportsMade),0);assert.equal(observedDownloads,0);
+      const unknown=await page.evaluate(runWOSCommand,{...command('wos_export_status'),record_url:expected});
+      assert.equal(unknown.data.state,'submitted');assert.equal(unknown.data.click_observed,false);
+      assert.equal((await page.evaluate(runWOSCommand,{...command('wos_download'),record_url:expected})).ok,false);
+      console.log(`PASS ${new URL(origin).hostname} missing click event cannot fabricate success or authorize retry`);checks++;
+
+      await reset(origin);assert.equal((await prepare()).ok,true);
       await page.locator('mat-dialog-container h2').evaluate(el=>el.textContent='Export Records to Excel');
       const foreign=await page.evaluate(runWOSCommand,{...command('wos_prepare_export'),record_url:expected});
       assert.equal(foreign.ok,false);assert.equal(await page.evaluate(()=>exportsMade),0);

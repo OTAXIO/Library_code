@@ -128,6 +128,7 @@ async function dispatchWorkflow(command,pair) {
     if(['login','verification',''].includes(observed.access_gate))page.access_gate=observed.access_gate;
     return {ok:true,data:{extension_version:chrome.runtime.getManifest().version,
       wos_download_protocol:1,search_prepare_protocol:1,export_prepare_protocol:1,
+      export_submission_protocol:1,download_wait_protocol:1,
       result_reader:'shared-diagnostic',read_results_world:'ISOLATED',page}};
   }
   if(role==="importTabId") {
@@ -380,10 +381,15 @@ async function dispatchWorkflow(command,pair) {
   try {
     const clicked=await execute(runWOSCommand,{...command,action:"wos_download"});
     if(!clicked.ok)return clicked;
-    if(clicked.data?.submitted!==true)throw new Error('WOS 未返回最终 Export 提交回执，不重复提交');
+    if(clicked.data?.submitted!==true||clicked.data?.click_observed!==true||
+        clicked.data?.export_submission_protocol!==1)
+      throw new Error('WOS 未确认最终 Export 点击事件，不重复提交');
     // Leave the same result-delivery margin used by the page adapter. The
     // authenticated /result POST has its own eight-second timeout.
-    const end=Math.min(Date.now()+35000,command.expires-12000);
+    // A genuine matching TXT appeared after the former 35-second wait ended.
+    // Wait on this command's download IDs, not on a fresh Search/Export and not
+    // on the newest arbitrary file. Allow a bounded three-minute download.
+    const end=Math.min(Date.now()+180000,command.expires-12000);
     let completed;
     while(Date.now()<end){
       if(found.length>1)throw new Error("导出期间出现多个候选下载，请人工核验，未上传任何文件");

@@ -12,10 +12,10 @@ const command=action=>({action,sa_id:'offline-export',title:'Synthetic paper',re
 function setup(respond){
   const calls=[],tab={id:2,active:true,url:record},listeners=new Set();
   let reloads=0;
-  const api={calls,tab,listeners,get reloads(){return reloads;},created:null};
+  const api={calls,tab,listeners,get reloads(){return reloads;},get now(){return clock;},created:null};
   let clock=Date.now();
   const sandbox={URL,Date:{now:()=>clock},clearTimeout,
-    setTimeout:(fn,ms)=>setTimeout(()=>{if(ms<8000)clock+=ms;fn();},ms>=8000?ms:0),
+    setTimeout:(fn,ms)=>setTimeout(()=>{if(ms<8000){clock+=ms;api.onWait?.(clock);}fn();},ms>=8000?ms:0),
     runWOSCommand(){},inspectWorkPage(){},chrome:{
       tabs:{get:async()=>tab,reload:async()=>{reloads++;if(api.onReload)api.onReload();}},
       scripting:{executeScript:async injection=>{
@@ -66,10 +66,36 @@ test('known prepared final Export captures one download without preparing or rel
     if(cmd.action==='wos_check_export')return ok({ready:true,record_url:record});
     assert.equal(cmd.action,'wos_download');
     for(const fn of env.listeners)fn({id:4,url:'blob:'+origin+'/offline',referrer:record});
-    return ok({submitted:true,record_url:record});
+    return ok({submitted:true,click_observed:true,export_submission_protocol:1,record_url:record});
   });
   const result=await api.dispatch({...command('wos_export'),prepared:true});
   assert.equal(result.ok,true);assert.equal(result.data.path,'C:/offline/savedrecs.txt');
+  assert.deepEqual(api.calls,['wos_check_export','wos_download']);
+  assert.equal(api.reloads,0);assert.equal(api.listeners.size,0);
+});
+
+test('a correlated download arriving after the old 35s deadline is still captured without another click',async()=>{
+  let clicks=0;
+  const api=setup((cmd,env)=>{
+    if(cmd.action==='wos_check_export')return ok({ready:true,record_url:record});
+    assert.equal(cmd.action,'wos_download');clicks++;
+    const downloadAt=env.now+40000;
+    env.onWait=now=>{
+      if(now<downloadAt)return;
+      env.onWait=null;
+      for(const listener of env.listeners)listener({id:4,url:'blob:'+origin+'/late',referrer:record});
+    };
+    return ok({submitted:true,click_observed:true,export_submission_protocol:1,record_url:record});
+  });
+  const result=await api.dispatch({...command('wos_export'),prepared:true});
+  assert.equal(result.ok,true);assert.equal(clicks,1);assert.equal(api.reloads,0);
+  assert.deepEqual(api.calls,['wos_check_export','wos_download']);assert.equal(api.listeners.size,0);
+});
+
+test('a scheduled-only submission receipt is not accepted as an actual Export click',async()=>{
+  const api=setup(cmd=>cmd.action==='wos_check_export'?ok({ready:true,record_url:record}):
+    ok({submitted:true,record_url:record}));
+  await assert.rejects(api.dispatch({...command('wos_export'),prepared:true}),/点击事件/);
   assert.deepEqual(api.calls,['wos_check_export','wos_download']);
   assert.equal(api.reloads,0);assert.equal(api.listeners.size,0);
 });

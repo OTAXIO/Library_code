@@ -17,15 +17,16 @@ from wos_policy import WOSPolicyStop
 
 class PreflightTests(unittest.TestCase):
     def capabilities(self, **page):
-        return {"extension_version": "0.4.9", "wos_download_protocol": 1, "search_prepare_protocol": 1, "export_prepare_protocol": 1,
+        return {"extension_version": "0.4.12", "wos_download_protocol": 1, "search_prepare_protocol": 1, "export_prepare_protocol": 1,
+                "export_submission_protocol": 1, "download_wait_protocol": 1,
                 "result_reader": "shared-diagnostic", "read_results_world": "ISOLATED",
                 "page": {"core_search_route": True, "query_input_count": 1,
                          "wos_error": False, "site_timeout": False, "login_required": False, "dialog_count": 0, "busy": False, **page}}
 
     def test_extension_protocol_checked_before_search(self):
         bridge = Mock(call=Mock(return_value=self.capabilities()))
-        self.assertEqual(preflight(bridge), {"extension_version": "0.4.9"})
-        bridge.call.assert_called_once_with("wos_diagnose", {}, timeout=25)
+        self.assertEqual(preflight(bridge), {"extension_version": "0.4.12"})
+        bridge.call.assert_called_once_with("wos_diagnose", {}, timeout=45)
 
     def test_old_incompatible_and_alternate_transport_fail_without_search(self):
         for result in ({}, {**self.capabilities(), "extension_version": "0.3.28"},
@@ -38,6 +39,13 @@ class PreflightTests(unittest.TestCase):
                        {**self.capabilities(), "extension_version": "0.4.6"},
                        {**self.capabilities(), "extension_version": "0.4.7"},
                        {**self.capabilities(), "extension_version": "0.4.8"},
+                       {**self.capabilities(), "extension_version": "0.4.9"},
+                       {**self.capabilities(), "extension_version": "0.4.10"},
+                       {**self.capabilities(), "extension_version": "0.4.11"},
+                       {**self.capabilities(), "export_submission_protocol": None},
+                       {**self.capabilities(), "export_submission_protocol": True},
+                       {**self.capabilities(), "download_wait_protocol": None},
+                       {**self.capabilities(), "download_wait_protocol": True},
                        {**self.capabilities(), "export_prepare_protocol": True},
                        {**self.capabilities(), "search_prepare_protocol": True},
                        {**self.capabilities(), "search_prepare_protocol": None},
@@ -76,16 +84,16 @@ class PreflightTests(unittest.TestCase):
 
     def test_result_page_does_not_require_search_inputs(self):
         self.assertEqual(preflight(Mock(call=Mock(return_value=self.capabilities(
-            core_search_route=False, query_input_count=0)))), {"extension_version": "0.4.9"})
+            core_search_route=False, query_input_count=0)))), {"extension_version": "0.4.12"})
 
     def test_smart_navigation_only_and_delayed_inputs_do_not_block_preparation(self):
         bridge = Mock(call=Mock(return_value=self.capabilities(query_input_count=0, busy=True)))
-        self.assertEqual(preflight(bridge), {"extension_version": "0.4.9"})
-        bridge.call.assert_called_once_with("wos_diagnose", {}, timeout=25)
+        self.assertEqual(preflight(bridge), {"extension_version": "0.4.12"})
+        bridge.call.assert_called_once_with("wos_diagnose", {}, timeout=45)
 
     def test_only_known_tab_delimited_preview_can_pass_dialog_gate(self):
         self.assertEqual(preflight(Mock(call=Mock(return_value=self.capabilities(
-            dialog_count=2, export_dialog=True))), resume_export=True), {"extension_version": "0.4.9"})
+            dialog_count=2, export_dialog=True))), resume_export=True), {"extension_version": "0.4.12"})
         with self.assertRaisesRegex(SafetyStop, "操作弹窗"):
             preflight(Mock(call=Mock(return_value=self.capabilities(dialog_count=2, export_dialog=True))))
         for flag in (None, False, "true", 1):
@@ -117,7 +125,7 @@ class DownloadTests(unittest.TestCase):
         self.assertTrue(result["identity_confirmed"])
         self.assertEqual(self.store.bytes(result), self.raw)
         self.assertEqual([c.args[0] for c in self.bridge.call.call_args_list], ["wos_search", "wos_export_prepare", "wos_export"])
-        self.assertEqual([c.kwargs["timeout"] for c in self.bridge.call.call_args_list], [120, 75, 75])
+        self.assertEqual([c.kwargs["timeout"] for c in self.bridge.call.call_args_list], [120, 75, 210])
         self.flow.prepare(self.record)
         self.assertEqual(self.bridge.call.call_count, 3)
 

@@ -146,3 +146,30 @@ test('binding waits for an idle heartbeat but never overlaps a claimed command',
   finishPoll();await tick;
   assert.equal((await bind).ok,true);assert.equal(state.wosTabId,8);
 });
+
+test('independent alarm polls the same bound client with fresh URL checks and never creates a tab',async()=>{
+  const primary={id:7,url:'http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list'};
+  const state={token:'a'.repeat(43),tabId:7,mode:'sa'};
+  const requests=[],alarms=[];
+  let onAlarm;
+  const chrome={
+    runtime:{id:'test',getURL:p=>'chrome-extension://test/'+p,onMessage:{addListener(){}}},
+    storage:{session:{get:async()=>({...state})}},
+    tabs:{get:async id=>{assert.equal(id,7);return primary;},create:()=>{throw Error('must not create tabs');}},
+    alarms:{get:async()=>undefined,create:async(name,options)=>alarms.push({name,options}),
+      onAlarm:{addListener:fn=>onAlarm=fn}}
+  };
+  const context=vm.createContext({chrome,URL,Date,AbortSignal,importScripts:()=>{},setTimeout,
+    fetch:async(url,options)=>{requests.push(JSON.parse(options.body));return {ok:true,json:async()=>({command:null})};}});
+  vm.runInContext(fs.readFileSync(path.join(root,'workflow-background.js'),'utf8'),context);
+  vm.runInContext(fs.readFileSync(path.join(root,'background.js'),'utf8'),context);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(alarms[0].name,'sa-bridge-heartbeat');assert.equal(alarms[0].options.periodInMinutes,0.5);
+  onAlarm({name:'unrelated'});await new Promise(resolve=>setImmediate(resolve));assert.equal(requests.length,0);
+  onAlarm({name:'sa-bridge-heartbeat'});await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(requests.length,1);assert.equal(requests[0].client,'7');
+  primary.url='http://admin.ir.lib.sjtu.edu.cn/#/wel/index';
+  onAlarm({name:'sa-bridge-heartbeat'});await new Promise(resolve=>setImmediate(resolve));assert.equal(requests.length,1);
+  primary.url='http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list';delete state.token;
+  onAlarm({name:'sa-bridge-heartbeat'});await new Promise(resolve=>setImmediate(resolve));assert.equal(requests.length,1);
+});

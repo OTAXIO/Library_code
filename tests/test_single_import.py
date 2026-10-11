@@ -1,3 +1,4 @@
+"""Acceptance target selection is read-only and never clears queue flags."""
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
@@ -25,3 +26,28 @@ class SingleImportTests(unittest.TestCase):
         roster = SimpleNamespace(records=[], assert_unchanged=Mock(side_effect=SafetyStop("changed")))
         with self.assertRaises(SafetyStop):
             select_one(roster, "first")
+
+
+class TargetSelectionTests(unittest.TestCase):
+    def row(self, **changes):
+        return Mock(**{"sa_id": "fixture-1", "owner": "谭勋策", "matches": 0,
+                       "done": False, "skipped": False, **changes})
+
+    def test_only_one_owned_pending_zero_match_can_be_selected(self):
+        row = self.row()
+        roster = Mock(records=[row], assert_unchanged=Mock())
+        self.assertIs(select_one(roster, "fixture-1"), row)
+        roster.assert_unchanged.assert_called_once_with()
+
+    def test_other_owner_nonzero_done_and_skipped_are_not_reopened(self):
+        for change in ({"owner": "其他负责人"}, {"matches": 1}, {"done": True}, {"skipped": True}):
+            row = self.row(**change)
+            with self.assertRaises(SafetyStop):
+                select_one(Mock(records=[row], assert_unchanged=Mock()), "fixture-1")
+            for field, expected in change.items():
+                self.assertEqual(getattr(row, field), expected)
+
+    def test_missing_or_duplicate_ids_fail_closed(self):
+        for rows in ([], [self.row(), self.row()]):
+            with self.assertRaises(SafetyStop):
+                select_one(Mock(records=rows, assert_unchanged=Mock()), "fixture-1")

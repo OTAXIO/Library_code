@@ -120,15 +120,16 @@ function inspectWorkPage(command) {
   const dialogs=[...document.querySelectorAll('[role="dialog"],mat-dialog-container')].filter(visible);
   const exportHeadings=['Export Records to Tab Delimited File','将记录导出到制表符分隔文件','导出记录至制表符分隔文件',
     '导出记录到制表符分隔文件','导出记录到制表符分隔的文件'];
-  const exportPanels=dialogs.filter(panel=>{
+  const completePanels=dialogs.filter(panel=>{
     const selectors=[...panel.querySelectorAll('select,[role="combobox"],[aria-haspopup="listbox"]')].filter(visible);
     const unique=selectors.filter(el=>!selectors.some(other=>other!==el&&el.contains(other)));
     const actions=[...panel.querySelectorAll('button,[role="button"],a')].filter(el=>visible(el)&&
       ['Export','导出'].includes(cleanText(el)||normal(el.getAttribute('aria-label'))));
-    return unique.length===1&&actions.length===1&&[...panel.querySelectorAll('h1,h2,h3,[role="heading"],.mat-dialog-title,.mat-mdc-dialog-title')]
-      .some(el=>visible(el)&&exportHeadings.includes(cleanText(el)));
-  }).filter(panel=>!dialogs.some(other=>other!==panel&&panel.contains(other)&&
-      [...other.querySelectorAll('h1,h2,h3,[role="heading"]')].some(el=>exportHeadings.includes(cleanText(el)))));
+    return unique.length===1&&actions.length===1;
+  });
+  const exportPanels=completePanels.filter(panel=>!completePanels.some(other=>other!==panel&&panel.contains(other)))
+    .filter(panel=>[...panel.querySelectorAll('h1,h2,h3,[role="heading"],.mat-dialog-title,.mat-mdc-dialog-title,div,span')]
+      .some(el=>visible(el)&&exportHeadings.includes(cleanText(el))));
   const exportDialog=recordRoute&&exportPanels.length===1&&dialogs.every(el=>el.contains(exportPanels[0])||exportPanels[0].contains(el));
   const errorHeadings=[document.title,...[...document.querySelectorAll('h1,h2,[role="alert"]')]
     .filter(visible).map(el=>el.innerText)].map(normal);

@@ -502,6 +502,8 @@ test('download capability check is read-only and reports the actual running exte
   assert.equal(result.data.extension_version,'0.3.29');
   assert.equal(result.data.wos_download_protocol,1);
   assert.equal(result.data.search_prepare_protocol,1);
+  assert.equal(result.data.export_submission_protocol,1);
+  assert.equal(result.data.download_wait_protocol,1);
   assert.equal(result.data.result_reader,'shared-diagnostic');
   assert.equal(injections.length,1);
   assert.equal(injections[0].world,'ISOLATED');

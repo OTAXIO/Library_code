@@ -97,15 +97,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return {ok: true};
       });
     }
-    if (message.type !== "tick" || polling || busy || updatingConnection) return {ok: true};
+    if (message.type !== "tick") return {ok: true};
+    return pollBridge(sender.tab);
+  })().then(sendResponse, error => sendResponse({ok: false, error: error.message}));
+  return true;
+});
+
+async function pollBridge(senderTab, fromAlarm=false) {
+    if (polling || busy || updatingConnection) return {ok: true};
     const pair = await chrome.storage.session.get(["token", "tabId", "wosTabId", "importTabId", "mode"]);
     const primaryValid=url=>pair.mode==="wos"?isWOSPage(url):validPage(url);
     // A background SA tab can throttle its interval; a bound active WOS/import
     // tab may wake the same authenticated client. Unbound/changed tabs cannot.
-    const heartbeatAllowed=sender.tab && (
-      (sender.tab.id===pair.tabId && primaryValid(sender.tab.url)) ||
-      (sender.tab.id===pair.wosTabId && validRolePage(sender.tab.url,"wosTabId")) ||
-      (sender.tab.id===pair.importTabId && validRolePage(sender.tab.url,"importTabId")));
+    const heartbeatAllowed=fromAlarm || (senderTab && (
+      (senderTab.id===pair.tabId && primaryValid(senderTab.url)) ||
+      (senderTab.id===pair.wosTabId && validRolePage(senderTab.url,"wosTabId")) ||
+      (senderTab.id===pair.importTabId && validRolePage(senderTab.url,"importTabId"))));
     if (!pair.token || !heartbeatAllowed || polling || busy || updatingConnection) return {ok: true};
     polling = true;
     try {
@@ -144,6 +151,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       await request("/result", {client: String(pair.tabId), id: command.id, result}, pair.token);
       return {ok: true};
     } finally {polling=false;}
-  })().then(sendResponse, error => sendResponse({ok: false, error: error.message}));
-  return true;
-});
+}
+
+// MV3 workers and background page timers are suspended independently. A browser
+// alarm wakes only this extension and polls the same authenticated, URL-checked
+// primary tab. It neither creates tabs nor repeats a delivered command.
+const heartbeatAlarm="sa-bridge-heartbeat";
+if(chrome.alarms?.onAlarm && chrome.alarms?.create && chrome.alarms?.get) {
+  chrome.alarms.onAlarm.addListener(alarm=>{
+    if(alarm.name===heartbeatAlarm)void pollBridge(undefined,true).catch(()=>{});
+  });
+  void chrome.alarms.get(heartbeatAlarm).then(alarm=>{
+    if(!alarm)return chrome.alarms.create(heartbeatAlarm,{periodInMinutes:0.5});
+  }).catch(()=>{});
+}

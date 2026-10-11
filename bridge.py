@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from core import SafetyStop
 
-HEARTBEAT_TIMEOUT = 30
+HEARTBEAT_TIMEOUT = 90
 
 
 class BrowserRejected(SafetyStop):
@@ -117,8 +117,10 @@ class Bridge:
     def online(self):
         # Chromium aggressively throttles timers in background tabs. Eight seconds
         # produced false disconnects during long WOS batches even though the next
-        # result/poll was valid. A valid result still refreshes this timestamp; only
-        # a genuinely silent channel for thirty seconds is treated as disconnected.
+        # result/poll was valid. A valid result still refreshes this timestamp;
+        # the extension's independent 30-second alarm can also wake the worker.
+        # Three missing alarm windows count as a disconnected idle channel;
+        # individual commands still have their own bounded delivery deadlines.
         return bool(self.connected) and time.monotonic() - self.last_seen < HEARTBEAT_TIMEOUT
 
     def re_pair(self):

@@ -53,8 +53,10 @@ def main():
     root.minsize(560, 330)
     panel = ttk.Frame(root, padding=16)
     panel.pack(fill="both", expand=True)
-    ttk.Label(panel, text=f"只执行名单 ID：{record.sa_id}").pack(anchor="w")
-    ttk.Label(panel, text=record.title, wraplength=525).pack(anchor="w", pady=8)
+    selected_id = tk.StringVar(value=f"只执行名单 ID：{record.sa_id}")
+    selected_title = tk.StringVar(value=record.title)
+    ttk.Label(panel, textvariable=selected_id).pack(anchor="w")
+    ttk.Label(panel, textvariable=selected_title, wraplength=525).pack(anchor="w", pady=8)
     ttk.Label(panel, text="请在 SA 页扩展配对，再绑定 WOS 页及后台导入页。\n"
               "配对完成后关闭浏览器排查会话，才开始纯脚本验收。").pack(anchor="w")
     # Keep the Tk variable alive for the window's lifetime; an anonymous
@@ -88,7 +90,7 @@ def main():
 
     def input_loop():
         for line in sys.stdin:
-            commands.put(line.strip().upper())
+            commands.put(line.strip())
     threading.Thread(target=input_loop, daemon=True).start()
 
     def execute():
@@ -141,7 +143,7 @@ def main():
             ("import_capabilities", {"sa_id": record.sa_id}),
         ):
             try:
-                results[action] = bridge.call(action, payload, timeout=25)
+                results[action] = bridge.call(action, payload, timeout=45)
             except SafetyStop as exc:
                 results[action] = {"error": str(exc)}
                 break  # A lost result is not permission to send another command.
@@ -154,9 +156,30 @@ def main():
         messages.put(("diagnostic_finish", results))
 
     def pump():
-        nonlocal busy, finished, passed, attempt
+        nonlocal busy, finished, passed, attempt, record
         while not commands.empty():
-            command = commands.get_nowait()
+            line = commands.get_nowait()
+            command, _, argument = line.partition(" ")
+            command = command.upper()
+            if command == "TARGET" and not busy:
+                # Select another allowed single-record task without changing
+                # pairing/roster/journals. Never clears done/skipped flags and
+                # never starts an operation automatically.
+                try:
+                    current = read_roster(fixed_roster_path(BASE))
+                    selected = select_one(current, argument.strip())
+                except SafetyStop as exc:
+                    print(json.dumps({"target_error": str(exc)}, ensure_ascii=False), flush=True)
+                    continue
+                record = selected
+                args.sa_id = selected.sa_id
+                finished, passed = False, False
+                selected_id.set(f"只执行名单 ID：{record.sa_id}")
+                selected_title.set(record.title)
+                status.set("目标已核验；尚未开始。配对无需更换。")
+                print(json.dumps({"selected": record.sa_id, "title": record.title,
+                                  "started": False}, ensure_ascii=False), flush=True)
+                continue
             if command == "RUN" and not busy and not passed:
                 if not bridge.online:
                     print("NOT_CONNECTED", flush=True)

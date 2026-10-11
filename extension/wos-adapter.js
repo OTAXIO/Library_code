@@ -77,7 +77,7 @@ async function runWOSCommand(command) {
       all('button,[role="button"],a',el).filter(control=>["Export","导出"].includes(actionLabel(control))).length===1);
     return panels.filter(el=>!panels.some(other=>other!==el&&el.contains(other)));
   };
-  const isTabExportPanel=panel=>all('h1,h2,h3,[role="heading"],.mat-dialog-title,.mat-mdc-dialog-title',panel)
+  const isTabExportPanel=panel=>all('h1,h2,h3,[role="heading"],.mat-dialog-title,.mat-mdc-dialog-title,div,span',panel)
     .some(el=>["Export Records to Tab Delimited File","将记录导出到制表符分隔文件","导出记录至制表符分隔文件",
       "导出记录到制表符分隔文件","导出记录到制表符分隔的文件"].includes(actionLabel(el)));
   const searchButton=(field,input)=>{
@@ -281,7 +281,9 @@ async function runWOSCommand(command) {
       if(!fullRecord())return {ok:true,data:{state:'unknown',reason:'record_page_changed'}};
       const recordURL=fingerprint(),state=window.__saWOSExport;
       if(!state||state.id!==command.sa_id||state.url!==recordURL)return {ok:true,data:{state:'unknown',record_url:recordURL}};
-      if(state.submitted)return {ok:true,data:{state:'submitted',record_url:recordURL}};
+      if(state.submitted)return {ok:true,data:{state:'submitted',record_url:recordURL,
+        click_observed:state.click_observed===true,
+        export_submission_protocol:state.export_submission_protocol===1?1:0}};
       if(!state.dialog.isConnected||!state.select.isConnected||!visible(state.dialog)||
           !fullContent.includes(selection(state.select))||state.ranges.some(el=>!el.isConnected||el.value!=='1'))
         return {ok:true,data:{state:'unknown',record_url:recordURL}};
@@ -486,11 +488,14 @@ async function runWOSCommand(command) {
       }
       const selected=selection(select);
       if(!full.includes(selected))fail("未确认 Full Record 选项");
-      window.__saWOSExport={id:command.sa_id,url:recordURL,dialog,select,ranges,submitted:false};
+      window.__saWOSExport={id:command.sa_id,url:recordURL,dialog,select,ranges,submitted:false,
+        click_observed:false,export_submission_protocol:1};
       const owned=window.__saWOSExport;
       // A user may finish the shown modal while the desktop is paused. Count
       // that actual button click too, so a later resume cannot export it twice.
-      button(["Export","导出"],dialog).addEventListener('click',()=>{owned.submitted=true;},{capture:true,once:true});
+      button(["Export","导出"],dialog).addEventListener('click',()=>{
+        owned.submitted=true;owned.click_observed=true;
+      },{capture:true,once:true});
       return {ok:true,data:{ready:true,record_url:recordURL}};
     }
     const state=window.__saWOSExport;
@@ -503,16 +508,13 @@ async function runWOSCommand(command) {
     const submit=button(["Export","导出"],state.dialog);
     if(submit.disabled||submit.getAttribute('aria-disabled')==='true')fail("最终 Export 尚不可用");
     state.submitted=true;
-    // Return the at-most-once receipt before WOS can unload this JS context.
-    // A late failure is unknown, never permission to click a second time.
-    setTimeout(()=>{
-      try{
-        if(fingerprint()!==recordURL||!state.dialog.isConnected||!state.select.isConnected||
-            !fullContent.includes(selection(state.select))||state.ranges.some(el=>!el.isConnected||el.value!=='1'))return;
-        click(submit);
-      }catch{/* The durable desktop intent preserves the uncertain outcome. */}
-    },0);
-    return {ok:true,data:{submitted:true,record_url:recordURL}};
+    // The export listener is already installed by the dispatcher. Submit now,
+    // not from a silently failing timer after a premature "submitted" reply.
+    // A lost context/throw still retains the durable intent; it never authorizes
+    // another click. A successful reply additionally proves the actual event.
+    click(submit);
+    if(state.click_observed!==true)fail("最终 Export 点击事件未确认；不重复导出，请检查网页");
+    return {ok:true,data:{submitted:true,click_observed:true,export_submission_protocol:1,record_url:recordURL}};
   } catch(error){return {ok:false,error:"[WOS 已暂停] "+error.message};}
 }
 if(typeof module!=="undefined")module.exports={runWOSCommand};
