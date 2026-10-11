@@ -40,7 +40,7 @@ test('WOS pairs and executes without an SA or import tab; rejects backend operat
       if(options.args?.[0]?.action==='wos_prepare_search')return [{result:{ok:true,data:{state:'ready'}}}];
       if(options.args?.[0]?.action==='wos_start_search'){
         tab.url='https://www.webofscience.com/wos/woscc/full-record/WOS:000123456789012';
-        return [{result:{ok:true,data:{submitted:true}}}];
+        return [{result:{ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}}}];
       }
       return [{result:{ok:true,data:{state:'record',record_url:tab.url}}}];
     }}

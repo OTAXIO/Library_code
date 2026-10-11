@@ -125,10 +125,16 @@ async function dispatchWorkflow(command,pair) {
       throw new Error('WOS 页面就绪检查未返回完整结果；本轮未提交检索');
     const page=Object.fromEntries([...flags,...counts].map(key=>[key,observed[key]]));
     page.export_dialog=observed.export_dialog===true;
+    for(const key of ['zero_result','summary_route','record_route','result_total_conflict'])
+      if(typeof observed[key]==='boolean')page[key]=observed[key];
+    for(const key of ['result_total','canonical_record_link_count'])
+      if(observed[key]===null||Number.isInteger(observed[key])&&observed[key]>=0&&observed[key]<=99999)
+        page[key]=observed[key];
     if(['login','verification',''].includes(observed.access_gate))page.access_gate=observed.access_gate;
     return {ok:true,data:{extension_version:chrome.runtime.getManifest().version,
       wos_download_protocol:1,search_prepare_protocol:1,export_prepare_protocol:1,
       export_submission_protocol:1,download_wait_protocol:1,
+      search_submission_protocol:1,result_link_protocol:1,
       result_reader:'shared-diagnostic',read_results_world:'ISOLATED',page}};
   }
   if(role==="importTabId") {
@@ -236,12 +242,14 @@ async function dispatchWorkflow(command,pair) {
       await new Promise(r=>setTimeout(r,200));
     }
     if(!prepared)throw new Error('WOS 检索页面准备超时：未能确认唯一字段、输入框及检索按钮；尚未提交 Search，名单保持原样。请核验高级检索/字段检索或登录状态');
-    // Search submission is deliberately a short injected step. The adapter
-    // schedules exactly one click and returns before a real WOS navigation can
-    // destroy the execution context. Results are then observed read-only.
+    // Search submission is a short one-shot step. Require a real click receipt;
+    // a scheduled callback alone cannot establish that the query was submitted.
+    // Results are subsequently observed read-only, never by repeating Search.
     const result=await execute(runWOSCommand,{...command,action:"wos_start_search",require_prepared:true});
     if(!result.ok)return result;
-    if(result.data?.submitted!==true)throw new Error('WOS 未确认 Search 提交回执；未自动重试，请核验当前网页');
+    if(result.data?.submitted!==true||result.data?.click_observed!==true||
+        result.data?.search_submission_protocol!==1)
+      throw new Error('WOS 未确认 Search 点击事件；未自动重试，请核验当前网页');
     const end=Math.min(Date.now()+90000,command.expires-12000);
     let navigated=false,navigationTarget,lastDiagnostic;
     while(Date.now()<end){
@@ -309,7 +317,8 @@ async function dispatchWorkflow(command,pair) {
           navigated=true;navigationTarget=target;
           const opened=await execute(runWOSCommand,{...command,action:'wos_open_result',navigate_url:target});
           if(!opened.ok)return opened;
-          if(opened.data?.submitted!==true||opened.data?.navigate_url!==target)
+          if(opened.data?.submitted!==true||opened.data?.click_observed!==true||
+              opened.data?.result_link_protocol!==1||opened.data?.navigate_url!==target)
             throw new Error('WOS 单篇链接点击回执未确认，未重复点击；请核验当前网页');
         }
       } else if(!["loading","record"].includes(state))throw new Error("WOS 返回了未知检索状态，请人工核验");

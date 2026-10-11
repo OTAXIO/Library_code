@@ -46,6 +46,13 @@ async function runWOSCommand(command) {
     while(Date.now()<end){check();if(fn())return;await new Promise(r=>setTimeout(r,180));}
     fail(label+"超时，未自动重复操作");
   };
+  const clickConfirmed=(el,label)=>{
+    let observed=false;
+    const record=()=>{observed=true;};
+    el.addEventListener('click',record,{capture:true,once:true});
+    try{click(el);}finally{el.removeEventListener('click',record,true);}
+    if(!observed)fail(label+"点击事件未确认；未自动重复操作");
+  };
   const button=(labels,root=document)=>one(all('button,[role="button"],a',root).filter(el=>labels.includes(actionLabel(el))),labels.join(" / "));
   // Read the action label, not decorative Material/SVG ligature text. Every
   // action still requires its own exact fixed label; export content/range and
@@ -309,9 +316,9 @@ async function runWOSCommand(command) {
       if(!link?.isConnected||link.disabled||link.getAttribute('aria-disabled')==='true'||
           link.hasAttribute('download')||!['','_self'].includes(link.getAttribute('target')||''))
         fail("WOS 论文链接不能在当前工作页安全打开，未点击");
-      const pageURL=location.href;
-      setTimeout(()=>{if(link.isConnected&&location.href===pageURL)link.click();},0);
-      return {ok:true,data:{submitted:true,navigate_url:command.navigate_url}};
+      clickConfirmed(link,"论文链接");
+      return {ok:true,data:{submitted:true,click_observed:true,result_link_protocol:1,
+        navigate_url:command.navigate_url}};
     }
     if(command.action==="wos_verify_record")return {ok:true,data:{state:"record",record_url:fingerprint()}};
     if(command.action==="wos_prepare_search") {
@@ -345,7 +352,7 @@ async function runWOSCommand(command) {
       const target=next[0], key=location.pathname+'|'+(fielded.length?'fielded':'advanced');
       if(Array.isArray(command.attempted_navigation)&&command.attempted_navigation.includes(key))return {ok:true,data:{state:"loading"}};
       if(target.disabled||target.getAttribute('aria-disabled')==='true')return {ok:true,data:{state:"loading"}};
-      setTimeout(()=>{if(target.isConnected)target.click();},0);
+      clickConfirmed(target,"检索导航");
       return {ok:true,data:{state:"navigating",navigation_key:key}};
     }
     if(command.action==="wos_search" || command.action==="wos_start_search") {
@@ -405,12 +412,11 @@ async function runWOSCommand(command) {
       const action=searchButton(field,input); // Input events may replace the button.
       if(action.disabled||action.getAttribute("aria-disabled")==="true")fail("控件尚不可用");
       if(command.action==="wos_start_search") {
-        // Return before the click can navigate. A real WOS navigation may destroy
-        // an injected execution context; keeping that navigation inside this long
-        // command was the source of desktop timeouts and a permanently busy worker.
-        // The extension background performs the subsequent read-only polling.
-        setTimeout(()=>action.click(),0);
-        return {ok:true,data:{submitted:true}};
+        // Submit in this short step and acknowledge the real event, not a timer
+        // that may never run. Result waiting stays in the background. Context
+        // loss is uncertain and never authorizes another Search click.
+        clickConfirmed(action,"Search");
+        return {ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}};
       }
       const previous=location.href;
       // A previous zero-result banner may still be mounted when the next query is

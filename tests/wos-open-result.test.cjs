@@ -45,6 +45,7 @@ const faults=[
       },`<h1>1 Documents</h1>${anchor()}`);
       const opened=await page.evaluate(runWOSCommand,{...command,expires:Date.now()+30000});
       assert.equal(opened.ok,true,JSON.stringify(opened));assert.equal(opened.data.submitted,true);
+      assert.equal(opened.data.click_observed,true);assert.equal(opened.data.result_link_protocol,1);
       await page.waitForURL(origin+record);
       assert.equal(await page.evaluate(()=>window.fixtureNonce),'kept','the site SPA must not be reloaded');
       assert.equal(await page.evaluate(()=>window.opensMade),1);

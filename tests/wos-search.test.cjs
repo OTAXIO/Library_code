@@ -16,6 +16,23 @@ const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
   const success=async()=>{const result=await run();assert.equal(result.ok,true,JSON.stringify(result));assert.equal(await page.evaluate(()=>searches),1);};
   const stopped=async count=>{const result=await run();assert.equal(result.ok,false);assert.match(result.error,new RegExp('识别到 '+count+' 个'));assert.equal(await page.evaluate(()=>searches),0);};
   const tests=[];const test=(name,fn)=>tests.push([name,fn]);
+  test('short Search acknowledges an immediate click even when zero-delay timers never run',async()=>{
+    await page.evaluate('window.searchCommand = '+runWOSCommand.toString());
+    const result=await page.evaluate(async command=>{
+      const original=window.setTimeout;
+      window.setTimeout=(fn,ms,...args)=>ms===0?0:original(fn,ms,...args);
+      try{return await window.searchCommand(command);}finally{window.setTimeout=original;}
+    },{action:'wos_start_search',sa_id:'synthetic',title:'Synthetic paper',require_prepared:true,expires:Date.now()+30000});
+    assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.data.click_observed,true);
+    assert.equal(result.data.search_submission_protocol,1);assert.equal(await page.evaluate(()=>searches),1);
+  });
+  test('a no-op Search click cannot fabricate a submitted receipt',async()=>{
+    await page.evaluate(()=>document.querySelector('button').click=()=>{});
+    const result=await page.evaluate(runWOSCommand,{action:'wos_start_search',sa_id:'synthetic',
+      title:'Synthetic paper',require_prepared:true,expires:Date.now()+30000});
+    assert.equal(result.ok,false);assert.match(result.error,/Search点击事件未确认/);
+    assert.equal(await page.evaluate(()=>searches),0);
+  });
   test('Chinese search text ignores the material magnifier ligature',async()=>{
     await page.evaluate(()=>document.querySelector('button').innerHTML='<mat-icon>search</mat-icon><span>检索</span>');await success();
   });

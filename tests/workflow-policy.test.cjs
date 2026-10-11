@@ -20,6 +20,22 @@ function prepared(input) {
   return [{result:{ok:true,data:{state:'ready'}}}];
 }
 
+test('scheduled-only Search receipt stops before result reads and is never clicked again', async()=>{
+  let starts=0,reads=0;
+  const sandbox={URL,Date,setTimeout,runWOSCommand(){},chrome:{
+    tabs:{get:async()=>({id:2,active:true,url:origins[0]+'/wos/woscc/basic-search'})},
+    scripting:{executeScript:async input=>{
+      if(prepared(input))return prepared(input);
+      if(input.args[0].action==='wos_start_search'){starts++;return [{result:{ok:true,data:{submitted:true}}}];}
+      reads++;throw Error('must not proceed with an unconfirmed Search');
+    }},
+  }};
+  loadPolicy(sandbox);
+  await assert.rejects(sandbox.dispatchWorkflow({action:'wos_search',title:'Synthetic',expires:Date.now()+30000},
+    {tabId:1,wosTabId:2}),/Search 点击事件/);
+  assert.equal(starts,1);assert.equal(reads,0);
+});
+
 test('library resolution dispatches only to the separately bound import tab', async () => {
   const calls=[];
   const sandbox={URL,Date,setTimeout,resolveLibraryRecord(){},runImportCommand(){},chrome:{
@@ -112,7 +128,7 @@ for (const origin of origins) {
       scripting:{executeScript:async input=>{executions.push(input);const action=input.args[0].action;
         if(action==='wos_diagnose')return [{result:{dialog_count:0,login_required:false,wos_error:false,site_timeout:false}}];
         if(prepared(input))return prepared(input);
-        if(action==='wos_start_search'){assert.equal(input.args[0].require_prepared,true);tab={...tab,url:origin+recordPath,status:'complete'};return [{result:{ok:true,data:{submitted:true}}}];}
+        if(action==='wos_start_search'){assert.equal(input.args[0].require_prepared,true);tab={...tab,url:origin+recordPath,status:'complete'};return [{result:{ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}}}];}
         return [{result:{ok:true,data:{state:'record',record_url:origin+recordPath}}}];}},
     }};
     loadPolicy(sandbox);
@@ -145,7 +161,7 @@ test('only the pre-click stale-zero marker requests one clean WOS reload', async
       if(action==='wos_diagnose')return [{result:{core_search_route:true,query_input_count:1,
         zero_result:false,busy:false,wos_error:false,site_timeout:false,login_required:false,dialog_count:0}}];
       if(prepared(input))return prepared(input);
-      if(action==='wos_start_search'){tab={...tab,url:origins[0]+recordPath};return [{result:{ok:true,data:{submitted:true}}}];}
+      if(action==='wos_start_search'){tab={...tab,url:origins[0]+recordPath};return [{result:{ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}}}];}
       return [{result:{ok:true,data:{state:'record',record_url:origins[0]+recordPath}}}];}},
   }};
   loadPolicy(sandbox);
@@ -160,11 +176,11 @@ test('one canonical result follows its own page link once, without a hard URL re
     tabs:{get:async()=>tab,update:async()=>{throw Error('must not replace the result URL');}},
     scripting:{executeScript:async input=>{const action=input.args[0].action;
       if(prepared(input))return prepared(input);
-      if(action==='wos_start_search')return [{result:{ok:true,data:{submitted:true}}}];
+      if(action==='wos_start_search')return [{result:{ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}}}];
       if(action==='wos_open_result'){
         assert.equal(input.world,'MAIN');assert.equal(input.args[0].navigate_url,origin+recordPath);
         clicks.push(input.args[0].navigate_url);tab={...tab,url:origin+recordPath};
-        return [{result:{ok:true,data:{submitted:true,navigate_url:origin+recordPath}}}];
+        return [{result:{ok:true,data:{submitted:true,click_observed:true,result_link_protocol:1,navigate_url:origin+recordPath}}}];
       }
       if(action==='wos_read_results'&&reads++===0)return [{result:{ok:true,data:{state:'single',navigate_url:origin+recordPath}}}];
       return [{result:{ok:true,data:{state:'record',record_url:origin+recordPath}}}];}},
@@ -186,11 +202,11 @@ function corroborationSandbox(isolated,main) {
     scripting:{executeScript:async input=>{
       const action=input.args[0].action;
       if(prepared(input))return prepared(input);
-      if(action==='wos_start_search'){starts++;return [{result:{ok:true,data:{submitted:true}}}];}
+      if(action==='wos_start_search'){starts++;return [{result:{ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}}}];}
       if(action==='wos_open_result'){
         assert.equal(input.world,'MAIN');navigations.push(input.args[0].navigate_url);
         tab={...tab,url:input.args[0].navigate_url};
-        return [{result:{ok:true,data:{submitted:true,navigate_url:input.args[0].navigate_url}}}];
+        return [{result:{ok:true,data:{submitted:true,click_observed:true,result_link_protocol:1,navigate_url:input.args[0].navigate_url}}}];
       }
       assert.equal(action,'wos_read_results');calls.push(input.world);
       if(tab.url===origin+recordPath)return [{result:{ok:true,data:{state:'record',record_url:tab.url}}}];
@@ -257,7 +273,7 @@ test('slow zero-result reset waits for fresh search DOM before the next Search',
         starts++;
         assert.equal(clean,true,'the previous zero banner must clear before the only Search');
         searchClicks++;tab={...tab,url:origin+recordPath};
-        return [{result:{ok:true,data:{submitted:true}}}];
+        return [{result:{ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}}}];
       }
       return [{result:{ok:true,data:{state:'record',record_url:origin+recordPath}}}];
     }}
@@ -353,11 +369,11 @@ test('WOS probes read a rendered loading tab immediately instead of waiting for 
       if(prepared(options))return prepared(options);
       if(options.args[0].action==='wos_start_search'){
         tab={...tab,url:origin+'/wos/woscc/summary/new',status:'loading'};
-        return [{result:{ok:true,data:{submitted:true}}}];
+        return [{result:{ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}}}];
       }
       if(options.args[0].action==='wos_open_result'){
         tab={...tab,url:options.args[0].navigate_url};
-        return [{result:{ok:true,data:{submitted:true,navigate_url:options.args[0].navigate_url}}}];
+        return [{result:{ok:true,data:{submitted:true,click_observed:true,result_link_protocol:1,navigate_url:options.args[0].navigate_url}}}];
       }
       return [{result:{ok:true,data:tab.url.includes('/summary/')?
         {state:'single',navigate_url:origin+recordPath}:{state:'record',record_url:origin+recordPath}}}];
@@ -377,10 +393,10 @@ test('a list still mounted after its title click is polled, not clicked twice', 
     tabs:{get:async()=>tab,update:async(id,change)=>{navigations.push(change.url);tab={...tab,...change};}},
     scripting:{executeScript:async options=>{
       if(prepared(options))return prepared(options);
-      if(options.args[0].action==='wos_start_search'){starts++;return [{result:{ok:true,data:{submitted:true}}}];}
+      if(options.args[0].action==='wos_start_search'){starts++;return [{result:{ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}}}];}
       if(options.args[0].action==='wos_open_result'){
         navigations.push(options.args[0].navigate_url);tab={...tab,url:options.args[0].navigate_url};
-        return [{result:{ok:true,data:{submitted:true,navigate_url:options.args[0].navigate_url}}}];
+        return [{result:{ok:true,data:{submitted:true,click_observed:true,result_link_protocol:1,navigate_url:options.args[0].navigate_url}}}];
       }
       reads++;
       return [{result:{ok:true,data:reads<=2?{state:'single',navigate_url:origin+recordPath}:
@@ -399,7 +415,7 @@ test('navigation probes may transiently lose a frame, but never retry Search', a
     tabs:{get:async()=>({id:2,url:origin+'/wos/woscc/basic-search',status:'loading'})},
     scripting:{executeScript:async options=>{
       if(prepared(options))return prepared(options);
-      if(options.args[0].action==='wos_start_search'){starts++;return [{result:{ok:true,data:{submitted:true}}}];}
+      if(options.args[0].action==='wos_start_search'){starts++;return [{result:{ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}}}];}
       reads++;
       if(reads===1)throw new Error('Execution context was destroyed');
       if(reads===2)return [];
@@ -419,10 +435,10 @@ test('a previous full-record DOM is not accepted for the new navigation target',
     tabs:{get:async()=>tab,update:async(id,change)=>{navigations++;tab={...tab,...change};}},
     scripting:{executeScript:async options=>{
       if(prepared(options))return prepared(options);
-      if(options.args[0].action==='wos_start_search')return [{result:{ok:true,data:{submitted:true}}}];
+      if(options.args[0].action==='wos_start_search')return [{result:{ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}}}];
       if(options.args[0].action==='wos_open_result'){
         navigations++;tab={...tab,url:options.args[0].navigate_url};
-        return [{result:{ok:true,data:{submitted:true,navigate_url:options.args[0].navigate_url}}}];
+        return [{result:{ok:true,data:{submitted:true,click_observed:true,result_link_protocol:1,navigate_url:options.args[0].navigate_url}}}];
       }
       reads++;
       return [{result:{ok:true,data:reads===1?{state:'single',navigate_url:origin+recordPath}:
@@ -437,14 +453,14 @@ test('a previous full-record DOM is not accepted for the new navigation target',
 
 test('a lost or mismatched title-click acknowledgement never causes another click or URL replacement',async()=>{
   for(const reply of [null,{ok:true,data:{submitted:false}},
-      {ok:true,data:{submitted:true,navigate_url:origins[0]+recordPath.replace('789012','789013')}}]){
+      {ok:true,data:{submitted:true,click_observed:true,result_link_protocol:1,navigate_url:origins[0]+recordPath.replace('789012','789013')}}]){
     let clicks=0,starts=0;
     const sandbox={URL,Date,setTimeout,runWOSCommand(){},chrome:{
       tabs:{get:async()=>({id:2,url:origins[0]+'/wos/woscc/basic-search'}),
         update:async()=>{throw Error('must not replace the URL');}},
       scripting:{executeScript:async options=>{
         if(prepared(options))return prepared(options);
-        if(options.args[0].action==='wos_start_search'){starts++;return [{result:{ok:true,data:{submitted:true}}}];}
+        if(options.args[0].action==='wos_start_search'){starts++;return [{result:{ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}}}];}
         if(options.args[0].action==='wos_open_result'){
           clicks++;if(reply===null)throw Error('Execution context was destroyed');return [{result:reply}];
         }
@@ -473,7 +489,7 @@ test('an unreturned read probe is bounded; observation retries never repeat Sear
     tabs:{get:async()=>({id:2,url:origins[0]+'/wos/woscc/basic-search'})},
     scripting:{executeScript:async options=>{
       if(prepared(options))return prepared(options);
-      if(options.args[0].action==='wos_start_search'){starts++;return [{result:{ok:true,data:{submitted:true}}}];}
+      if(options.args[0].action==='wos_start_search'){starts++;return [{result:{ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}}}];}
       assert.equal(options.func.name,'inspectWorkPage');
       assert.equal(options.world,'ISOLATED');
       if(++reads===1)return new Promise(()=>{});
@@ -504,6 +520,8 @@ test('download capability check is read-only and reports the actual running exte
   assert.equal(result.data.search_prepare_protocol,1);
   assert.equal(result.data.export_submission_protocol,1);
   assert.equal(result.data.download_wait_protocol,1);
+  assert.equal(result.data.search_submission_protocol,1);
+  assert.equal(result.data.result_link_protocol,1);
   assert.equal(result.data.result_reader,'shared-diagnostic');
   assert.equal(injections.length,1);
   assert.equal(injections[0].world,'ISOLATED');
@@ -615,7 +633,7 @@ test('activated Smart/Advanced preparation follows navigation and hydration befo
       }
       if(command.action==='wos_start_search'){
         starts++;assert.equal(prepares,5);assert.equal(command.require_prepared,true);order.push('Search');
-        return [{result:{ok:true,data:{submitted:true}}}];
+        return [{result:{ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}}}];
       }
       assert.equal(command.action,'wos_read_results');assert.equal(input.world,'ISOLATED');
       return [{result:{ok:true,data:{state:'zero'}}}];
@@ -644,7 +662,7 @@ test('preparation context loss may be observed again, but a Search context loss 
         if(command.action==='wos_start_search'){
           starts++;assert.equal(command.require_prepared,true);
           if(failSubmit)throw Error('Execution context was destroyed');
-          return [{result:{ok:true,data:{submitted:true}}}];
+          return [{result:{ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}}}];
         }
         assert.equal(command.action,'wos_read_results');reads++;
         return [{result:{ok:true,data:{state:'zero'}}}];
@@ -708,7 +726,7 @@ test('a clean zero-input page after stale reload proceeds to semantic preparatio
           wos_error:false,site_timeout:false,login_required:false,dialog_count:0}}];
       }
       if(command.action==='wos_start_search'){
-        starts++;assert.equal(command.require_prepared,true);return [{result:{ok:true,data:{submitted:true}}}];
+        starts++;assert.equal(command.require_prepared,true);return [{result:{ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}}}];
       }
       assert.equal(command.action,'wos_read_results');return [{result:{ok:true,data:{state:'zero'}}}];
     }}

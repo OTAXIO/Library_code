@@ -142,10 +142,10 @@ test('only a searched canonical target can hand a blank record to export prepara
     scripting:{executeScript:async input=>{
       const cmd=input.args[0];calls.push(cmd.action);
       if(cmd.action==='wos_prepare_search')return [{result:ok({state:'ready'})}];
-      if(cmd.action==='wos_start_search'){started=true;return [{result:ok({submitted:true})}];}
+      if(cmd.action==='wos_start_search'){started=true;return [{result:ok({submitted:true,click_observed:true,search_submission_protocol:1})}];}
       if(input.args[0].action==='wos_open_result'){
         assert.equal(input.args[0].navigate_url,record);navigated=true;
-        return [{result:ok({submitted:true,navigate_url:record})}];
+        return [{result:ok({submitted:true,click_observed:true,result_link_protocol:1,navigate_url:record})}];
       }
       return [{result:ok(navigated?{state:'loading',diagnostic:{record_route:true,blank_record:true,busy:false}}:
         {state:'single',navigate_url:record})}];
