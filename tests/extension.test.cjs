@@ -131,9 +131,10 @@ assert.ok(['https://www.webofscience.com','https://webofscience.clarivate.cn'].i
     const wosPage=await context.newPage();
     const wosFixture=fs.readFileSync(path.join(__dirname,'fixtures/wos.html'),'utf8');
     await wosPage.route('**/*',r=>r.fulfill({status:200,contentType:'text/html',body:wosFixture}));
-    // Start outside document search to verify that navigation preserves the
-    // selected regional host instead of silently switching CN back to .com.
-    await wosPage.goto(wosOrigin+'/wos/author/author-search');
+    // Return from an existing document using WOS's own Advanced navigation;
+    // preserve the selected regional host, without hard-navigating from an
+    // unrelated author-search page or inventing its session context.
+    await wosPage.goto(wosOrigin+'/wos/woscc/full-record/WOS:000123456789012');
     // Playwright normally stores downloads under extensionless GUIDs. Give this
     // isolated test browser a normal dedicated download directory; production
     // extension behavior remains strict about .txt and is not relaxed for tests.

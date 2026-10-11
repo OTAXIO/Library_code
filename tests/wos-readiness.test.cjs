@@ -13,6 +13,18 @@ const cases=[
   {name:'navigation and hidden inputs do not make a search form ready',
     html:'<nav><input type="search" value="PRIVATE_QUERY"></nav><main><input hidden><input style="display:none"></main>',
     inputs:0,login:false,dialogs:0,zero:false,error:false},
+  {name:'live disabled Search with decorative circle-notch is an in-flight query',
+    html:'<main><input><button data-ta="run-search" disabled><mat-icon aria-hidden="true" class="svg-spinner" data-mat-icon-name="circle-notch">loading</mat-icon></button></main>',
+    inputs:1,login:false,dialogs:0,zero:false,error:false,busy:true},
+  {name:'disabled Search without the specific spinner is not a running query',
+    html:'<main><input><button data-ta="run-search" disabled>Search</button></main>',
+    inputs:1,login:false,dialogs:0,zero:false,error:false},
+  {name:'hidden pending Search is not current page busy evidence',
+    html:'<main><input></main><div hidden><button data-ta="run-search" disabled><mat-icon class="svg-spinner" svgicon="circle-notch"></mat-icon></button></div>',
+    inputs:1,login:false,dialogs:0,zero:false,error:false},
+  {name:'a stale zero banner during the exact pending Search is not a completed zero',
+    html:'<main>Your search found no results<input><button data-ta="run-search" disabled><mat-icon aria-hidden="true" class="svg-spinner" svgicon="circle-notch">loading</mat-icon></button></main>',
+    inputs:1,login:false,dialogs:0,zero:false,error:false,busy:true},
   {name:'visible login gate is distinct from initialization and does not expose a password',
     html:'<main><input type="password" value="PRIVATE_SECRET"></main>',inputs:0,login:true,dialogs:0,zero:false,error:false},
   {name:'passive captcha badge does not stop a healthy WOS page',
@@ -57,6 +69,7 @@ const cases=[
         assert.equal(diagnostic.login_required,item.login,item.name);
         assert.equal(diagnostic.dialog_count,item.dialogs,item.name);
         assert.equal(diagnostic.zero_result,item.zero,item.name);
+        assert.equal(diagnostic.busy,Boolean(item.busy),item.name);
         assert.equal(diagnostic.wos_error,item.error,item.name);
         assert.equal(diagnostic.site_timeout,Boolean(item.timeout),item.name);
         if(item.timeout){

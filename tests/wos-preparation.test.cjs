@@ -10,6 +10,8 @@ const cases=[
   {name:'Smart query is not mistaken for a ready fielded search',html:'<main><input value="UNCHANGED_QUERY"><button>Search</button></main>',state:'loading'},
   {name:'selected Fielded tab waits for hydration without reclicking',html:'<main><button role="tab" aria-selected="true">Fielded Search</button></main>',state:'loading'},
   {name:'busy form waits and never fills or submits',html:'<main aria-busy="true">'+form+'</main>',state:'loading'},
+  {name:'live pending Search spinner waits without resetting an old banner',
+    html:'<main>Your search found no results'+form.replace('<button type="button">','<button type="button" data-ta="run-search" disabled><mat-icon aria-hidden="true" class="svg-spinner" svgicon="circle-notch">loading</mat-icon>')+'</main>',state:'loading'},
   {name:'unique form is ready but Search is not clicked',html:'<main>'+form+'</main>',state:'ready'},
   {name:'accessible icon-only Title selector retains its exact label',html:'<main><form><button role="combobox" aria-label="Title" type="button"><mat-icon>expand_more</mat-icon></button><input value="UNCHANGED_QUERY"><button type="button">Search</button></form></main>',state:'ready'},
   {name:'navigation search input is not borrowed by the form',html:'<nav><input value="UNCHANGED_QUERY"><button>Search</button></nav><main>'+form+'</main>',state:'ready'},

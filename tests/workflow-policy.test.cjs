@@ -122,11 +122,15 @@ for (const origin of origins) {
   });
   test(`${origin}: navigation retains the bound regional origin`, async () => {
     const navigations = [], executions = [];
-    let tab = {id:2, url:origin + '/wos/author/author-search', status:'complete'};
+    let tab = {id:2, url:origin + '/wos/woscc/summary/previous', status:'complete'};
     const sandbox = {URL, Date, setTimeout, runWOSCommand(){}, chrome:{
       tabs:{get:async()=>tab, update:async(id, change)=>{navigations.push(change.url);tab={...tab,...change};}},
       scripting:{executeScript:async input=>{executions.push(input);const action=input.args[0].action;
         if(action==='wos_diagnose')return [{result:{dialog_count:0,login_required:false,wos_error:false,site_timeout:false}}];
+        if(action==='wos_return_search'){
+          tab={...tab,url:origin+'/wos/woscc/advanced-search'};
+          return [{result:{ok:true,data:{state:'navigating',click_observed:true,search_navigation_protocol:1}}}];
+        }
         if(prepared(input))return prepared(input);
         if(action==='wos_start_search'){assert.equal(input.args[0].require_prepared,true);tab={...tab,url:origin+recordPath,status:'complete'};return [{result:{ok:true,data:{submitted:true,click_observed:true,search_submission_protocol:1}}}];}
         return [{result:{ok:true,data:{state:'record',record_url:origin+recordPath}}}];}},
@@ -134,17 +138,19 @@ for (const origin of origins) {
     loadPolicy(sandbox);
     const result = await sandbox.dispatchWorkflow({action:'wos_search', expires:Date.now()+30000}, {tabId:1,wosTabId:2});
     assert.equal(result.ok, true);
-    assert.deepEqual(navigations, [origin + '/wos/woscc/basic-search']);
-    assert.equal(executions.length, 4);
+    assert.deepEqual(navigations, [],'return via the existing site navigation, never a hard URL replacement');
+    assert.equal(executions.length, 5);
     assert.equal(executions[0].target.tabId, 2);
     assert.equal(executions[0].args[0].action, 'wos_diagnose');
-    assert.equal(executions[1].args[0].action, 'wos_prepare_search');
-    assert.equal(executions[2].args[0].action, 'wos_start_search');
-    assert.equal(executions[3].args[0].action, 'wos_read_results');
+    assert.equal(executions[1].args[0].action, 'wos_return_search');
+    assert.equal(executions[2].args[0].action, 'wos_prepare_search');
+    assert.equal(executions[3].args[0].action, 'wos_start_search');
+    assert.equal(executions[4].args[0].action, 'wos_read_results');
     assert.equal(executions[0].world, 'ISOLATED');
     assert.equal(executions[1].world, 'MAIN');
     assert.equal(executions[2].world, 'MAIN');
-    assert.equal(executions[3].world, 'ISOLATED');
+    assert.equal(executions[3].world, 'MAIN');
+    assert.equal(executions[4].world, 'ISOLATED');
   });
 }
 
@@ -335,13 +341,17 @@ test('binding errors distinguish SA reuse, wrong role, and wrong backend menu wi
 });
 
 test('a redirect to the other WOS origin stops before Search after a read-only access check', async () => {
-  let tab={id:2,url:origins[1]+'/wos/author/author-search',status:'complete'}, executed=false;
+  let tab={id:2,url:origins[1]+'/wos/woscc/summary/previous',status:'complete'}, executed=false;
   const sandbox={URL,Date,setTimeout,runWOSCommand(){},chrome:{
     tabs:{get:async()=>tab,update:async()=>{tab={...tab,url:origins[0]+'/wos/woscc/basic-search'};}},
     scripting:{executeScript:async input=>{
       if(input.args[0].action==='wos_diagnose'){
         assert.equal(input.world,'ISOLATED');
         return [{result:{dialog_count:0,login_required:false,wos_error:false,site_timeout:false}}];
+      }
+      if(input.args[0].action==='wos_return_search'){
+        tab={...tab,url:origins[0]+'/wos/woscc/basic-search'};
+        return [{result:{ok:true,data:{state:'navigating',click_observed:true,search_navigation_protocol:1}}}];
       }
       executed=true;return [];
     }}
@@ -366,6 +376,10 @@ test('WOS probes read a rendered loading tab immediately instead of waiting for 
     scripting:{executeScript:async options=>{
       calls.push(options);
       if(options.args[0].action==='wos_diagnose')return [{result:{dialog_count:0,login_required:false,wos_error:false,site_timeout:false}}];
+      if(options.args[0].action==='wos_return_search'){
+        tab={...tab,url:origin+'/wos/woscc/advanced-search'};
+        return [{result:{ok:true,data:{state:'navigating',click_observed:true,search_navigation_protocol:1}}}];
+      }
       if(prepared(options))return prepared(options);
       if(options.args[0].action==='wos_start_search'){
         tab={...tab,url:origin+'/wos/woscc/summary/new',status:'loading'};
@@ -381,9 +395,9 @@ test('WOS probes read a rendered loading tab immediately instead of waiting for 
   }};
   loadPolicy(sandbox);
   const result=await sandbox.dispatchWorkflow({action:'wos_search',title:'Synthetic',expires:Date.now()+30000},{tabId:1,wosTabId:2});
-  assert.equal(result.ok,true);assert.equal(calls.length,6);
+  assert.equal(result.ok,true);assert.equal(calls.length,7);
   assert.ok(calls.every(call=>call.injectImmediately===true));
-  assert.deepEqual(navigations,[origin+'/wos/woscc/basic-search']);
+  assert.deepEqual(navigations,[],'return uses the existing WOS navigation, never a hard URL replacement');
 });
 
 test('a list still mounted after its title click is polled, not clicked twice', async()=>{

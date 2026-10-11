@@ -6,7 +6,7 @@ const main=document.getElementById('main');
 const ut='WOS:000123456789012';
 window.recordPage=function(){
   history.pushState({},'', '/wos/woscc/full-record/'+ut);
-  main.innerHTML='<h1>Synthetic paper</h1><button id="export">Export</button>';
+  main.innerHTML='<nav><a href="/wos/woscc/basic-search">Advanced Search</a></nav><h1>Synthetic paper</h1><button id="export">Export</button>';
   document.getElementById('export').onclick=()=>{
     const b=document.createElement('button');b.textContent='Tab delimited file';main.appendChild(b);
     b.onclick=()=>{b.remove();const d=document.createElement('section');d.setAttribute('role','dialog');

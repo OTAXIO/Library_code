@@ -6,6 +6,11 @@ const main=document.getElementById('main');
 const ut='WOS:000123456789012';
 const cn=location.hostname==='webofscience.clarivate.cn';
 window.exportsMade=0;
+if(/\/(?:summary|full-record)\//.test(location.pathname)){
+  const navigation=document.createElement('nav');
+  navigation.innerHTML='<a href="/wos/woscc/basic-search">'+(cn?'高级检索':'Advanced Search')+'</a>';
+  document.body.prepend(navigation);
+}
 if(location.pathname.includes('/summary/')){
   main.innerHTML=`<div role="tab"><b>1</b><span>${cn?'篇文献':'Documents'}</span></div>
     <article><a href="/wos/woscc/full-record/WOS%3A000123456789012" style="display:contents"><span>Synthetic paper</span></a></article>

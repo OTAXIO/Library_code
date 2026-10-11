@@ -45,6 +45,10 @@ const cases=[
   {name:'encoded route separators remain rejected',html:`<h1>1 Documents</h1>${link('',record.replaceAll('/','%2F'))}`,state:'loading',total:1},
   {name:'short accession numbers remain rejected',html:`<h1>1 Documents</h1>${link('',record.slice(0,-1))}`,state:'loading',total:1},
   {name:'a loading indicator delays navigation',html:`<h1>1 Documents</h1><span role="progressbar">Loading</span>${link()}`,state:'loading',total:1},
+  {name:'live Search spinner prevents accepting a still-mounted result',
+    html:`<h1>1 Documents</h1>${link()}<button data-ta="run-search" disabled><mat-icon aria-hidden="true" class="svg-spinner" data-mat-icon-name="circle-notch">loading</mat-icon></button>`,state:'loading',total:1},
+  {name:'old zero banner while Search spins is pending, not a completed zero',route:'/wos/woscc/basic-search',
+    html:'Your search found no results<button data-ta="run-search" disabled><mat-icon aria-hidden="true" class="svg-spinner" svgicon="circle-notch">loading</mat-icon></button>',state:'loading',total:null},
   {name:'zero document total on the summary is a completed empty result',html:'<div role="tab"><b>0</b><span>Documents</span></div>',state:'zero',total:0},
 ];
 (async()=>{

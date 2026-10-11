@@ -128,6 +128,10 @@ async function runWOSCommand(command) {
   const click=el=>{check();if(el.disabled||el.getAttribute("aria-disabled")==="true")fail("控件尚不可用");el.click();};
   const queryInputs=field=>all('input:not([type]),input[type="text"],input[type="search"],textarea',field.closest('form')||document)
     .filter(el=>!el.readOnly&&!el.disabled&&!el.closest('nav,header,footer,aside,[role="navigation"],[role="banner"],[hidden],[inert],[aria-hidden="true"]'));
+  const pendingSearch=()=>all('button[data-ta="run-search"]').some(el=>
+    !el.closest('[hidden],[inert],[aria-hidden="true"]')&&
+    (el.disabled||el.getAttribute('aria-disabled')==='true')&&
+    el.querySelector('.svg-spinner[data-mat-icon-name="circle-notch"],.svg-spinner[svgicon="circle-notch"]'));
   const set=(el,value)=>{
     const proto=el.tagName==="TEXTAREA"?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(proto,"value").set.call(el,value);
@@ -242,7 +246,7 @@ async function runWOSCommand(command) {
     const urls=recordLinks();
     const summary=/^\/wos\/woscc\/summary\//.test(location.pathname);
     const total=summary?resultTotal():{value:null,conflict:false,values:[]};
-    const busy=all('[aria-busy="true"],[role="progressbar"],mat-spinner,mat-progress-bar,.mat-mdc-progress-spinner')
+    const busy=pendingSearch()||all('[aria-busy="true"],[role="progressbar"],mat-spinner,mat-progress-bar,.mat-mdc-progress-spinner')
       .some(el=>!el.closest('[hidden],[inert],[aria-hidden="true"]'));
     const diagnostic={summary_route:summary,record_route:fullRecord(),busy,result_total:total.value,result_total_conflict:total.conflict,
       canonical_record_link_count:urls.size};
@@ -254,7 +258,7 @@ async function runWOSCommand(command) {
       if(busy||exports.length!==1)return {state:"loading",diagnostic};
       return {state:"record",record_url:fingerprint(),diagnostic};
     }
-    if(noResults())return {state:"zero",diagnostic};
+    if(noResults()&&!busy)return {state:"zero",diagnostic};
     if(!summary||busy)return {state:"loading",diagnostic};
     if(total.values.some(count=>count>1)||urls.size>1)return {state:"multiple",diagnostic};
     if(!total.conflict&&total.value===0&&urls.size===0)return {state:"zero",diagnostic};
@@ -265,7 +269,7 @@ async function runWOSCommand(command) {
   };
   try {
     check();
-    if(!["wos_prepare_search","wos_search","wos_start_search","wos_read_results","wos_open_result","wos_verify_record","wos_export_probe","wos_export_status","wos_prepare_export","wos_check_export","wos_download"].includes(command.action))fail("未知 WOS 命令");
+    if(!["wos_return_search","wos_prepare_search","wos_search","wos_start_search","wos_read_results","wos_open_result","wos_verify_record","wos_export_probe","wos_export_status","wos_prepare_export","wos_check_export","wos_download"].includes(command.action))fail("未知 WOS 命令");
     if(typeof command.title!=="string" || !command.title.trim() || command.title.length>1500)fail("题名缺失或过长");
     if(command.action==='wos_export_probe'){
       const recordURL=fingerprint();
@@ -321,16 +325,33 @@ async function runWOSCommand(command) {
         navigate_url:command.navigate_url}};
     }
     if(command.action==="wos_verify_record")return {ok:true,data:{state:"record",record_url:fingerprint()}};
+    if(command.action==='wos_return_search') {
+      if(all('[role="dialog"],mat-dialog-container').length)fail("WOS 有弹窗，未离开当前文献");
+      if(!fullRecord()&&!/^\/wos\/woscc\/summary\//.test(location.pathname))fail("当前不是已确认的 WOS 文献或结果页，未切换检索页");
+      const labels=["Advanced Search","高级检索","高级搜索","進階檢索"];
+      const targets=all('a,button,[role="tab"]').filter(el=>
+        el.closest('nav,[role="navigation"]')&&labels.includes(actionLabel(el)));
+      const target=one(targets,"WOS 高级检索导航");
+      if(target.hasAttribute('download')||!['','_self'].includes(target.getAttribute('target')||''))
+        fail("高级检索导航不是当前工作页操作，未点击");
+      if(target.tagName==='A'){
+        const href=new URL(target.href,location.href);
+        if(href.origin!==location.origin||href.username||href.password||!href.pathname.startsWith('/wos/woscc/'))
+          fail("高级检索导航不属于当前 WOS 工作区，未点击");
+      }
+      clickConfirmed(target,"高级检索导航");
+      return {ok:true,data:{state:'navigating',click_observed:true,search_navigation_protocol:1}};
+    }
     if(command.action==="wos_prepare_search") {
       // Short, resumable navigation-only phase. It cannot fill or submit a
       // query. Full document navigation may destroy this context; only this
       // phase may then be observed again. Search remains a separate one-shot.
       if(!/\/(?:basic-search|advanced-search|fielded-search)\/?$/.test(location.pathname))fail("请先进入 WOS 核心合集的字段检索页");
       if(all('[role="dialog"],mat-dialog-container').length)fail("WOS 有弹窗，请人工处理");
-      if(noResults())return {ok:true,data:{state:"stale_zero"}};
-      if(all('[aria-busy="true"],[role="progressbar"],mat-spinner,mat-progress-bar,.mat-mdc-progress-spinner')
+      if(pendingSearch()||all('[aria-busy="true"],[role="progressbar"],mat-spinner,mat-progress-bar,.mat-mdc-progress-spinner')
           .some(el=>!el.closest('[hidden],[inert],[aria-hidden="true"]')))
         return {ok:true,data:{state:"loading"}};
+      if(noResults())return {ok:true,data:{state:"stale_zero"}};
       const combos=fields();
       if(combos.length>1)fail(`检索字段选择器未唯一识别（识别到 ${combos.length} 个）。请只保留一行条件；尚未提交检索`);
       if(combos.length===1) {
@@ -394,7 +415,10 @@ async function runWOSCommand(command) {
       const combos=fields();
       if(combos.length!==1)fail(`检索字段选择器未唯一识别（识别到 ${combos.length} 个）。请进入 Advanced Search / 高级检索 → Fielded Search / 字段检索，只保留一行条件。可点扩展“查看连接诊断”复制控件诊断`);
       let field=combos[0];
-      if(field.tagName==="SELECT"){
+      if(choices.includes(fieldText(field))){
+        // Re-selecting an already correct Material field can reset its model.
+        // Leave it alone and only control the one verified query input below.
+      } else if(field.tagName==="SELECT"){
         const option=one([...field.options].filter(o=>choices.includes(norm(o.textContent))),"检索字段");
         field.value=option.value;field.dispatchEvent(new Event("change",{bubbles:true}));
       } else {
@@ -408,8 +432,29 @@ async function runWOSCommand(command) {
       const inputs=queryInputs(field);
       const input=one(inputs,"单行文献检索输入框");
       searchButton(field,input); // Ambiguity stops before replacing the query.
-      set(input,query);
-      const action=searchButton(field,input); // Input events may replace the button.
+      if(input.value!==query){
+        input.focus();set(input,query);input.blur();
+      }
+      // Input/blur may cause Angular to replace controls or commit a deferred
+      // form model. Observe exact query + field + enabled action across two
+      // checks before the sole Search click, never infer readiness from a URL.
+      let stableInput,stableSince=0;
+      await wait(()=>{
+        const current=fields();
+        if(current.length>1)fail("检索条件在输入后变为多行，未提交 Search");
+        if(current.length!==1||!choices.includes(fieldText(current[0])))return false;
+        const inputs=queryInputs(current[0]);
+        if(inputs.length>1)fail("检索输入框在输入后不唯一，未提交 Search");
+        if(inputs.length!==1||inputs[0].value!==query){stableSince=0;return false;}
+        const currentAction=searchButton(current[0],inputs[0]);
+        if(currentAction.disabled||currentAction.getAttribute('aria-disabled')==='true'||pendingSearch()){
+          stableSince=0;return false;
+        }
+        if(stableInput!==inputs[0]||!stableSince){stableInput=inputs[0];stableSince=Date.now();}
+        return Date.now()-stableSince>=180;
+      },"确认检索输入与控件",5000);
+      field=fields()[0];
+      const action=searchButton(field,stableInput); // Re-resolve replaced controls.
       if(action.disabled||action.getAttribute("aria-disabled")==="true")fail("控件尚不可用");
       if(command.action==="wos_start_search") {
         // Submit in this short step and acknowledge the real event, not a timer

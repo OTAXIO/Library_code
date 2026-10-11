@@ -88,7 +88,25 @@ const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
     await page.evaluate(()=>{const b=document.querySelector('button'),wrapper=document.createElement('div');wrapper.setAttribute('aria-hidden','true');wrapper.append(b.cloneNode(true));document.getElementById('main').append(wrapper);});await success();
   });
   test('disabled search button is not force-enabled or clicked',async()=>{
-    await page.evaluate(()=>document.querySelector('button').disabled=true);const result=await run();assert.match(result.error,/控件尚不可用/);assert.equal(await page.evaluate(()=>searches),0);
+    await page.evaluate(()=>document.querySelector('button').disabled=true);const result=await run();assert.match(result.error,/控件尚不可用|确认检索输入与控件超时/);assert.equal(await page.evaluate(()=>searches),0);
+  });
+  test('an already selected field is not reset by a redundant change event',async()=>{
+    await page.evaluate(()=>{const field=document.querySelector('select');field.value='Title';window.fieldChanges=0;
+      field.addEventListener('change',()=>fieldChanges++);});
+    await success();assert.equal(await page.evaluate(()=>fieldChanges),0);
+  });
+  test('the controlled input commits its model on blur before one Search',async()=>{
+    await page.evaluate(()=>{const input=document.querySelector('input'),button=document.querySelector('button'),original=button.onclick;
+      window.committedQuery='';input.addEventListener('blur',()=>committedQuery=input.value);
+      button.onclick=()=>{if(committedQuery===input.value)original();};});
+    const result=await page.evaluate(runWOSCommand,{action:'wos_start_search',sa_id:'synthetic',title:'Synthetic paper',require_prepared:true,expires:Date.now()+30000});
+    assert.equal(result.ok,true,JSON.stringify(result));assert.equal(await page.evaluate(()=>committedQuery),'Synthetic paper');
+    assert.equal(await page.evaluate(()=>searches),1);
+  });
+  test('a delayed replacement query input is revalidated before Search',async()=>{
+    await page.evaluate(()=>document.querySelector('input').addEventListener('change',event=>{
+      const old=event.target;setTimeout(()=>old.replaceWith(old.cloneNode(true)),25);
+    },{once:true}));await success();
   });
   test('button replacement during input is re-resolved before click',async()=>{
     await page.evaluate(()=>document.querySelector('input').addEventListener('input',()=>{const old=document.querySelector('button'),b=old.cloneNode(true);b.innerHTML='<mat-icon>search</mat-icon>检索';b.onclick=old.onclick;old.replaceWith(b);}));await success();

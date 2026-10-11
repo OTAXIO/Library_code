@@ -96,7 +96,15 @@ function inspectWorkPage(command) {
     }
   }
   const noResult=/(?:no\s+(?:results?|records?|documents?)\s+(?:were\s+)?found|your\s+search\s+(?:did\s+not\s+(?:return|find)\s+any|(?:returned|found)\s+no)\s+results?|您的?\s*(?:检索|搜索|檢索|搜尋)\s*(?:未找到|没有找到|沒有找到|未檢索到)\s*(?:任何)?\s*(?:结果|結果)|未找到\s*(?:任何)?\s*(?:结果|結果)|没有\s*(?:检索|搜索)\s*结果|沒有\s*(?:檢索|搜尋)\s*結果)/i.test(text);
-  const busy=[...document.querySelectorAll('[aria-busy="true"],[role="progressbar"],mat-spinner,mat-progress-bar,.mat-mdc-progress-spinner')]
+  // The live WOS Search button becomes disabled and replaces its label with a
+  // decorative (aria-hidden) circle-notch SVG. Test its visible owning button,
+  // not the icon's accessibility visibility; a plain empty/disabled input is
+  // not evidence of an in-flight request.
+  const pendingSearch=[...document.querySelectorAll('button[data-ta="run-search"]')]
+    .some(el=>visible(el)&&!el.closest('[hidden],[inert],[aria-hidden="true"]')&&
+      (el.disabled||el.getAttribute('aria-disabled')==='true')&&
+      el.querySelector('.svg-spinner[data-mat-icon-name="circle-notch"],.svg-spinner[svgicon="circle-notch"]'));
+  const busy=pendingSearch||[...document.querySelectorAll('[aria-busy="true"],[role="progressbar"],mat-spinner,mat-progress-bar,.mat-mdc-progress-spinner')]
     .some(el=>visible(el)&&!el.closest('[hidden],[inert],[aria-hidden="true"]'));
   // Readiness is only a coarse, read-only startup check. Never read a query,
   // account name or input value, and leave ambiguous controls to the adapter.
@@ -141,7 +149,7 @@ function inspectWorkPage(command) {
     core_search_route:/^\/wos\/woscc\/(?:basic-search|advanced-search|fielded-search)\/?$/.test(u.pathname),
     query_input_count:queryInputs.length,login_required:loginRequired,access_gate:gateKind,dialog_count:dialogCount,export_dialog:exportDialog,
     summary_route:summary,record_route:recordRoute,
-    zero_result:noResult||(summary&&totals.size===1&&totals.has(0)&&!recordLinks.size&&!busy),busy,
+    zero_result:(noResult&&!busy)||(summary&&totals.size===1&&totals.has(0)&&!recordLinks.size&&!busy),busy,
     result_total:totals.size===1?[...totals][0]:null,result_total_conflict:totals.size>1,
     canonical_record_link_count:recordLinks.size,encoded_record_link_count:encodedLinks.size,
     contents_record_link_count:contentsLinks.size,router_record_link_count:routerLinks.size,
@@ -169,7 +177,7 @@ function inspectWorkPage(command) {
     diagnostic.export_action_count=exports.length;
     return busy||exports.length!==1?result('loading'):result('record',{record_url:u.origin+recordPath});
   }
-  if(noResult)return result('zero');
+  if(noResult&&!busy)return result('zero');
   if(!summary||busy)return result('loading');
   if([...totals].some(count=>count>1)||recordLinks.size>1)return result('multiple');
   if(data.zero_result)return result('zero');

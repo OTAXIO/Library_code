@@ -134,7 +134,7 @@ async function dispatchWorkflow(command,pair) {
     return {ok:true,data:{extension_version:chrome.runtime.getManifest().version,
       wos_download_protocol:1,search_prepare_protocol:1,export_prepare_protocol:1,
       export_submission_protocol:1,download_wait_protocol:1,
-      search_submission_protocol:1,result_link_protocol:1,
+      search_submission_protocol:1,result_link_protocol:1,search_navigation_protocol:1,
       result_reader:'shared-diagnostic',read_results_world:'ISOLATED',page}};
   }
   if(role==="importTabId") {
@@ -170,16 +170,25 @@ async function dispatchWorkflow(command,pair) {
         if(observed.login_required)throw new Error('WOS 当前需登录或人工验证，未切换检索页');
         if(observed.wos_error||observed.site_timeout)throw new Error('WOS 当前网站报错，未切换检索页');
       }
-      if(force&&new URL(tab.url).origin===workOrigin&&path==="/wos/woscc/basic-search"){
+      if(force&&new URL(tab.url).origin===workOrigin&&alreadySearch){
         await chrome.tabs.reload(id);
-      } else await chrome.tabs.update(id,{url:workOrigin+"/wos/woscc/basic-search"});
+      } else {
+        // Preserve the site's mounted search/session context. The live WOS
+        // Advanced Search navigation works where hard URL replacement stalled.
+        // This is preparation only; never retry this click or a submitted query.
+        const returned=await execute(runWOSCommand,{...command,action:'wos_return_search'});
+        if(!returned.ok)throw new Error(returned.error);
+        if(returned.data?.state!=='navigating'||returned.data?.click_observed!==true||
+            returned.data?.search_navigation_protocol!==1)
+          throw new Error('WOS 返回检索页的导航回执未确认，未重复点击');
+      }
       const end=Math.min(Date.now()+25000,command.expires-12000);
       let ready=false;
       while(Date.now()<end){
         tab=await chrome.tabs.get(id);
         if(tab.url) {
           if(new URL(tab.url).origin!==workOrigin)throw new Error("WOS 跳转到了其他域名，请完成机构访问后重新绑定，未继续检索");
-          if(validRolePage(tab.url,role) && new URL(tab.url).pathname.endsWith("/woscc/basic-search")){
+          if(validRolePage(tab.url,role) && /^\/wos\/woscc\/(?:basic-search|advanced-search|fielded-search)\/?$/.test(new URL(tab.url).pathname)){
             if(!force){ready=true;break;}
             // A reload keeps the same URL and may return while the previous
             // document/SPA is still mounted. Wait on semantic, read-only DOM

@@ -17,16 +17,17 @@ from wos_policy import WOSPolicyStop
 
 class PreflightTests(unittest.TestCase):
     def capabilities(self, **page):
-        return {"extension_version": "0.4.13", "wos_download_protocol": 1, "search_prepare_protocol": 1, "export_prepare_protocol": 1,
+        return {"extension_version": "0.4.14", "wos_download_protocol": 1, "search_prepare_protocol": 1, "export_prepare_protocol": 1,
                 "export_submission_protocol": 1, "download_wait_protocol": 1,
                 "search_submission_protocol": 1, "result_link_protocol": 1,
+                "search_navigation_protocol": 1,
                 "result_reader": "shared-diagnostic", "read_results_world": "ISOLATED",
                 "page": {"core_search_route": True, "query_input_count": 1,
                          "wos_error": False, "site_timeout": False, "login_required": False, "dialog_count": 0, "busy": False, **page}}
 
     def test_extension_protocol_checked_before_search(self):
         bridge = Mock(call=Mock(return_value=self.capabilities()))
-        self.assertEqual(preflight(bridge), {"extension_version": "0.4.13"})
+        self.assertEqual(preflight(bridge), {"extension_version": "0.4.14"})
         bridge.call.assert_called_once_with("wos_diagnose", {}, timeout=45)
 
     def test_old_incompatible_and_alternate_transport_fail_without_search(self):
@@ -44,6 +45,9 @@ class PreflightTests(unittest.TestCase):
                        {**self.capabilities(), "extension_version": "0.4.10"},
                        {**self.capabilities(), "extension_version": "0.4.11"},
                        {**self.capabilities(), "extension_version": "0.4.12"},
+                       {**self.capabilities(), "extension_version": "0.4.13"},
+                       {**self.capabilities(), "search_navigation_protocol": None},
+                       {**self.capabilities(), "search_navigation_protocol": True},
                        {**self.capabilities(), "search_submission_protocol": None},
                        {**self.capabilities(), "search_submission_protocol": True},
                        {**self.capabilities(), "result_link_protocol": None},
@@ -90,16 +94,16 @@ class PreflightTests(unittest.TestCase):
 
     def test_result_page_does_not_require_search_inputs(self):
         self.assertEqual(preflight(Mock(call=Mock(return_value=self.capabilities(
-            core_search_route=False, query_input_count=0)))), {"extension_version": "0.4.13"})
+            core_search_route=False, query_input_count=0)))), {"extension_version": "0.4.14"})
 
     def test_smart_navigation_only_and_delayed_inputs_do_not_block_preparation(self):
         bridge = Mock(call=Mock(return_value=self.capabilities(query_input_count=0, busy=True)))
-        self.assertEqual(preflight(bridge), {"extension_version": "0.4.13"})
+        self.assertEqual(preflight(bridge), {"extension_version": "0.4.14"})
         bridge.call.assert_called_once_with("wos_diagnose", {}, timeout=45)
 
     def test_only_known_tab_delimited_preview_can_pass_dialog_gate(self):
         self.assertEqual(preflight(Mock(call=Mock(return_value=self.capabilities(
-            dialog_count=2, export_dialog=True))), resume_export=True), {"extension_version": "0.4.13"})
+            dialog_count=2, export_dialog=True))), resume_export=True), {"extension_version": "0.4.14"})
         with self.assertRaisesRegex(SafetyStop, "操作弹窗"):
             preflight(Mock(call=Mock(return_value=self.capabilities(dialog_count=2, export_dialog=True))))
         for flag in (None, False, "true", 1):

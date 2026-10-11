@@ -49,10 +49,11 @@ const fixture=fs.readFileSync(path.join(__dirname,'fixtures/wos-navigation.html'
         }
         if(url.pathname.includes('/summary/'))searches.push(url.origin);
         let body=fixture;
-        if(url.pathname==='/wos/woscc/basic-search'){
+        if(/^\/wos\/woscc\/(?:basic-search|advanced-search|fielded-search)$/.test(url.pathname)){
           const visits=(searchPageVisits.get(url.origin)||0)+1;searchPageVisits.set(url.origin,visits);
-          body=body.replace('const main=document.getElementById',visits>1?
-            'window.__offlineSearchMountDelay=1300;const main=document.getElementById':
+          if(visits>2)body=body.replace('const main=document.getElementById',
+            'window.__offlineSearchMountDelay=1300;const main=document.getElementById');
+          else if(visits===1)body=body.replace('const main=document.getElementById',
             'window.__offlineStartWithNavigation=true;const main=document.getElementById');
         }
         return route.fulfill({status:200,contentType:'text/html',body});
@@ -96,7 +97,7 @@ const fixture=fs.readFileSync(path.join(__dirname,'fixtures/wos-navigation.html'
       console.log(`PASS ${origin} zero results return through real extension without losing pairing`);
       const nextMissing=await invoke('wos_search',{sa_id:'offline-missing-2',title:'Missing synthetic paper',doi:'',wos:''});
       assert.equal(nextMissing.ok,false);assert.match(nextMissing.error,/WOS 未找到记录/);
-      assert.equal(searchPageVisits.get(origin),2,'one clean reload after the first zero, no reload storm');
+      assert.equal(searchPageVisits.get(origin),3,'initial Smart -> Advanced navigation, then one clean reload after the first zero');
       console.log(`PASS ${origin} second zero finishes after slow stale-banner reset without stopping the queue`);
       const query={sa_id:'offline-one',title:'Synthetic paper',doi:'10.1234/test',wos:''};
       const searched=await invoke('wos_search',query);
@@ -107,7 +108,7 @@ const fixture=fs.readFileSync(path.join(__dirname,'fixtures/wos-navigation.html'
       assert.equal(searches.filter(value=>value===origin).length,1,'Search is not repeated across real navigations');
       assert.deepEqual(queries.filter(item=>item.origin===origin).map(item=>item.query),
         ['Missing synthetic paper','Missing synthetic paper','10.1234/test'],'exactly one Search per paper despite full-navigation preparation and slow hydration');
-      assert.equal(searchPageVisits.get(origin),3,'one clean reload after each zero');
+      assert.equal(searchPageVisits.get(origin),4,'initial Smart -> Advanced navigation, then one clean reload after each zero');
       console.log(`PASS ${origin} real navigation -> isolated record probe despite page DOM hook -> full record`);
       query.record_url=searched.data.record_url;
       const preview=await invoke('wos_export_prepare',query);
