@@ -48,7 +48,7 @@ def main():
     messages = queue.Queue()
     commands = queue.Queue()
     root = tk.Tk()
-    root.title("单条导入验收 · 使用 SA 网页扩展")
+    root.title("单条导入验收 0.4.16 · 使用 SA 网页扩展")
     root.geometry("560x330")
     root.minsize(560, 330)
     panel = ttk.Frame(root, padding=16)

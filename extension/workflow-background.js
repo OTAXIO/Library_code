@@ -78,6 +78,13 @@ function isExpectedWOSDownload(item,recordURL) {
     return download.protocol==="blob:";
   } catch {return false;}
 }
+function isRecoverableWOSDownload(item,recordURL) {
+  // History has no same-command creation window. An origin-only blob or the
+  // newest filename cannot associate it: require the EXACT full-record referrer.
+  return Number.isInteger(item?.id)&&item.id>=0&&typeof item.filename==='string'&&
+    /(?:^|[\\/])(?:savedrecs(?: ?\(\d+\))?|wos[-_][^\\/]+)\.txt$/i.test(item.filename)&&
+    Boolean(item.referrer)&&isExpectedWOSDownload(item,recordURL);
+}
 async function dispatchWorkflow(command,pair) {
   if(!Number.isFinite(command.expires) || Date.now()>=command.expires-2500)throw new Error("工作命令已过期，未执行");
   const role=workflowRole(command.action), id=pair[role];
@@ -88,7 +95,7 @@ async function dispatchWorkflow(command,pair) {
   const workOrigin=new URL(tab.url).origin;
   // Operate on the visible bound work tab so site timers/async UI transitions
   // are not throttled. Diagnostics remain read-only and do not switch tabs.
-  if(command.action!=="wos_diagnose" && tab.active===false)
+  if(!["wos_diagnose","wos_recover_download"].includes(command.action) && tab.active===false)
     await chrome.tabs.update(id,{active:true});
   const execute=async(fn,cmd,probeWorld)=>{
     const current=await chrome.tabs.get(id);
@@ -147,6 +154,28 @@ async function dispatchWorkflow(command,pair) {
       command={...command,contentSha:hash};
     }
     return execute(runImportCommand,command);
+  }
+  if(command.action==='wos_recover_download'){
+    if(!isWOSRecordPage(command.record_url,workOrigin)||
+        new URL(command.record_url).pathname!==wosRecordPagePath(command.record_url))
+      throw new Error('下载恢复必须提供本条已确认的规范单篇网址');
+    const observed=await execute(inspectWorkPage,{...command,action:'wos_diagnose'});
+    if(observed.error)throw new Error(observed.error);
+    if(['busy','login_required','wos_error','site_timeout'].some(k=>typeof observed[k]!=='boolean')||
+        !Number.isInteger(observed.dialog_count)||observed.dialog_count<0)
+      throw new Error('下载恢复页面诊断不完整，未推断为空闲');
+    if(observed.login_required)throw new Error('WOS 登录或验证需要人工处理，未继续下载恢复');
+    if(observed.wos_error||observed.site_timeout)throw new Error('WOS 页面报错，未继续下载恢复');
+    if(observed.dialog_count)throw new Error('WOS 有未完成弹窗，未继续下载恢复');
+    const items=await chrome.downloads.search({limit:500,
+      filenameRegex:'(?:^|[/\\\\])(?:savedrecs(?: ?\\(\\d+\\))?|wos[-_][^/\\\\]+)\\.txt$'});
+    const matches=items.filter(item=>isRecoverableWOSDownload(item,command.record_url));
+    const files=matches.filter(item=>item.state==='complete'&&item.exists!==false&&
+      Number.isFinite(item.fileSize)&&item.fileSize>0&&item.fileSize<=524288)
+      .map(item=>({path:item.filename,download_id:item.id}));
+    return {ok:true,data:{verified:true,sa_id:command.sa_id,record_url:command.record_url,
+      idle:!observed.busy,scan_complete:items.length<500,
+      active_downloads:matches.filter(item=>item.state==='in_progress').length,files}};
   }
   if(command.action==="wos_search") {
     // User explicitly binds a disposable working WOS tab. Never navigate SA tab.
@@ -424,4 +453,4 @@ async function dispatchWorkflow(command,pair) {
   } finally {chrome.downloads.onCreated.removeListener(listener);}
 }
 if(typeof module!=="undefined")module.exports={validRolePage,workflowBindingError,isExpectedWOSDownload,
-  shouldReloadWOSSearch,isWOSRecordPage,transientInjectionError,wosSearchTimeout,boundedWOSProbe};
+  isRecoverableWOSDownload,shouldReloadWOSSearch,isWOSRecordPage,transientInjectionError,wosSearchTimeout,boundedWOSProbe};

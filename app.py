@@ -16,7 +16,7 @@ from ui_theme import P, install_theme, style_text
 from workflow_service import WorkflowService
 
 BASE = Path(__file__).resolve().parent
-VERSION = "0.4.15"
+VERSION = "0.4.17"
 SA_URL = "http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list"
 SCOPES = {"待处理": "pending", "重试跳过项": "skipped", "已完成": "done"}
 
@@ -32,6 +32,7 @@ class App:
         self.owner = tk.StringVar()
         self.scope = tk.StringVar(value="待处理")
         self.limit = tk.StringVar(value="5")
+        self.import_style = tk.StringVar(value="自动导出并入库")
         self.status = tk.StringVar(value="读取名单后，连接浏览器并开始。")
         self.connection = tk.StringVar(value="浏览器未连接")
         self.counts = tk.StringVar()
@@ -85,7 +86,18 @@ class App:
             page.rowconfigure(1, weight=1)
             self.pages[mode] = page
             self.notebook.add(page, text=title)
-            ttk.Label(page, text=explanation, style="Muted.TLabel", wraplength=620).grid(row=0, column=0, sticky="w", pady=(0, 8))
+            intro = ttk.Frame(page)
+            intro.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+            ttk.Label(intro, text=explanation, style="Muted.TLabel", wraplength=620).pack(anchor="w")
+            if mode == "import":
+                style_row = ttk.Frame(intro)
+                style_row.pack(fill="x", pady=(6, 0))
+                ttk.Label(style_row, text="导入方式").pack(side="left")
+                self.import_style_box = ttk.Combobox(style_row, textvariable=self.import_style,
+                    values=["自动导出并入库", "手动导出（一次一篇）"], state="readonly", width=23)
+                self.import_style_box.pack(side="left", padx=8)
+                self.import_style_box.bind("<<ComboboxSelected>>", lambda _: self.render())
+                ttk.Label(style_row, text="手动模式：先选一篇，再定位和导出。", style="Muted.TLabel").pack(side="left")
             table = ttk.Frame(page)
             table.grid(row=1, column=0, sticky="nsew")
             tree = ttk.Treeview(table, columns=("id", "title", "status"), show="headings", height=6)
@@ -110,15 +122,37 @@ class App:
         bottom.grid(row=3, column=0, sticky="ew", pady=(10, 6))
         self.start_button = ttk.Button(bottom, text="开始自动认领", style="Primary.TButton", command=self.start)
         self.start_button.pack(side="left")
+        self.manual_import_button = ttk.Button(bottom, text="② 接回 TXT 并入库", style="Primary.TButton",
+            command=lambda: self.start(manual_intake=True))
         self.pause_button = ttk.Button(bottom, text="暂停", command=self.pause, state="disabled")
         self.pause_button.pack(side="left", padx=8)
-        ttk.Label(bottom, textvariable=self.counts, style="Muted.TLabel").pack(side="right")
+        self.counts_label = ttk.Label(bottom, textvariable=self.counts, style="Muted.TLabel")
+        self.counts_label.pack(side="right")
         ttk.Label(frame, textvariable=self.status, wraplength=615).grid(row=4, column=0, sticky="ew")
         ttk.Label(frame, text="1 已完成 · 2 已跳过，写入末尾“是否识别”；前方“备注”保存处理说明。",
                   style="Muted.TLabel").grid(row=5, column=0, sticky="w", pady=(5, 0))
 
     def mode(self):
         return "import" if self.notebook.select() == str(self.pages["import"]) else "claim"
+
+    def manual_mode(self):
+        return self.mode() == "import" and self.import_style.get() == "手动导出（一次一篇）"
+
+    def configure_actions(self):
+        manual = self.manual_mode()
+        disabled = self.busy or self.scope.get() == "已完成"
+        self.start_button.configure(text="① 定位 WOS 文献" if manual else
+            "开始自动导入" if self.mode() == "import" else "开始自动认领",
+            state="disabled" if disabled else "normal")
+        self.limit_box.configure(state="disabled" if self.busy or manual else "normal")
+        self.import_style_box.configure(state="disabled" if self.busy else "readonly")
+        if manual:
+            self.counts_label.pack_forget()
+            self.manual_import_button.pack(side="left", after=self.start_button, padx=(8, 0))
+            self.manual_import_button.configure(state="disabled" if disabled else "normal")
+        else:
+            self.manual_import_button.pack_forget()
+            self.counts_label.pack(side="right")
 
     def reload_roster(self):
         if self.busy:
@@ -154,8 +188,7 @@ class App:
         rows = self.service.visible(self.roster, mode, self.owner.get(), "all")
         self.counts.set(f"待处理 {sum(not r.done and not r.skipped for r in rows)}  ·  "
                         f"已跳过 {sum(r.skipped and not r.done for r in rows)}  ·  已完成 {sum(r.done for r in rows)}")
-        self.start_button.configure(text="开始自动导入" if mode == "import" else "开始自动认领",
-                                    state="disabled" if self.busy or scope == "done" else "normal")
+        self.configure_actions()
 
     def show_selected(self, mode):
         tree, detail = self.trees[mode], self.details[mode]
@@ -181,16 +214,25 @@ class App:
         for key, page in self.pages.items():
             self.notebook.tab(page, state="disabled" if value and key != mode else "normal")
         self.pause_button.configure(state="normal" if value else "disabled")
-        self.start_button.configure(state="disabled" if value or self.scope.get() == "已完成" else "normal")
+        self.configure_actions()
 
-    def start(self):
+    def start(self, *, manual_intake=False):
         if self.busy:
             return
         try:
-            if not self.limit.get().strip().isdigit():
-                raise SafetyStop("本轮条数须为 1–100 的整数。")
             mode, scope = self.mode(), SCOPES[self.scope.get()]
-            records = self.service.select(self.roster, mode, self.owner.get(), int(self.limit.get()), scope)
+            manual = self.manual_mode()
+            if manual_intake and not manual:
+                raise SafetyStop("接回 TXT 仅用于手动导出的一篇模式。")
+            if manual:
+                selected = self.trees["import"].selection()
+                if len(selected) != 1:
+                    raise SafetyStop("请先在列表中选中一篇论文；手动模式不会处理其他记录。")
+                records = [self.service.select_manual(self.roster, self.owner.get(), scope, selected[0])]
+            else:
+                if not self.limit.get().strip().isdigit():
+                    raise SafetyStop("本轮条数须为 1–100 的整数。")
+                records = self.service.select(self.roster, mode, self.owner.get(), int(self.limit.get()), scope)
             if not self.bridge or not self.bridge.online:
                 raise SafetyStop("请连接 SA 比对页；自动导入还需在扩展绑定 WOS 页和数据导入与批次管理页。")
         except (SafetyStop, KeyError) as exc:
@@ -198,12 +240,18 @@ class App:
             return
         self.stop.clear()
         self.set_busy(True)
-        self.status.set(f"开始{'导入' if mode == 'import' else '认领'} {len(records)} 条，运行中请勿手动操作工作页。")
-        roster, bridge = self.roster, self.bridge
+        self.status.set("正在定位所选这一篇；定位完成后再手动 Export。" if manual and not manual_intake else
+            f"开始{'导入' if mode == 'import' else '认领'} {len(records)} 条，运行中请勿手动操作工作页。")
+        roster, bridge, owner = self.roster, self.bridge, self.owner.get()
         def work():
             try:
-                result = self.service.run(roster, records, mode, scope, bridge, self.stop,
-                                          lambda text: self.events.put(("progress", text)))
+                progress = lambda text: self.events.put(("progress", text))
+                if manual and not manual_intake:
+                    result = self.service.locate_import(roster, records[0], owner, scope,
+                                                        bridge, self.stop, progress)
+                else:
+                    result = self.service.run(roster, records, mode, scope, bridge, self.stop, progress,
+                                              **({"manual_export": True} if manual else {}))
                 self.events.put(("result", result))
             except Exception as exc:
                 text = str(exc) if isinstance(exc, SafetyStop) else f"操作异常（{type(exc).__name__}）；请核验网页，不重复提交。"

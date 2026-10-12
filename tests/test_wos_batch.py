@@ -11,7 +11,7 @@ from automation import ImportStore
 from core import Record, SafetyStop
 from bridge import BrowserRejected
 from tests.test_automation import sample
-from wos_batch import WOSDownload, default_store, preflight
+from wos_batch import ManualExportPending, WOSDownload, default_store, preflight
 from wos_policy import WOSPolicyStop
 
 
@@ -139,6 +139,93 @@ class DownloadTests(unittest.TestCase):
         self.flow.prepare(self.record)
         self.assertEqual(self.bridge.call.call_count, 3)
 
+    def test_manual_locate_searches_once_and_never_prepares_or_submits_export(self):
+        result = self.flow.locate(self.record)
+        self.assertEqual(result["record_url"], self.url)
+        self.assertFalse(result["file_ready"])
+        self.assertEqual([c.args[0] for c in self.bridge.call.call_args_list], ["wos_search"])
+        self.assertEqual(self.store.get(self.record)["phase"], "export_preparing")
+        self.assertTrue(self.store.get(self.record)["manual_located"])
+        self.assertEqual(list(self.store.root.rglob("*.txt")), [])
+
+    def test_manual_import_without_a_file_waits_without_search_export_or_checkpoint_changes(self):
+        with self.assertRaises(ManualExportPending):
+            self.flow.prepare(self.record, manual_export=True)
+        self.bridge.call.assert_not_called()
+        self.assertIsNone(self.store.get(self.record))
+
+    def test_manual_located_then_user_export_imports_only_correlated_local_bytes(self):
+        self.flow.locate(self.record)
+        self.bridge.call.reset_mock()
+        self.make_download()
+        result = self.flow.prepare(self.record, manual_export=True)
+        self.assertEqual(result["phase"], "downloaded")
+        self.assertEqual(self.store.bytes(result), self.raw)
+        self.bridge.call.assert_not_called()
+
+    def test_manual_locate_preserves_old_export_intent_and_requires_same_ut(self):
+        old = {"phase": "export_intent", "record_url": self.url, "private_receipt": "fixture"}
+        self.store.save(self.record, old)
+        self.flow.locate(self.record)
+        state = self.store.get(self.record)
+        self.assertEqual(state["phase"], "export_intent")
+        self.assertEqual(state["private_receipt"], "fixture")
+        self.bridge.call.return_value = {"record_url": self.url.replace("789012", "789013")}
+        with self.assertRaises(SafetyStop):
+            self.flow.locate(self.record)
+        self.assertEqual(self.store.get(self.record), state)
+        self.assertNotIn("wos_export", [c.args[0] for c in self.bridge.call.call_args_list])
+
+    def test_manual_missing_history_waits_instead_of_marking_skip(self):
+        self.store.save(self.record, {"phase": "export_preparing", "record_url": self.url})
+        self.bridge.call.return_value = {"verified": True, "sa_id": self.record.sa_id,
+            "record_url": self.url, "idle": True, "scan_complete": True, "active_downloads": 0, "files": []}
+        with self.assertRaises(ManualExportPending):
+            self.flow.prepare(self.record, manual_export=True)
+        self.assertEqual([c.args[0] for c in self.bridge.call.call_args_list], ["wos_recover_download"])
+        self.assertEqual(self.store.get(self.record)["phase"], "export_preparing")
+
+    def test_manual_locate_rejects_invalid_journal_before_searching(self):
+        for cached in (["invalid"], {"phase": "export_intent", "record_url": "https://foreign.test/"}):
+            with self.subTest(cached=cached):
+                self.store.save(self.record, cached)
+                with self.assertRaises(SafetyStop):
+                    self.flow.locate(self.record)
+                self.bridge.call.assert_not_called()
+                self.assertEqual(self.store.get(self.record), cached)
+
+    def test_history_never_selects_a_file_while_scan_incomplete_or_same_ut_download_pending(self):
+        old = {"phase": "export_preparing", "record_url": self.url}
+        self.store.save(self.record, old)
+        base = {"verified": True, "sa_id": self.record.sa_id, "record_url": self.url,
+                "idle": True, "scan_complete": True, "active_downloads": 0,
+                "files": [{"path": str(self.path), "download_id": 7}]}
+        for fields in ({"scan_complete": False}, {"active_downloads": 1}):
+            self.bridge.call.return_value = {**base, **fields}
+            with self.assertRaises(SafetyStop):
+                self.flow.prepare(self.record, manual_export=True)
+            self.assertEqual(self.store.get(self.record), old)
+            self.assertEqual(list(self.store.root.rglob("*.txt")), [])
+
+    def test_pause_after_successful_export_keeps_received_path_without_archiving(self):
+        original = self.bridge.call
+        def call(action, payload, **options):
+            if action == "wos_export":
+                self.stop.set()
+            return original(action, payload, **options)
+        self.bridge.call = call
+        with self.assertRaisesRegex(SafetyStop, "暂停"):
+            self.flow.prepare(self.record)
+        state = self.store.get(self.record)
+        self.assertEqual(state["phase"], "export_received")
+        self.assertEqual(state["download"]["path"], str(self.path))
+        self.assertEqual(list(self.store.root.rglob("*.txt")), [])
+        self.stop.clear()
+        self.bridge.call = original
+        self.bridge.call.reset_mock()
+        self.assertEqual(self.flow.prepare(self.record, manual_export=True)["phase"], "downloaded")
+        self.bridge.call.assert_not_called()
+
     def test_wrong_id_relative_or_missing_path_not_adopted(self):
         for result in (None, {"sa_id": "other", "path": str(self.path)},
                        {"sa_id": "demo-1", "path": "relative.txt"},
@@ -207,7 +294,8 @@ class DownloadTests(unittest.TestCase):
         self.bridge.call.return_value = {"state": "submitted"}
         with self.assertRaisesRegex(SafetyStop, "不重复导出"):
             self.flow.prepare(self.record)
-        self.assertEqual([c.args[0] for c in self.bridge.call.call_args_list], ["wos_export_status"])
+        self.assertEqual([c.args[0] for c in self.bridge.call.call_args_list],
+                         ["wos_export_status", "wos_recover_download"])
         self.assertEqual(self.store.get(self.record)["phase"], "export_intent")
 
     def test_explicit_pre_click_rejection_keeps_a_safe_preparing_checkpoint(self):
@@ -245,6 +333,80 @@ class DownloadTests(unittest.TestCase):
         self.make_download()
         self.assertEqual(self.flow.prepare(self.record)["phase"], "downloaded")
         self.bridge.call.assert_not_called()
+
+    def test_export_receipt_survives_archiving_error_and_recovers_custom_download_folder(self):
+        # The browser reported a real file outside the assumed Downloads folder.
+        # A later disk error must not discard its path and create a stale intent.
+        with patch("wos_batch.archive_export", side_effect=OSError("disk temporarily unavailable")):
+            with self.assertRaises(OSError):
+                self.flow.prepare(self.record)
+        state = self.store.get(self.record)
+        self.assertEqual(state["phase"], "export_received")
+        self.assertEqual(state["download"]["path"], str(self.path))
+        self.bridge.call.reset_mock()
+        self.assertEqual(self.flow.prepare(self.record)["phase"], "downloaded")
+        self.bridge.call.assert_not_called()
+
+    def test_old_export_on_empty_search_recovers_history_path_without_search_or_export(self):
+        self.store.save(self.record, {"phase": "export_intent", "record_url": self.url})
+        self.bridge.call.side_effect = [{"state": "unknown", "reason": "record_page_changed"},
+            {"verified": True, "sa_id": self.record.sa_id, "record_url": self.url,
+             "idle": True, "scan_complete": True, "active_downloads": 0,
+             "files": [{"path": str(self.path), "download_id": 7}]}]
+        self.assertEqual(self.flow.prepare(self.record)["phase"], "downloaded")
+        self.assertEqual([c.args[0] for c in self.bridge.call.call_args_list],
+                         ["wos_export_status", "wos_recover_download"])
+
+    def test_old_export_idle_missing_file_skips_only_paper_and_retains_intent(self):
+        old = {"phase": "export_intent", "record_url": self.url}
+        self.store.save(self.record, old)
+        self.bridge.call.side_effect = [{"state": "unknown", "reason": "record_page_changed"},
+            {"verified": True, "sa_id": self.record.sa_id, "record_url": self.url,
+             "idle": True, "scan_complete": True, "active_downloads": 0, "files": []}]
+        with self.assertRaises(WOSPolicyStop) as rejected:
+            self.flow.prepare(self.record)
+        self.assertEqual(rejected.exception.note, "下载待核验")
+        self.assertEqual(self.store.get(self.record), old)
+        self.assertNotIn("wos_export", [c.args[0] for c in self.bridge.call.call_args_list])
+
+    def test_history_recovery_pending_busy_incomplete_or_unverified_never_skips_or_exports(self):
+        base = {"verified": True, "sa_id": self.record.sa_id, "record_url": self.url,
+                "idle": True, "scan_complete": True, "active_downloads": 0, "files": []}
+        for changes in ({"idle": False}, {"scan_complete": False}, {"active_downloads": 1},
+                        {"verified": False}, {"sa_id": "other"}, {"active_downloads": True}):
+            with self.subTest(changes=changes):
+                self.store.save(self.record, {"phase": "export_intent", "record_url": self.url})
+                self.bridge.call.side_effect = [{"state": "unknown"}, {**base, **changes}]
+                with self.assertRaises(SafetyStop) as rejected:
+                    self.flow.prepare(self.record)
+                self.assertNotIsInstance(rejected.exception, WOSPolicyStop)
+                self.assertEqual(self.store.get(self.record)["phase"], "export_intent")
+
+    def test_history_recovery_rejects_other_ut_and_conflicting_bytes(self):
+        wrong = self.root / "wrong.txt"
+        wrong.write_bytes(sample(UT="WOS:000999999999999"))
+        changed = self.root / "changed.txt"
+        changed.write_bytes(sample(SO="Different journal"))
+        for files in ([{"path": str(wrong), "download_id": 1}],
+                      [{"path": str(self.path), "download_id": 1},
+                       {"path": str(changed), "download_id": 2}]):
+            with self.subTest(files=files):
+                self.store.save(self.record, {"phase": "export_intent", "record_url": self.url})
+                self.bridge.call.side_effect = [{"state": "submitted"},
+                    {"verified": True, "sa_id": self.record.sa_id, "record_url": self.url,
+                     "idle": True, "scan_complete": True, "active_downloads": 0, "files": files}]
+                with self.assertRaises(SafetyStop):
+                    self.flow.prepare(self.record)
+                self.assertEqual(self.store.get(self.record)["phase"], "export_intent")
+                self.assertEqual(list(self.store.root.rglob("*.txt")), [])
+
+    def test_history_recovery_transport_failure_pauses_without_clearing_intent(self):
+        self.store.save(self.record, {"phase": "export_intent", "record_url": self.url})
+        self.bridge.call.side_effect = [{"state": "unknown"}, SafetyStop("浏览器未连接")]
+        with self.assertRaisesRegex(SafetyStop, "浏览器未连接") as rejected:
+            self.flow.prepare(self.record)
+        self.assertNotIsInstance(rejected.exception, WOSPolicyStop)
+        self.assertEqual(self.store.get(self.record)["phase"], "export_intent")
 
     def test_title_only_old_intent_recovers_correlated_txt_on_search_page_without_browser(self):
         record = replace(self.record, doi="")
@@ -330,7 +492,10 @@ class DownloadTests(unittest.TestCase):
         self.path.write_bytes(sample(UT="WOS:000999999999999"))
         with self.assertRaisesRegex(SafetyStop, "不一致"):
             self.flow.prepare(self.record)
-        self.assertEqual(self.store.get(self.record)["phase"], "export_intent")
+        state = self.store.get(self.record)
+        self.assertEqual(state["phase"], "export_received")
+        self.assertEqual(state["download"]["path"], str(self.path))
+        self.assertNotIn("candidate", state)
         self.assertEqual(list(self.store.root.rglob("*.txt")), [])
 
     def test_old_title_only_intent_recovers_completed_mismatched_title_without_browser(self):

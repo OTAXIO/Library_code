@@ -24,13 +24,50 @@ function setup(respond){
         return [{result}];
       }},
       downloads:{onCreated:{addListener:fn=>listeners.add(fn),removeListener:fn=>listeners.delete(fn)},
-        search:async()=>[{id:4,state:'complete',filename:'C:/offline/savedrecs.txt',fileSize:200}]}
+        search:async query=>{api.downloadQuery=query;return api.history||[{id:4,state:'complete',filename:'C:/offline/savedrecs.txt',fileSize:200}];}}
     }};
   vm.runInNewContext(source,sandbox);
   api.dispatch=payload=>sandbox.dispatchWorkflow(payload,{tabId:1,wosTabId:2});
   return api;
 }
 const ok=data=>({ok:true,data});
+
+test('history recovery on an empty search is read-only and matches the exact record referrer',async()=>{
+  const api=setup((cmd,env,injection)=>{
+    assert.equal(cmd.action,'wos_diagnose');assert.equal(injection.world,'ISOLATED');
+    return {busy:false,login_required:false,wos_error:false,site_timeout:false,dialog_count:0};
+  });
+  api.tab.url=origin+'/wos/woscc/basic-search';
+  const genuine={id:9,url:'https://'+new URL(origin).host+'/export/file',referrer:record,
+    state:'complete',filename:'D:/Downloads/savedrecs (9).txt',fileSize:200,exists:true};
+  api.history=[genuine,{...genuine,id:10,referrer:record.replace('789012','789013')},
+    {...genuine,id:11,referrer:''},{...genuine,id:12,filename:'D:/Downloads/unrelated.txt'},
+    {...genuine,id:13,exists:false},{...genuine,id:14,state:'in_progress'},
+    {...genuine,id:15,fileSize:0},{...genuine,id:16,fileSize:524289},
+    {...genuine,id:17,url:'http://foreign.test/file'}];
+  const result=await api.dispatch(command('wos_recover_download'));
+  assert.equal(result.ok,true);assert.equal(result.data.verified,true);assert.equal(result.data.idle,true);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.data.files)),[{path:genuine.filename,download_id:9}]);
+  assert.equal(result.data.active_downloads,1);assert.equal(api.reloads,0);
+  assert.deepEqual(api.calls,['wos_diagnose']);assert.equal(api.listeners.size,0);
+  assert.equal(api.downloadQuery.limit,500);assert.ok(api.downloadQuery.filenameRegex);
+});
+
+test('history recovery refuses login, errors, popups or incomplete diagnostics before reading downloads',async()=>{
+  for(const flags of [{login_required:true},{wos_error:true},{site_timeout:true},{dialog_count:1},{busy:undefined}]){
+    const api=setup(()=>({busy:false,login_required:false,wos_error:false,site_timeout:false,dialog_count:0,...flags}));
+    await assert.rejects(api.dispatch(command('wos_recover_download')),/登录|页面|弹窗|诊断/);
+    assert.equal(api.downloadQuery,undefined);assert.equal(api.reloads,0);
+  }
+});
+
+test('history recovery does not infer a complete scan at its limit or idle while loading',async()=>{
+  const api=setup(()=>({busy:true,login_required:false,wos_error:false,site_timeout:false,dialog_count:0}));
+  api.history=Array.from({length:500},()=>({referrer:'',filename:'C:/offline/savedrecs.txt'}));
+  const result=await api.dispatch(command('wos_recover_download'));
+  assert.equal(result.data.scan_complete,false);assert.equal(result.data.idle,false);
+  assert.equal(result.data.files.length,0);assert.equal(api.reloads,0);
+});
 
 test('blank canonical record reloads once, waits for hydration, prepares without final Export',async()=>{
   let hydrations=0;

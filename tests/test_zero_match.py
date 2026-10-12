@@ -291,6 +291,38 @@ class ZeroMatchTests(unittest.TestCase):
         book.close()
         self.assertEqual(select_records(result.roster, "谭勋策", 2), [])
 
+    def test_stale_export_only_skips_that_paper_then_next_paper_imports_and_closes(self):
+        first = self.roster.records[0]
+        old = {"phase": "export_intent", "record_url":
+               "https://www.webofscience.com/wos/woscc/full-record/WOS:000123456789012"}
+        self.download.store.save(first, old)
+        original = self.download.call
+        def call(action, payload, timeout=120):
+            if action == "wos_export_status":
+                self.download.calls.append(action)
+                return {"state": "unknown", "reason": "record_page_changed"}
+            if action == "wos_recover_download":
+                self.download.calls.append(action)
+                return {"verified": True, "sa_id": first.sa_id, "record_url": old["record_url"],
+                        "idle": True, "scan_complete": True, "active_downloads": 0, "files": []}
+            return original(action, payload, timeout)
+        self.download.call = call
+        result = self.run_flow()
+        self.assertFalse(result.halted, result.reason)
+        self.assertEqual([o["status"] for o in result.outcomes], ["skip", "done"])
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertEqual(result.roster.records[0].remark, "下载待核验")
+        self.assertEqual(result.roster.records[0].source, "")
+        self.assertEqual(self.sa.rows[first.sa_id]["remark"], "")
+        self.assertEqual(self.sa.rows[first.sa_id]["markStatus"], "待处理")
+        self.assertTrue(result.roster.records[1].done)
+        self.assertEqual(result.roster.records[1].remark, "已入库")
+        self.assertEqual(self.download.calls.count("wos_search"), 1)
+        self.assertEqual(self.download.calls.count("wos_export"), 1)
+        self.assertEqual(self.sa.calls.count("import_submit"), 1)
+        self.assertEqual(self.download.store.get(first), old)
+        self.assertEqual(select_records(result.roster, "谭勋策", 2), [])
+
     def test_local_nonzero_in_explicit_queue_is_skipped_without_browser_actions(self):
         book = load_workbook(self.path)
         book["名单"].cell(2, 2 + list(HEADERS).index("matches"), 1)

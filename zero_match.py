@@ -22,7 +22,7 @@ from approval import verify_claim_result
 from core import SafetyStop
 from roster_write import (mark_skipped_many, mark_skipped_without_note,
                           reconcile_processed, record_data_sources)
-from wos_batch import WOSDownload, preflight
+from wos_batch import ManualExportPending, WOSDownload, preflight
 from wos_policy import (WOSPolicyStop, NonZeroMatchSkip, match_count,
                         require_no_author_review, zero_result_note)
 from skip_notes import brief_skip_note
@@ -203,9 +203,11 @@ def verify_comparison(comparison, candidate, record, allow_unclaimed=False):
 
 
 def run_batch(roster, records, sa, download, imports, workflow, stop,
-              progress=lambda _: None, audit=lambda *args: None, *, retry_skipped=False):
+              progress=lambda _: None, audit=lambda *args: None, *, retry_skipped=False, manual_export=False):
     """Explicitly authorized one-click workflow; a write failure halts, not retries."""
     records = list(records)
+    if type(manual_export) is not bool or manual_export and len(records) != 1:
+        raise SafetyStop("手动导出模式每次仅执行一篇，未开始。")
     if (not 1 <= len(records) <= 100 or len({r.sa_id for r in records}) != len(records) or
             type(retry_skipped) is not bool or
             any(r not in roster.records or r.owner != OWNER or
@@ -397,7 +399,7 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
             elif key in files:
                 raw = files[key]
             else:
-                saved = downloader.prepare(record, progress)
+                saved = downloader.prepare(record, progress, manual_export=manual_export)
                 raw = download.store.bytes(saved)
             candidate = parse_wos(raw)
             try:
@@ -553,6 +555,15 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
             workflow.save(record, {**state, "phase": "done"})
             result.outcomes.append({"sa_id": record.sa_id, "title": record.title, "status": "done", "message": state["note"], **evidence})
             result.remaining -= 1
+        except ManualExportPending as exc:
+            # Waiting is not failure or completion. Neither remark nor 1/2 is
+            # written, and no subsequent record may enter a one-paper mode.
+            result.roster.assert_unchanged()
+            result.reason = str(exc)
+            result.halted = not manual_export or stage != "下载并核验 TXT"
+            result.outcomes.append({"sa_id": record.sa_id, "title": record.title,
+                "status": "halted" if result.halted else "waiting", "message": str(exc)})
+            break
         except NonZeroMatchSkip as exc:
             try:
                 # Explicit skipped-only retries retain their existing flag.
