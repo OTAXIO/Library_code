@@ -1,12 +1,14 @@
 """UI-independent facade: two workflows, one production extension Bridge."""
 from dataclasses import dataclass
+import json
 from pathlib import Path
+import sqlite3
 
 from automation import ImportStore
 from claim_batch import run_claim_batch
 from core import SafetyStop, fixed_roster_path, read_roster
 from operation_log import OperationLog
-from roster_write import mark_skipped_many, migrate_status_column
+from roster_write import mark_skipped_many, mark_skipped_without_note, migrate_status_column
 from skip_notes import brief_skip_note
 from wos_batch import WOSDownload, default_store
 from wos_policy import WOSPolicyStop, match_count, require_no_author_review, zero_result_note
@@ -69,6 +71,59 @@ class WorkflowService:
         if len(selected) != 1:
             raise SafetyStop("请在当前范围中选择一篇谭勋策的未完成零匹配任务。")
         return selected[0]
+
+    def select_skip(self, roster, mode, owner, scope, sa_id):
+        """An explicit local skip is never a batch or a completion override."""
+        if scope != "pending":
+            raise SafetyStop("只可手动跳过待处理项；已完成或已跳过的记录保持原样。")
+        self.select(roster, mode, owner, 1, scope)
+        selected = [r for r in self.visible(roster, mode, owner, scope) if r.sa_id == sa_id]
+        if len(selected) != 1 or sum(r.sa_id == sa_id for r in roster.records) != 1:
+            raise SafetyStop("请只选择当前列表中的一条待处理数据，不能跳过其他记录。")
+        return selected[0]
+
+    def _check_skip_journals(self, record):
+        # Read existing journals without initializing tables, resetting progress,
+        # or depending on the very SA query the operator is trying to set aside.
+        root = self.base / "runtime" / "wos-imports"
+        for name, table, safe_phase in (("imports.sqlite3", "imports", "exported"),
+                                        ("zero-match.sqlite3", "jobs", "downloaded")):
+            path = root / name
+            if not path.exists():
+                continue
+            if path.is_symlink() or not path.resolve().is_relative_to(self.base.resolve()):
+                raise SafetyStop("断点文件不在当前 code 内，未跳过。")
+            try:
+                db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+                try:
+                    saved = db.execute(f"SELECT record_key,data FROM {table} WHERE sa_id=?",
+                                       (record.sa_id,)).fetchone()
+                finally:
+                    db.close()
+                if not saved:
+                    continue
+                state = json.loads(saved[1])
+                if (saved[0] != record.key or not isinstance(state, dict) or
+                        state.get("phase") != safe_phase or state.get("item_id")):
+                    raise SafetyStop("所选数据已有入库、关联或结案断点待核验，不能手动跳过；请先续验原操作。")
+            except (sqlite3.Error, ValueError, OSError) as exc:
+                raise SafetyStop("本地断点无法核验，未跳过；请检查原操作记录。") from exc
+
+    def skip_selected(self, roster, mode, owner, scope, sa_id, bridge=None):
+        """Persist only numeric 2 for one owned row. No browser commands."""
+        record = self.select_skip(roster, mode, owner, scope, sa_id)
+        if not roster.status_separate or roster.path.resolve() != fixed_roster_path(self.base).resolve():
+            raise SafetyStop("请重读当前 code/list.xlsx，确认末尾独立的是否识别列后再跳过。")
+        if bridge is not None and getattr(bridge, "pending", None):
+            raise SafetyStop("浏览器命令仍在执行，未跳过；请等待当前操作结束。")
+        self._check_skip_journals(record)
+        saved = mark_skipped_without_note(roster, [record])
+        text = "已手动跳过这一条；仅将是否识别写为 2，备注和网页未修改。普通批次不再处理它。"
+        try:
+            self.operation_log.record("手动跳过所选数据（仅名单标记）", "已跳过", record.sa_id)
+        except Exception:
+            text += "跳过已保存，但 log.txt 未能保存，请检查日志。"
+        return TaskResult(saved.roster, {record.sa_id: text}, text)
 
     def locate_import(self, roster, record, owner, scope, bridge, stop, progress):
         if self.select_manual(roster, owner, scope, record.sa_id) != record:

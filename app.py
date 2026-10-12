@@ -16,7 +16,7 @@ from ui_theme import P, install_theme, style_text
 from workflow_service import WorkflowService
 
 BASE = Path(__file__).resolve().parent
-VERSION = "0.4.17"
+VERSION = "0.4.18"
 SA_URL = "http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list"
 SCOPES = {"待处理": "pending", "重试跳过项": "skipped", "已完成": "done"}
 
@@ -120,14 +120,18 @@ class App:
         self.notebook.bind("<<NotebookTabChanged>>", lambda _: self.render())
         bottom = ttk.Frame(frame)
         bottom.grid(row=3, column=0, sticky="ew", pady=(10, 6))
-        self.start_button = ttk.Button(bottom, text="开始自动认领", style="Primary.TButton", command=self.start)
+        actions = ttk.Frame(bottom)
+        actions.pack(fill="x")
+        self.start_button = ttk.Button(actions, text="开始自动认领", style="Primary.TButton", command=self.start)
         self.start_button.pack(side="left")
-        self.manual_import_button = ttk.Button(bottom, text="② 接回 TXT 并入库", style="Primary.TButton",
+        self.manual_import_button = ttk.Button(actions, text="② 接回 TXT 并入库", style="Primary.TButton",
             command=lambda: self.start(manual_intake=True))
-        self.pause_button = ttk.Button(bottom, text="暂停", command=self.pause, state="disabled")
+        self.pause_button = ttk.Button(actions, text="暂停", command=self.pause, state="disabled")
         self.pause_button.pack(side="left", padx=8)
+        self.skip_button = ttk.Button(actions, text="跳过所选数据", command=self.skip_selected, state="disabled")
+        self.skip_button.pack(side="left")
         self.counts_label = ttk.Label(bottom, textvariable=self.counts, style="Muted.TLabel")
-        self.counts_label.pack(side="right")
+        self.counts_label.pack(anchor="e", pady=(4, 0))
         ttk.Label(frame, textvariable=self.status, wraplength=615).grid(row=4, column=0, sticky="ew")
         ttk.Label(frame, text="1 已完成 · 2 已跳过，写入末尾“是否识别”；前方“备注”保存处理说明。",
                   style="Muted.TLabel").grid(row=5, column=0, sticky="w", pady=(5, 0))
@@ -146,13 +150,17 @@ class App:
             state="disabled" if disabled else "normal")
         self.limit_box.configure(state="disabled" if self.busy or manual else "normal")
         self.import_style_box.configure(state="disabled" if self.busy else "readonly")
+        selected = self.trees[self.mode()].selection()
+        can_skip = (not self.busy and self.scope.get() == "待处理" and
+                    self.owner.get() == "谭勋策" and len(selected) == 1)
+        self.skip_button.configure(state="normal" if can_skip else "disabled")
         if manual:
             self.counts_label.pack_forget()
             self.manual_import_button.pack(side="left", after=self.start_button, padx=(8, 0))
             self.manual_import_button.configure(state="disabled" if disabled else "normal")
         else:
             self.manual_import_button.pack_forget()
-            self.counts_label.pack(side="right")
+            self.counts_label.pack(anchor="e", pady=(4, 0))
 
     def reload_roster(self):
         if self.busy:
@@ -203,6 +211,32 @@ class App:
         detail.delete("1.0", "end")
         detail.insert("1.0", text)
         detail.configure(state="disabled")
+        self.configure_actions()
+
+    def skip_selected(self):
+        if self.busy:
+            return
+        try:
+            mode, scope, owner = self.mode(), SCOPES[self.scope.get()], self.owner.get()
+            selected = self.trees[mode].selection()
+            if len(selected) != 1:
+                raise SafetyStop("请先在列表中只选中一条待处理数据。")
+            record = self.service.select_skip(self.roster, mode, owner, scope, selected[0])
+            if not messages.askyesno("跳过所选数据", f"仅跳过这一条？\n\n{record.title}\n名单 ID：{record.sa_id}\n\n"
+                "是否识别将写为 2。保留已有备注，不导入、不认领、不在网页结案。\n"
+                "普通批次会跳过它；以后可在“重试跳过项”中处理。", parent=self.root):
+                return
+            self.set_busy(True)
+            result = self.service.skip_selected(self.roster, mode, owner, scope, record.sa_id, self.bridge)
+            self.roster = result.roster
+            self.last_results.update(result.messages)
+            self.status.set(result.summary)
+        except (SafetyStop, OSError) as exc:
+            self.status.set(str(exc))
+            messages.showwarning("未跳过", str(exc), parent=self.root)
+        finally:
+            self.set_busy(False)
+            self.render()
 
     def set_busy(self, value):
         self.busy = value

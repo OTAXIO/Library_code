@@ -91,6 +91,20 @@ class ServiceTests(unittest.TestCase):
                                      threading.Event(), Mock(), manual_export=True)
             run.assert_not_called()
 
+    def test_manual_skip_selection_requires_one_pending_owned_visible_record(self):
+        selected = self.service.select_skip(self.roster, "import", "谭勋策", "pending", "zero-pending")
+        self.assertEqual(selected.sa_id, "zero-pending")
+        for mode, owner, scope, sa_id in (("import", "其他人", "pending", "other-owner"),
+                ("import", "", "pending", "zero-pending"), ("import", "谭勋策", "skipped", "zero-skip"),
+                ("claim", "谭勋策", "pending", "claim-done"),
+                ("import", "谭勋策", "pending", "claim-pending"),
+                ("import", "谭勋策", "pending", "missing")):
+            with self.assertRaises(SafetyStop):
+                self.service.select_skip(self.roster, mode, owner, scope, sa_id)
+        self.roster.records.append(replace(selected, row=10))
+        with self.assertRaises(SafetyStop):
+            self.service.select_skip(self.roster, "import", "谭勋策", "pending", "zero-pending")
+
     def test_all_production_python_has_no_retired_dependency(self):
         root = Path(__file__).resolve().parents[1]
         forbidden = {"wos_browser", "paper_classify", "model_review", "submission_prepare", "settings_panel",
@@ -228,6 +242,144 @@ class ExtensionOnlyImportTests(unittest.TestCase):
         self.assertNotIn("import_upload", self.sa.calls)
 
 
+class ManualSkipTests(unittest.TestCase):
+    def setUp(self):
+        zero_fixtures.ZeroMatchTests.setUp(self)
+        self.service = WorkflowService(self.folder)
+        self.selected = self.roster.records[1]
+
+    def skip(self, bridge=None):
+        return self.service.skip_selected(self.roster, "import", "谭勋策", "pending",
+                                          self.selected.sa_id, bridge)
+
+    def test_offline_skip_changes_only_selected_tail_flag_and_keeps_backups(self):
+        import zipfile
+        from core import read_roster
+        from roster_write import worksheet_member, patch_cell, column_name
+        with zipfile.ZipFile(self.path) as archive:
+            parts = {name: archive.read(name) for name in archive.namelist()}
+            member = worksheet_member(archive, self.roster.sheet_name)
+        result = self.skip()
+        expected = replace(self.selected, skipped=True)
+        self.assertEqual(result.roster.records, [self.roster.records[0], expected] + self.roster.records[2:])
+        self.assertEqual(self.sa.calls, [])
+        self.assertEqual(self.download.calls, [])
+        with zipfile.ZipFile(self.path) as archive:
+            for name, raw in parts.items():
+                wanted = (patch_cell(raw, f"{column_name(self.roster.completion_column)}{self.selected.row}",
+                                     self.selected.row, 2) if name == member else raw)
+                self.assertEqual(archive.read(name), wanted, name)
+        backup = self.folder / "runtime" / "backups" / f"list-{self.roster.sha256}.xlsx"
+        self.assertEqual(read_roster(backup).records, self.roster.records)
+        self.assertNotIn(self.selected.sa_id,
+                         [r.sa_id for r in self.service.select(result.roster, "import", "谭勋策", 5, "pending")])
+        self.assertEqual([r.sa_id for r in self.service.select(result.roster, "import", "谭勋策", 5, "skipped")],
+                         [self.selected.sa_id])
+        self.assertEqual(self.service.operation_log.read()[-1]["sa_id"], self.selected.sa_id)
+
+    def test_unknown_backend_write_or_closure_cannot_be_skipped_and_journals_unchanged(self):
+        from core import file_hash
+        from automation import ImportStore
+        from zero_match import WorkflowStore
+        for store, phases in ((ImportStore(self.folder / "runtime" / "wos-imports"),
+                ("upload_intent", "import_intent", "imported", "push_intent", "pushed", "unknown")),
+                (WorkflowStore(self.folder / "runtime" / "wos-imports"),
+                ("link_intent", "linked", "complete_intent", "non_sjtu_complete_intent", "done", "unknown"))):
+            for phase in phases:
+                store.save(self.selected, {"phase": phase})
+                before, journal = file_hash(self.path), file_hash(store.path)
+                with self.assertRaisesRegex(SafetyStop, "断点待核验"):
+                    self.skip()
+                self.assertEqual(file_hash(self.path), before)
+                self.assertEqual(file_hash(store.path), journal)
+            # Let the next journal be the gate, not a leftover import intent.
+            store.save(self.selected, {"phase": "exported" if isinstance(store, ImportStore) else "downloaded"})
+
+    def test_only_downloaded_or_exported_checkpoints_allow_local_skip(self):
+        from core import file_hash
+        from automation import ImportStore
+        from zero_match import WorkflowStore
+        stores = [ImportStore(self.folder / "runtime" / "wos-imports"),
+                  WorkflowStore(self.folder / "runtime" / "wos-imports")]
+        for store, phase in zip(stores, ("exported", "downloaded")):
+            store.save(self.selected, {"phase": phase})
+        hashes = [file_hash(store.path) for store in stores]
+        result = self.skip()
+        self.assertTrue(result.roster.records[1].skipped)
+        self.assertEqual([file_hash(store.path) for store in stores], hashes)
+
+    def test_busy_bridge_stale_roster_excel_lock_or_corrupt_journal_never_writes(self):
+        from core import file_hash
+        before = file_hash(self.path)
+        with self.assertRaisesRegex(SafetyStop, "仍在执行"):
+            self.skip(SimpleNamespace(pending={"action": "status"}))
+        self.assertEqual(file_hash(self.path), before)
+        lock = self.path.with_name("~$" + self.path.name)
+        lock.touch()
+        with self.assertRaisesRegex(SafetyStop, "Excel"):
+            self.skip()
+        lock.unlink()
+        with patch.object(self.roster, "assert_unchanged", side_effect=SafetyStop("名单已改变")):
+            with self.assertRaisesRegex(SafetyStop, "名单已改变"):
+                self.skip()
+        journal = self.folder / "runtime" / "wos-imports" / "imports.sqlite3"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_bytes(b"not sqlite")
+        with self.assertRaisesRegex(SafetyStop, "断点无法核验"):
+            self.skip()
+        self.assertEqual(file_hash(self.path), before)
+
+    def test_foreign_keyed_journal_and_wrong_roster_path_block_skip(self):
+        from automation import ImportStore
+        store = ImportStore(self.folder / "runtime" / "wos-imports")
+        store.save(replace(self.selected, title="Changed title"), {"phase": "exported"})
+        with self.assertRaisesRegex(SafetyStop, "断点待核验"):
+            self.skip()
+        with patch("workflow_service.fixed_roster_path", return_value=self.folder / "another-list.xlsx"):
+            with self.assertRaisesRegex(SafetyStop, "当前 code/list"):
+                self.skip()
+
+    def test_already_skipped_or_completed_row_remains_readonly(self):
+        from core import file_hash
+        from roster_write import mark_complete
+        result = self.skip()
+        before = file_hash(self.path)
+        with self.assertRaises(SafetyStop):
+            self.service.skip_selected(result.roster, "import", "谭勋策", "pending", self.selected.sa_id)
+        self.assertEqual(file_hash(self.path), before)
+        first = result.roster.records[0]
+        completed = mark_complete(result.roster, first, note="已入库").roster
+        before = file_hash(self.path)
+        with self.assertRaises(SafetyStop):
+            self.service.skip_selected(completed, "import", "谭勋策", "pending", first.sa_id)
+        self.assertEqual(file_hash(self.path), before)
+
+    def test_existing_local_and_web_notes_survive_manual_skip(self):
+        from roster_write import patch_text_cell, worksheet_member
+        from core import read_roster
+        import zipfile
+        # A disposable fixture already has a human note in both remark columns.
+        with zipfile.ZipFile(self.path) as archive:
+            parts = {name: archive.read(name) for name in archive.namelist()}
+            member = worksheet_member(archive, self.roster.sheet_name)
+        changed = patch_text_cell(parts[member], f"A{self.selected.row}", self.selected.row, "人工备注保留")
+        with zipfile.ZipFile(self.path, "w") as archive:
+            for name, raw in parts.items():
+                archive.writestr(name, changed if name == member else raw)
+        self.roster = read_roster(self.path)
+        self.selected = self.roster.records[1]
+        result = self.skip()
+        self.assertEqual(result.roster.records[1].remark, "人工备注保留")
+        self.assertEqual(result.roster.records[1].source, self.selected.source)
+        self.assertEqual(self.sa.calls, [])
+
+    def test_log_failure_reports_saved_skip_without_pretending_it_rolled_back(self):
+        with patch.object(self.service.operation_log, "record", side_effect=OSError("test log failure")):
+            result = self.skip()
+        self.assertTrue(result.roster.records[1].skipped)
+        self.assertIn("跳过已保存", result.summary)
+
+
 class MinimalUITests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -252,14 +404,17 @@ class MinimalUITests(unittest.TestCase):
         self.app.render()
         self.assertEqual(self.app.trees["claim"].get_children(), ("claim-done",))
         self.assertEqual(str(self.app.start_button["state"]), "disabled")
+        self.assertEqual(str(self.app.skip_button["state"]), "disabled")
         self.app.scope.set("重试跳过项")
         self.app.render()
         self.assertEqual(self.app.trees["claim"].get_children(), ("claim-skip",))
         self.assertEqual(self.app.trees["import"].get_children(), ("zero-skip",))
+        self.assertEqual(str(self.app.skip_button["state"]), "disabled")
 
     def test_busy_locks_controls_and_close_requests_safe_pause(self):
         self.app.set_busy(True)
         self.assertEqual(str(self.app.owner_box["state"]), "disabled")
+        self.assertEqual(str(self.app.skip_button["state"]), "disabled")
         self.assertEqual(self.app.notebook.tab(self.app.pages["import"], "state"), "disabled")
         with patch("app.messages.showwarning"):
             self.app.close()
@@ -329,7 +484,8 @@ class MinimalUITests(unittest.TestCase):
         self.root.deiconify()
         self.root.geometry("660x430")
         self.root.update()
-        for widget in (self.app.start_button, self.app.pause_button, self.app.details["claim"], self.app.scope_box):
+        for widget in (self.app.start_button, self.app.pause_button, self.app.skip_button,
+                       self.app.details["claim"], self.app.scope_box):
             self.assertTrue(widget.winfo_ismapped())
             bottom = widget.winfo_rooty() - self.root.winfo_rooty() + widget.winfo_height()
             right = widget.winfo_rootx() - self.root.winfo_rootx() + widget.winfo_width()
@@ -345,7 +501,7 @@ class MinimalUITests(unittest.TestCase):
         self.root.deiconify()
         self.root.geometry("660x430")
         self.root.update()
-        for widget in (self.app.start_button, self.app.manual_import_button, self.app.pause_button,
+        for widget in (self.app.start_button, self.app.manual_import_button, self.app.pause_button, self.app.skip_button,
                        self.app.import_style_box, self.app.details["import"]):
             self.assertTrue(widget.winfo_ismapped())
             self.assertLessEqual(widget.winfo_rooty() - self.root.winfo_rooty() + widget.winfo_height(),
@@ -358,3 +514,39 @@ class MinimalUITests(unittest.TestCase):
         self.app.set_busy(False)
         self.assertEqual(str(self.app.limit_box["state"]), "disabled")
         self.root.withdraw()
+
+    def test_manual_skip_requires_selection_confirmation_and_only_dispatches_that_id(self):
+        with patch("app.messages.showwarning"), patch.object(self.service, "skip_selected") as skip:
+            self.app.skip_selected()
+        skip.assert_not_called()
+        self.app.trees["claim"].selection_set("claim-pending")
+        self.app.show_selected("claim")
+        self.assertEqual(str(self.app.skip_button["state"]), "normal")
+        with patch("app.messages.askyesno", return_value=False), patch.object(self.service, "skip_selected") as skip:
+            self.app.skip_selected()
+        skip.assert_not_called()
+        chosen = replace(self.app.roster.records[0], skipped=True)
+        saved = SimpleNamespace(records=[chosen] + self.app.roster.records[1:], assert_unchanged=Mock())
+        result = TaskResult(saved, {chosen.sa_id: "已手动跳过"}, "已手动跳过")
+        with patch("app.messages.askyesno", return_value=True), patch.object(self.service, "skip_selected", return_value=result) as skip:
+            self.app.skip_selected()
+        self.assertEqual(skip.call_args.args[4], "claim-pending")
+        self.assertEqual(self.app.status.get(), "已手动跳过")
+        self.assertFalse(self.app.busy)
+        self.assertNotIn(chosen.sa_id, self.app.trees["claim"].get_children())
+        self.assertEqual(self.app.trees["claim"].selection(), ())
+        self.assertEqual(str(self.app.skip_button["state"]), "disabled")
+
+    def test_manual_skip_is_locked_while_running_and_backend_failure_stays_visible(self):
+        self.app.trees["claim"].selection_set("claim-pending")
+        self.app.set_busy(True)
+        with patch.object(self.service, "skip_selected") as skip:
+            self.app.skip_selected()
+        skip.assert_not_called()
+        self.app.set_busy(False)
+        with patch("app.messages.askyesno", return_value=True), patch("app.messages.showwarning"), \
+                patch.object(self.service, "skip_selected", side_effect=SafetyStop("原操作尚待核验")):
+            self.app.skip_selected()
+        self.assertIn("尚待核验", self.app.status.get())
+        self.assertIn("claim-pending", self.app.trees["claim"].get_children())
+        self.assertFalse(self.app.busy)
