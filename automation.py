@@ -153,6 +153,27 @@ def identity(record, candidate):
     return confirmed
 
 
+def validate_import_batch(batch, instructions, expected_id="", *, require_pushed=False):
+    """Check the same single-paper receipt before push and before SA closure."""
+    if (not isinstance(batch, dict) or
+            any(not isinstance(batch.get(k), str) or not batch[k].strip() for k in ("id", "modelId")) or
+            expected_id and batch["id"] != expected_id or
+            batch.get("source") != "WOS" or batch.get("instructions") != instructions):
+        raise SafetyStop("批次编号、来源或说明不一致，未确认本条入库。")
+    numbers = {}
+    for key in ("total", "actual", "fail", "status"):
+        value = batch.get(key)
+        if type(value) not in (int, str) or not re.fullmatch(r"[0-9]+", str(value)):
+            raise SafetyStop("批次计数或状态未知，未确认本条入库。")
+        numbers[key] = int(value)
+    if (numbers["total"] != 1 or numbers["fail"] != 0 or
+            numbers["status"] not in (1, 2) or numbers["actual"] not in (0, 1) or
+            numbers["status"] == 2 and numbers["actual"] != 1 or
+            require_pushed and numbers["status"] != 2):
+        raise SafetyStop("批次不是成功一篇、失败零篇的有效入库结果，未推送或结案。")
+    return batch
+
+
 class ImportStore:
     """Write-ahead journal. A crash/timeout leaves an intent that cannot be retried."""
     def __init__(self, root):
@@ -209,7 +230,8 @@ class ImportStore:
         raw = (self.root / (sha + ".txt")).read_bytes()
         if hashlib.sha256(raw).hexdigest() != sha:
             raise SafetyStop("原始 WOS 导出文件发生变化。")
-        parse_wos(raw)
+        if parse_wos(raw) != state["candidate"]:
+            raise SafetyStop("导入断点的文献资料与原始 TXT 不一致，未使用此存档。")
         return raw
 
     def other_writes(self, record, candidate):
@@ -223,7 +245,7 @@ class ImportStore:
                 previous = state["candidate"]
                 same = previous.get("wos") == candidate["wos"] or (
                     candidate.get("doi") and previous.get("doi") == candidate["doi"])
-                if same and state["phase"] in ("upload_intent", "import_intent", "imported", "push_intent", "pushed"):
+                if same and state["phase"] in ("upload_intent", "uploaded", "import_intent", "imported", "push_intent", "pushed"):
                     found.append(sa_id)
             except (ValueError, KeyError, TypeError, AttributeError):
                 raise SafetyStop("历史导入日志结构异常，请核对后继续；不会忽略重复导入风险。") from None
@@ -232,9 +254,26 @@ class ImportStore:
 
 class WOSFlow:
     def __init__(self, bridge, store, unchanged=lambda: None, progress=lambda text: None,
-                 audit=lambda action, result, sa_id: None):
+                 audit=lambda action, result, sa_id: None, cancelled=lambda: False):
         self.bridge, self.store = bridge, store
         self.unchanged, self.progress, self.audit = unchanged, progress, audit
+        self.cancelled = cancelled
+
+    def checkpoint(self):
+        """Pause between committed steps, never discard an in-flight receipt."""
+        self.unchanged()
+        if self.cancelled():
+            raise SafetyStop("已请求暂停；已保存当前断点，未提交下一步。")
+
+    def check_importable(self, record):
+        result = self.call("search", {"sa_id": record.sa_id})
+        row = result.get("row")
+        if isinstance(row, dict) and row.get("saLzkId") == record.sa_id and row.get("markStatus") == "待处理":
+            if match_count(row) > 0:
+                raise NonZeroMatchSkip("上传前匹配数已非 0，已跳过；未修改备注。")
+        fresh_plan = classify(record, result)
+        if fresh_plan.route != "wos":
+            raise SafetyStop("比对状态已变化，不再符合缺失条目的导入条件：" + fresh_plan.reason)
 
     def call(self, action, payload):
         self.unchanged()
@@ -301,6 +340,7 @@ class WOSFlow:
         return state
 
     def proceed(self, record, confirm_identity=False):
+        self.checkpoint()
         state = self.store.get(record)
         if not state:
             raise SafetyStop("请先自动判断并检索 WOS。")
@@ -311,49 +351,52 @@ class WOSFlow:
             self.store.save(record, state)
         if not state["identity_confirmed"]:
             return state
+        raw = self.store.bytes(state)
         if state["phase"] == "pushed":
             return state
-        raw = self.store.bytes(state)
+        resuming_uploaded = state["phase"] == "uploaded"
         common = {"sa_id": record.sa_id, "instructions": state["instructions"], "candidate": candidate}
         # Recheck current SA status immediately before beginning a new upload.
         if state["phase"] == "exported":
             others = self.store.other_writes(record, candidate)
             if others:
                 raise SafetyStop("同一论文已有导入或提交记录（" + "、".join(others) + "），请核对并关联已有条目，不重复导入。")
-            result = self.call("search", {"sa_id": record.sa_id})
-            row = result.get("row")
-            if isinstance(row, dict) and row.get("saLzkId") == record.sa_id and row.get("markStatus") == "待处理":
-                if match_count(row) > 0:
-                    raise NonZeroMatchSkip("上传前匹配数已非 0，已跳过；未修改备注。")
-            fresh_plan = classify(record, result)
-            if fresh_plan.route != "wos":
-                raise SafetyStop("比对状态已变化，不再符合缺失条目的导入条件：" + fresh_plan.reason)
+            self.check_importable(record)
+            self.checkpoint()
             scan = self.call("import_scan", common)
             if scan.get("batches") != []:
                 raise SafetyStop("已有同说明批次。请人工检查，禁止重复上传。")
+            self.checkpoint()
             state["phase"] = "upload_intent"
             self.store.save(record, state)
             uploaded = self.call("import_upload", {**common, "content": base64.b64encode(raw).decode()})
             if uploaded.get("uploaded") is not True or uploaded.get("sha256") != candidate["sha256"]:
                 raise SafetyStop("上传回读不匹配。请核验网页，禁止重试。")
             state["upload"] = uploaded
+            # This receipt proves upload, not import submission. Keep it so a
+            # pause here resumes the same form instead of uploading a new file.
+            state["phase"] = "uploaded"
+            self.store.save(record, state)
+        if state["phase"] == "uploaded":
+            self.checkpoint()
+            if resuming_uploaded:
+                self.check_importable(record)
+                self.checkpoint()
             state["phase"] = "import_intent"
             self.store.save(record, state)
-            self.call("import_submit", {**common, "upload": uploaded})
+            self.call("import_submit", {**common, "upload": state["upload"]})
         if state["phase"] == "upload_intent":
             raise SafetyStop("上次上传结果不明。请人工核对上传窗口；不会自动再次上传。")
         if state["phase"] in ("import_intent", "imported", "push_intent"):
+            self.checkpoint()
             checked = self.call("import_check", {**common, "batch_id": (state.get("batch") or {}).get("id", ""),
                                                   "expect_pushed": state["phase"] == "push_intent"})
             if checked.get("verified") is not True:
                 raise SafetyStop("导入/推送尚未核验成功。等待后台完成后可点“继续 / 核验”，仅只读检查。")
-            batch = checked.get("batch", {})
-            if not isinstance(batch.get("id"), str) or not batch["id"]:
-                raise SafetyStop("批次 ID 无效。")
-            if state.get("batch") and state["batch"]["id"] != batch["id"]:
-                raise SafetyStop("回读到了不同批次，停止。")
+            batch = validate_import_batch(checked.get("batch"), state["instructions"],
+                                          (state.get("batch") or {}).get("id", ""))
             state["batch"] = batch
-            if str(batch.get("status")) == "2":
+            if int(batch["status"]) == 2:
                 state["phase"] = "pushed"
                 self.store.save(record, state)
                 return state
@@ -361,6 +404,7 @@ class WOSFlow:
                 raise SafetyStop("推送已提交但尚未核验完成。不会再次推送，请等待后只读核验。")
             state["phase"] = "imported"
             self.store.save(record, state)
+            self.checkpoint()
             state["phase"] = "push_intent"
             self.store.save(record, state)
             pushed = self.call("import_push", {**common, "batch": batch})

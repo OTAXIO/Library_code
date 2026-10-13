@@ -162,11 +162,23 @@ const clone=value=>JSON.parse(JSON.stringify(value));
     assert.deepEqual((await expectOK('state')).actions,['search','import_scan','import_upload','import_submit','import_check','import_push','import_check']);
     console.log('PASS lost push acknowledgement resumes only verification and never issues a second push');
 
+    for(const [scenario,phase,writes] of [
+      ['pause-upload','uploaded',{upload:1,import:0,push:0}],
+      ['pause-push','push_intent',{upload:1,import:1,push:1}],
+    ]){
+      resetService();await imports.reload();await prepare(scenario);
+      const paused=await invoke('proceed');assert.equal(paused.ok,false);assert.match(paused.error,/已请求暂停/);
+      assert.equal((await expectOK('state')).state.phase,phase);assert.deepEqual(service.writes,writes);
+      assert.equal((await expectOK('proceed')).phase,'pushed');
+      assert.deepEqual(service.writes,{upload:1,import:1,push:1});assert.deepEqual(service.errors,[]);
+      console.log('PASS '+scenario+' preserves the original form/receipt and resumes without duplicate writes');
+    }
+
     resetService();service.wrongUT=true;await imports.reload();await prepare('wrong-identity');
     const mismatch=await invoke('proceed');assert.equal(mismatch.ok,false);assert.match(mismatch.error,/入藏号/);
     assert.deepEqual(service.writes,{upload:1,import:1,push:0});assert.deepEqual(service.errors,[]);
     console.log('PASS imported identifier mismatch stops before push and leaves an auditable import intent');
-    console.log('Import extension: 9 end-to-end checks passed. Synthetic data, no production requests or roster modifications.');
+    console.log('Import extension: 11 end-to-end checks passed. Synthetic data, no production requests or roster modifications.');
   }finally{
     if(context)await context.close();backend.stdin.end(JSON.stringify({exit:true})+'\n');
     await new Promise(resolve=>{if(stopped)return resolve();const timer=setTimeout(()=>{backend.kill();resolve();},3000);

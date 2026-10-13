@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from automation import WOSFlow, classify, doi, identity, norm, parse_wos, wos
+from automation import WOSFlow, classify, doi, identity, norm, parse_wos, wos, validate_import_batch
 from claim import sa_claim_source
 from claim_batch import automatic_claim_selection
 from approval import verify_claim_result
@@ -220,7 +220,8 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
         except Exception:
             progress("log.txt 保存失败；独立断点日志仍保留，请检查日志目录。")
     downloader = WOSDownload(download, download.store, lambda: result.roster.assert_unchanged(), stop, record_operation)
-    flow = WOSFlow(sa, imports, lambda: result.roster.assert_unchanged(), progress, record_operation)
+    flow = WOSFlow(sa, imports, lambda: result.roster.assert_unchanged(), progress, record_operation,
+                   cancelled=stop.is_set)
     backend_ready = False
 
     def call(action, payload):
@@ -310,12 +311,9 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
         checked = call("import_check", {"sa_id": record.sa_id, "candidate": candidate,
             "instructions": "SA补充-" + record.sa_id, "batch_id": previous["id"], "expect_pushed": True})
         batch = checked.get("batch") or {}
-        if (checked.get("verified") is not True or batch.get("id") != previous["id"]
-                or str(batch.get("status")) != "2" or batch.get("source") != "WOS"
-                or batch.get("instructions") != "SA补充-" + record.sa_id
-                or any(type(batch.get(key)) not in (int, str) or str(batch[key]) != value
-                       for key, value in (("total", "1"), ("actual", "1"), ("fail", "0")))):
+        if checked.get("verified") is not True:
             raise SafetyStop("未回读到本条成功 1、失败 0 的已推送入库批次；未结案。")
+        validate_import_batch(batch, "SA补充-" + record.sa_id, previous["id"], require_pushed=True)
         fresh = call("search", {"sa_id": record.sa_id})
         row = fresh.get("row")
         verify_sa(record, row)
@@ -431,10 +429,22 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
             result.roster = update.roster
             record_operation("记录已核验 WOS 数据来源", "已执行", record.sa_id)
             record = next(r for r in result.roster.records if r.sa_id == record.sa_id)
+            # Continue the original batch before treating a resolved item as an
+            # unrelated existing paper. In particular, a lost push ACK may
+            # already have made it visible in the library. An uploaded form
+            # must also stay on its tab until submitted, not be navigated away.
+            if import_state and import_state.get("phase") in (
+                    "upload_intent", "uploaded", "import_intent", "imported", "push_intent"):
+                stage = "续验原导入批次"
+                import_state = flow.proceed(record)
+                if import_state.get("phase") != "pushed":
+                    raise SafetyStop("原导入批次尚未回读到推送完成。")
             stage = "核查本库是否已存在"
             item = resolved_item(call("import_resolve", {"sa_id": record.sa_id, "candidate": candidate}), candidate)
             imported = bool(import_state and import_state.get("phase") == "pushed")
             if not item:
+                if imported:
+                    raise SafetyStop("推送已确认，本库检索尚未出现该文献；下次只续验，不重复上传。")
                 if type(fresh.get("import_completion_protocol")) is not int or fresh["import_completion_protocol"] != 1:
                     raise SafetyStop("请重载扩展 0.4.11 并重新绑定 SA 页；尚未上传或导入。")
                 # A linked/completion-intent record must never re-import when

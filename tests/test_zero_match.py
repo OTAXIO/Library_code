@@ -142,6 +142,72 @@ class ZeroMatchTests(unittest.TestCase):
         self.roster = result.roster
         return result
 
+    def assert_pause_boundary(self, action, expected_phase, forbidden):
+        original = self.sa.call
+        def pause_after(step, payload, timeout=75):
+            answer = original(step, payload, timeout)
+            if step == action:
+                self.stop.set()
+            return answer
+        self.sa.call = pause_after
+        result = self.run_flow(1)
+        self.assertTrue(result.halted)
+        self.assertIn("暂停", result.reason)
+        for step in forbidden:
+            self.assertNotIn(step, self.sa.calls)
+        rec = result.roster.records[0]
+        self.assertFalse(rec.done)
+        self.assertFalse(rec.skipped)
+        self.assertEqual(self.imports.get(rec)["phase"], expected_phase)
+        def resume(step, payload, timeout=75):
+            if step == "import_resolve":
+                # The real adapter cannot leave an owned upload form to open
+                # library search before that same upload has been submitted.
+                self.assertNotEqual(self.imports.get(rec)["phase"], "uploaded")
+            return original(step, payload, timeout)
+        self.sa.call = resume
+        self.stop.clear()
+        resumed = self.run_flow(1)
+        self.assertFalse(resumed.halted, resumed.reason)
+        self.assertTrue(resumed.roster.records[0].done)
+        self.assertEqual(resumed.roster.records[0].remark, "已入库")
+        for step in ("import_upload", "import_submit", "import_push", "complete"):
+            self.assertEqual(self.sa.calls.count(step), 1, step)
+
+    def test_pause_after_batch_scan_prevents_upload_and_resumes(self):
+        self.assert_pause_boundary("import_scan", "exported", ("import_upload", "import_submit", "import_push"))
+
+    def test_pause_after_upload_preserves_receipt_and_resumes_without_reupload(self):
+        self.assert_pause_boundary("import_upload", "uploaded", ("import_submit", "import_push"))
+
+    def test_pause_after_import_submit_does_not_push_or_resubmit(self):
+        self.assert_pause_boundary("import_submit", "import_intent", ("import_check", "import_push"))
+
+    def test_pause_after_import_readback_does_not_push_or_resubmit(self):
+        self.assert_pause_boundary("import_check", "imported", ("import_push",))
+
+    def test_pause_after_push_verifies_own_batch_before_closure(self):
+        self.assert_pause_boundary("import_push", "push_intent", ("link", "complete"))
+
+    def test_lost_push_ack_recovers_original_import_instead_of_claiming_existing(self):
+        original = self.sa.call
+        def lose_ack(action, payload, timeout=75):
+            answer = original(action, payload, timeout)
+            if action == "import_push":
+                raise SafetyStop("推送已执行，回执丢失")
+            return answer
+        self.sa.call = lose_ack
+        self.assertTrue(self.run_flow(1).halted)
+        rec = self.roster.records[0]
+        self.assertEqual(self.imports.get(rec)["phase"], "push_intent")
+        self.sa.call = original
+        result = self.run_flow(1)
+        self.assertFalse(result.halted, result.reason)
+        self.assertEqual(result.roster.records[0].remark, "已入库")
+        self.assertEqual(self.imports.get(rec)["phase"], "pushed")
+        self.assertEqual(self.sa.calls.count("import_push"), 1)
+        self.assertNotIn("submit_claim", self.sa.calls)
+
     def existing_paper(self):
         from automation import parse_wos
         self.sa.candidate = parse_wos(sample())

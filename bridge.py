@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import queue
 import re
 import secrets
@@ -132,6 +133,11 @@ class Bridge:
             self.last_seen = 0
 
     def call(self, action, payload, timeout=90):
+        if (not isinstance(action, str) or not action or not isinstance(payload, dict) or
+                type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
+            raise SafetyStop("浏览器命令或等待时间无效，未发送。")
+        if {"id", "action", "expires"}.intersection(payload):
+            raise SafetyStop("浏览器命令参数包含保留字段，未发送。")
         with self.lock:
             if self.pending:
                 raise SafetyStop("已有命令正在执行。")
@@ -147,9 +153,12 @@ class Bridge:
             if (isinstance(response, dict) and response.get("ok") is False
                     and isinstance(response.get("error"), str) and response["error"]):
                 raise BrowserRejected(action, response["error"])
-            if not isinstance(response, dict) or not response.get("ok"):
+            if not isinstance(response, dict) or response.get("ok") is not True:
                 raise SafetyStop(str(response.get("error", "浏览器返回未知结果")) if isinstance(response, dict) else "浏览器结果格式异常")
-            return response.get("data", {})
+            data = response.get("data", {})
+            if not isinstance(data, dict):
+                raise SafetyStop("浏览器结果格式异常，未确认操作成功。")
+            return data
         except queue.Empty as exc:
             with self.lock:
                 delivered = bool(self.pending and self.pending.get("delivered"))

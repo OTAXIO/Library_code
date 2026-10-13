@@ -282,7 +282,7 @@ class ManualSkipTests(unittest.TestCase):
         from automation import ImportStore
         from zero_match import WorkflowStore
         for store, phases in ((ImportStore(self.folder / "runtime" / "wos-imports"),
-                ("upload_intent", "import_intent", "imported", "push_intent", "pushed", "unknown")),
+                ("upload_intent", "uploaded", "import_intent", "imported", "push_intent", "pushed", "unknown")),
                 (WorkflowStore(self.folder / "runtime" / "wos-imports"),
                 ("link_intent", "linked", "complete_intent", "non_sjtu_complete_intent", "done", "unknown"))):
             for phase in phases:

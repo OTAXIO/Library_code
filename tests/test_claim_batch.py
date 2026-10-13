@@ -268,6 +268,72 @@ class ClaimBatchTests(unittest.TestCase):
         with self.assertRaises(SafetyStop):
             run_claim_batch(roster, records, Mock(), limit=101)
 
+    def test_pause_during_person_lookup_prevents_claim_and_does_not_skip(self):
+        rec = record()
+        roster, bridge = FakeRoster([rec]), Mock()
+        search = found(rec)
+        stopped = False
+        def reply(action, payload):
+            nonlocal stopped
+            if action == "search":
+                return search
+            if action == "prepare_claim":
+                stopped = True
+                return prepared(search)
+            raise AssertionError("No write allowed after pause: " + action)
+        bridge.call.side_effect = reply
+        writer = Mock()
+        result = run_claim_batch(roster, [rec], bridge, cancel=lambda: stopped, skip_writer=writer)
+        self.assertTrue(result.cancelled)
+        self.assertEqual(result.skipped, {})
+        self.assertEqual([c.args[0] for c in bridge.call.call_args_list], ["search", "prepare_claim"])
+        writer.assert_not_called()
+
+    def test_roster_change_during_person_lookup_blocks_claim_without_skip(self):
+        rec = record()
+        roster, bridge = FakeRoster([rec]), Mock()
+        search = found(rec)
+        def reply(action, payload):
+            if action == "search":
+                return search
+            if action == "prepare_claim":
+                roster.assert_unchanged.side_effect = SafetyStop("名单已改变")
+                return prepared(search)
+            raise AssertionError("Stale roster must not be submitted: " + action)
+        bridge.call.side_effect = reply
+        writer = Mock()
+        result = run_claim_batch(roster, [rec], bridge, skip_writer=writer)
+        self.assertTrue(result.halted)
+        self.assertEqual(result.skipped, {})
+        self.assertIn("名单已改变", result.reason)
+        self.assertEqual([c.args[0] for c in bridge.call.call_args_list], ["search", "prepare_claim"])
+        writer.assert_not_called()
+
+    def test_pause_after_confirmed_claim_does_not_start_closure_or_mark_skip(self):
+        rec = record()
+        roster, bridge = FakeRoster([rec]), Mock()
+        search = found(rec)
+        stopped = False
+        def reply(action, payload):
+            nonlocal stopped
+            if action == "search":
+                return search
+            if action == "prepare_claim":
+                return prepared(search)
+            if action == "submit_claim":
+                stopped = True
+                return {"row": search["row"], "verified": True, "claimed": True, "staff_id": "00001",
+                        "scholar_id": "scholar-1", "author": "Tester", "order": 1}
+            raise AssertionError(action)
+        bridge.call.side_effect = reply
+        writer = Mock()
+        with patch("claim_batch.auto_complete_claim") as close:
+            result = run_claim_batch(roster, [rec], bridge, cancel=lambda: stopped, skip_writer=writer)
+        self.assertTrue(result.cancelled)
+        self.assertEqual(result.skipped, {})
+        close.assert_not_called()
+        writer.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

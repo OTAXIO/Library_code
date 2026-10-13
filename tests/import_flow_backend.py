@@ -18,14 +18,18 @@ record = Record(2, "测试负责人", "demo-001", "Synthetic paper", "10.1234/te
 audit = []
 lose_import_ack = False
 lose_push_ack = False
+pause_after = ""
+paused = False
 store = None
 
 
 class LossyBridge:
     def call(self, action, payload, timeout=75):
-        global lose_import_ack, lose_push_ack
+        global lose_import_ack, lose_push_ack, pause_after, paused
         audit.append(action)
         value = bridge.call(action, payload, timeout=timeout)
+        if action == pause_after:
+            paused, pause_after = True, ""
         if action == "import_submit" and lose_import_ack:
             lose_import_ack = False
             raise SafetyStop("Synthetic lost import acknowledgement after the server accepted it")
@@ -45,12 +49,14 @@ try:
             action, payload = task["action"], task.get("payload", {})
             if action == "reset_flow":
                 name = payload["scenario"]
-                if name not in ("normal", "lost-ack", "lost-push-ack", "wrong-identity"):
+                if name not in ("normal", "lost-ack", "lost-push-ack", "wrong-identity", "pause-upload", "pause-push"):
                     raise ValueError("Unknown isolated test scenario")
                 store = ImportStore(root / name)
                 audit.clear()
                 lose_import_ack = payload.get("lose_import_ack", False)
                 lose_push_ack = payload.get("lose_push_ack", False)
+                pause_after = {"pause-upload": "import_upload", "pause-push": "import_push"}.get(name, "")
+                paused = False
                 value = {"ready": True}
             elif action == "prepare_file":
                 file = Path(payload["path"]).resolve()
@@ -61,7 +67,8 @@ try:
                 # Rebuild both the flow and store every call: resume uses durable
                 # state, not an in-memory phase retained by a prior invocation.
                 store = ImportStore(store.root)
-                value = WOSFlow(LossyBridge(), store).proceed(record)
+                paused = False
+                value = WOSFlow(LossyBridge(), store, cancelled=lambda: paused).proceed(record)
             elif action == "state":
                 value = {"state": ImportStore(store.root).get(record), "actions": audit[:]}
             else:

@@ -187,6 +187,7 @@ class WorkflowService:
             messages.update({sa_id: "后台原已处理，仅同步名单" for sa_id in result.synced_ids})
             messages.update(result.skipped)
             tail = "已暂停，请核验网页；不重复提交。" if result.halted else "已按请求暂停。" if result.cancelled else "本轮结束。"
+            tail = getattr(result, "reason", "") or tail
             summary = f"完成 {len(result.completed_ids)} · 原已处理 {len(result.synced_ids)} · 跳过 {len(result.skipped)}。{tail}"
         else:
             imports = ImportStore(self.base / "runtime" / "wos-imports")

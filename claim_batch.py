@@ -21,6 +21,14 @@ class ClaimBatchResult:
     checked: int
     cancelled: bool
     halted: bool
+    reason: str = ""
+
+
+class _ClaimInterrupted(SafetyStop):
+    """Local pause/stale-roster guard, not a reason to mark a paper skipped."""
+    def __init__(self, message, cancelled=False):
+        super().__init__(message)
+        self.cancelled = cancelled
 
 
 def automatic_claim_selection(record, before, comparison, result):
@@ -73,6 +81,26 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
     completed, synced, skipped = [], [], {}
     checked = 0
     halted = False
+    halt_reason = ""
+
+    def check_current():
+        if cancel():
+            raise _ClaimInterrupted("已按请求暂停；当前记录未标记跳过，已确认的操作不会重复提交。", cancelled=True)
+        try:
+            current_roster.assert_unchanged()
+        except (SafetyStop, OSError) as exc:
+            raise _ClaimInterrupted("名单核验失败，未提交下一步：" + str(exc)) from exc
+
+    transport = bridge
+
+    class CheckedBridge:
+        # The closure helpers use the same guard; checking only the outer loop
+        # allowed submit_claim/complete after a long lookup and a user pause.
+        def call(self, *args, **kwargs):
+            check_current()
+            return transport.call(*args, **kwargs)
+
+    bridge = CheckedBridge()
 
     def note(action, result, sa_id):
         try:
@@ -107,7 +135,13 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
                     skipped[item.sa_id] += "；Excel 数字 2 写入失败：" + str(exc)
                     note("写入跳过标记", "已暂停", item.sa_id)
         return ClaimBatchResult(current_roster, tuple(completed), tuple(synced), skipped,
-                                checked, cancelled, halted)
+                                checked, cancelled, halted, halt_reason)
+
+    def interrupted(exc):
+        nonlocal halted, halt_reason
+        halted, halt_reason = not exc.cancelled, str(exc)
+        progress(halt_reason)
+        return finish(cancelled=exc.cancelled)
 
     for sa_id in ids:
         if cancel():
@@ -128,8 +162,10 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
             note("自动认领列表条目", "已跳过", sa_id)
             continue
         try:
-            current_roster.assert_unchanged()
             found = bridge.call("search", {"sa_id": sa_id})
+            check_current()
+        except _ClaimInterrupted as exc:
+            return interrupted(exc)
         except Exception as exc:
             skipped[sa_id] = "读取网页失败，浏览器状态需人工核验：" + str(exc)
             note("自动认领列表条目", "已暂停", sa_id)
@@ -168,8 +204,11 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
                 continue
             note("已认领记录结案意图", "已执行", sa_id)
             try:
+                check_current()
                 closed = complete_claim(current_roster, record, bridge, before, comparison,
                                         reviewed=True, note=completion_note)
+            except _ClaimInterrupted as exc:
+                return interrupted(exc)
             except Exception as exc:
                 skipped[sa_id] = "已认领，但批注或结案未全部核验：" + str(exc)
                 note("已认领记录结案", "已暂停", sa_id)
@@ -194,6 +233,9 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
             continue
         try:
             prepared_result = bridge.call("prepare_claim", payload)
+            check_current()
+        except _ClaimInterrupted as exc:
+            return interrupted(exc)
         except Exception as exc:
             if "作者认领页面结构已变化" in str(exc):
                 skipped[sa_id] = "网页没有可用的作者认领窗口。"
@@ -203,6 +245,8 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
             note("自动认领列表条目", "已跳过", sa_id)
             try:
                 bridge.call("search", {"sa_id": sa_id})
+            except _ClaimInterrupted as exc:
+                return interrupted(exc)
             except Exception:
                 halted = True
                 note("恢复认领工作页", "已暂停", sa_id)
@@ -216,6 +260,8 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
             note("自动认领列表条目", "已跳过", sa_id)
             try:
                 bridge.call("search", {"sa_id": sa_id})
+            except _ClaimInterrupted as exc:
+                return interrupted(exc)
             except Exception:
                 halted = True
                 note("恢复认领工作页", "已暂停", sa_id)
@@ -226,6 +272,8 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
         try:
             proof = bridge.call("submit_claim", submit)
             verify_claim_result(record, proof, person, author)
+        except _ClaimInterrupted as exc:
+            return interrupted(exc)
         except Exception as exc:
             skipped[sa_id] = "认领结果不确定，禁止继续或重试：" + str(exc)
             note("自动认领列表条目", "已暂停", sa_id)
@@ -233,8 +281,11 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
             break
         note("作者认领已核验", "已执行", sa_id)
         try:
+            check_current()
             closed = auto_complete_claim(current_roster, record, bridge, before, comparison,
                                          proof, person, author, confirmed=True, note=completion_note)
+        except _ClaimInterrupted as exc:
+            return interrupted(exc)
         except Exception as exc:
             skipped[sa_id] = "认领成功，批注或结案未全部核验：" + str(exc)
             note("自动批注结案", "已暂停", sa_id)

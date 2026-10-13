@@ -100,7 +100,8 @@ class FlowTests(unittest.TestCase):
         self.store = ImportStore(Path(self.tmp.name) / "imports")
         self.download = Path(self.tmp.name) / "wos.txt"
         self.download.write_bytes(sample())
-        self.batch = dict(id="batch-001", status=1, batchNumber="TEST", modelId="m")
+        self.batch = dict(id="batch-001", status=1, batchNumber="TEST", modelId="m",
+                          source="WOS", instructions="SA补充-demo-001", total=1, actual=0, fail=0)
         self.calls = []
         self.uploads = self.submits = self.pushes = 0
         self.fail = None
@@ -122,6 +123,7 @@ class FlowTests(unittest.TestCase):
             if action == "import_push":
                 self.pushes += 1
                 self.batch["status"] = 2
+                self.batch["actual"] = 1
                 return {"submitted": True}
             raise AssertionError(action)
         self.bridge = Mock()
@@ -200,6 +202,33 @@ class FlowTests(unittest.TestCase):
         self.bridge.call.side_effect = lambda action, payload, timeout=75: {"batches": [self.batch]} if action == "import_scan" else original(action, payload, timeout)
         with self.assertRaisesRegex(SafetyStop, "已有同说明"): self.flow.proceed(record())
         self.assertEqual(self.uploads, 0)
+
+    def test_malformed_verified_batch_never_authorizes_push(self):
+        self.flow.prepare(record())
+        # A truthy verified flag cannot compensate for a different/failed batch.
+        self.batch.update(source="WOS", instructions="SA补充-demo-001", total=1, actual=0, fail=0)
+        valid = dict(self.batch)
+        for change in ({"source": "OTHER"}, {"instructions": "SA补充-other"},
+                       {"total": 2}, {"total": True}, {"fail": 1}, {"status": 0},
+                       {"actual": -1}, {"status": 2, "actual": 0}):
+            with self.subTest(change=change):
+                self.batch = {**valid, **change}
+                with self.assertRaises(SafetyStop):
+                    self.flow.proceed(record())
+                self.assertEqual(self.pushes, 0)
+                self.assertNotEqual(self.store.get(record())["phase"], "pushed")
+
+    def test_checkpoint_candidate_must_match_archived_txt(self):
+        state = self.flow.prepare(record())
+        state["candidate"]["title"] = "Changed journal metadata"
+        self.store.save(record(), state)
+        with self.assertRaises(SafetyStop):
+            self.store.bytes(state)
+
+    def test_confirmed_upload_prevents_another_row_importing_same_paper(self):
+        state = self.flow.prepare(record())
+        self.store.save(record(), {**state, "phase": "uploaded"})
+        self.assertEqual(self.store.other_writes(record(sa_id="other-row"), state["candidate"]), ["demo-001"])
 
     def test_cancel_between_steps_is_safe(self):
         self.flow.prepare(record())

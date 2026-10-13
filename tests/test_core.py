@@ -204,6 +204,38 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaises(SafetyStop):
             self.bridge.call("search", {})
 
+    def test_command_fields_cannot_be_overridden_by_payload(self):
+        self.post("/poll", {"client": "1"})
+        for key, value in (("action", "complete"), ("id", "chosen-id"), ("expires", 1)):
+            with self.subTest(field=key):
+                with self.assertRaisesRegex(SafetyStop, "保留字段"):
+                    self.bridge.call("search", {key: value}, timeout=0.01)
+                self.assertIsNone(self.bridge.pending)
+
+    def test_malformed_success_reply_is_not_an_ack(self):
+        self.post("/poll", {"client": "1"})
+        for response in ({"ok": "false", "data": {}}, {"ok": 1, "data": {}},
+                         {"ok": True, "data": None}, {"ok": True, "data": []}):
+            with self.subTest(response=response):
+                results, errors = [], []
+                def invoke():
+                    try:
+                        results.append(self.bridge.call("search", {}, 3))
+                    except SafetyStop as exc:
+                        errors.append(exc)
+                worker = threading.Thread(target=invoke)
+                worker.start()
+                command = None
+                deadline = time.monotonic() + 2
+                while not command and time.monotonic() < deadline:
+                    command = self.post("/poll", {"client": "1"})["command"]
+                self.assertIsNotNone(command)
+                self.post("/result", {"id": command["id"], "client": "1", "result": response})
+                worker.join(4)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(results, [])
+                self.assertEqual(len(errors), 1)
+
     def test_completed_negative_reply_is_distinct_from_unknown_timeout(self):
         self.post("/poll", {"client": "1"})
         errors = []
