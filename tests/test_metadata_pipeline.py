@@ -24,6 +24,8 @@ class Backend:
         self.phase=0;self.calls=[];self.lost='';self.validation_error=False;self.claimed=True;self.roles_match=True
         self.auto_processed=False
         self.auto_processed_claim=False
+        self.item_id='1234567890123456789'
+        self.model_id='journal'
 
     def call(self, action, p, timeout=90):
         self.calls.append(action);c=self.candidate
@@ -38,11 +40,13 @@ class Backend:
                     {'label':'作者信息','sa':'是否第一作者：否\n是否通讯作者：否',
                      'library':'是否第一作者：否\n是否通讯作者：'+('否' if self.roles_match else '是')},
                     {'label':'交大是否第一单位','sa':'是','library':'是'}])
-            return {'metadata_completion_protocol':3,'row':copy.deepcopy(self.row),'comparison':comparison}
+            return {'metadata_completion_protocol':4,'row':copy.deepcopy(self.row),'comparison':comparison}
         if action=='import_excel_resolve':
-            return {'verified':True,'items':[] if self.phase!=2 else [{'id':'1234567890123456789',
+            return {'verified':True,'items':[] if self.phase!=2 else [{'id':self.item_id,
               'title':c['title'],'doi':c['doi'],'wos':''}]}
-        if action=='import_excel_probe':return {'metadata_excel_protocol':1,'source':'人工提交','model_id':'journal'}
+        if action=='import_excel_probe':return {'metadata_excel_protocol':1,'source':'人工提交','model_id':'journal',
+          'model_name':c.get('model_name','期刊论文'),
+          'fields':[{'label':label,'field':str(index),'required':0} for index,label in enumerate(c['fields'])]}
         if action=='import_excel_scan':return {'batches':[]}
         if action in ('import_excel_upload','import_excel_upload_status'):
             if self.validation_error:raise SafetyStop('格式校验待核验')
@@ -50,7 +54,7 @@ class Backend:
         elif action=='import_excel_submit':self.phase=1;result={'submitted':True}
         elif action=='import_excel_check':
             if not self.phase:raise SafetyStop('无批次；未重试提交')
-            return {'verified':True,'batch':{'id':'batch-one','modelId':'journal','source':'人工提交',
+            return {'verified':True,'batch':{'id':'batch-one','modelId':self.model_id,'source':'人工提交',
               'instructions':p['instructions'],'total':1,'actual':1 if self.phase==2 else 0,'fail':0,'status':self.phase,
               'increase':1 if self.phase==2 else 0,'duplicateSkip':0,'duplicateIncreaseUpdate':0,'duplicateOverallCoverage':0}}
         elif action=='import_excel_push':self.phase=2;result={'submitted':True}
@@ -144,7 +148,7 @@ class PipelineTests(unittest.TestCase):
             if action=='status':result['metadata_completion_protocol']=2
             return result
         self.backend.call=call
-        result=self.run_once();self.assertTrue(result.halted);self.assertIn('0.4.29',result.reason)
+        result=self.run_once();self.assertTrue(result.halted);self.assertIn('0.4.30',result.reason)
         self.assertEqual(self.backend.calls,['status']);self.client.get.assert_not_called()
         self.assertEqual(result.roster.sha256,self.roster.sha256)
 
@@ -246,11 +250,163 @@ class PipelineTests(unittest.TestCase):
 
     def test_role_disagreement_never_claims_or_closes(self):
         self.backend.claimed=False;self.backend.roles_match=False
-        result=self.run_once();self.assertTrue(result.halted)
-        self.assertIn('作者角色',result.reason)
+        result=self.run_once();self.assertFalse(result.halted,result.reason)
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertEqual(result.roster.records[0].remark,'通讯作者待核验')
         self.assertNotIn('prepare_claim',self.backend.calls)
         self.assertNotIn('complete',self.backend.calls)
         self.assertFalse(result.roster.records[0].done)
+
+    def test_changed_batch_model_is_not_accepted_or_pushed(self):
+        self.backend.model_id='unexpected-model'
+        result=self.run_once()
+        self.assertTrue(result.halted)
+        self.assertNotIn('import_excel_push',self.backend.calls)
+        self.assertNotIn('link',self.backend.calls)
+        self.assertFalse(result.roster.records[0].done)
+
+    def test_completion_with_changed_match_count_does_not_complete_list(self):
+        original=self.backend.call
+        def call(action,payload,timeout=90):
+            answer=original(action,payload,timeout)
+            if action=='complete':answer['row']['matchCount']=2
+            return answer
+        self.backend.call=call
+        result=self.run_once()
+        self.assertTrue(result.halted)
+        self.assertFalse(result.roster.records[0].done)
+        self.assertFalse(result.roster.records[0].skipped)
+
+    def test_required_model_field_is_checked_before_upload(self):
+        original=self.backend.call
+        def call(action,payload,timeout=90):
+            answer=original(action,payload,timeout)
+            if action=='import_excel_probe':answer['fields'].append({'label':'必填但来源缺失','field':'requiredExtra','required':True})
+            return answer
+        self.backend.call=call
+        result=self.run_once()
+        self.assertFalse(result.halted,result.reason)
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertEqual(result.roster.records[0].remark,'导入必填字段缺失')
+        self.assertNotIn('import_excel_upload',self.backend.calls)
+
+    def test_unknown_model_field_shape_halts_without_upload_or_false_skip(self):
+        original=self.backend.call
+        def call(action,payload,timeout=90):
+            answer=original(action,payload,timeout)
+            if action=='import_excel_probe':answer['fields']=[None]
+            return answer
+        self.backend.call=call
+        result=self.run_once()
+        self.assertTrue(result.halted)
+        self.assertFalse(result.roster.records[0].skipped)
+        self.assertNotIn('import_excel_upload',self.backend.calls)
+
+    def test_verified_claim_with_new_role_review_is_shelved_not_closed(self):
+        self.backend.claimed=False
+        original=self.backend.call
+        def call(action,payload,timeout=90):
+            answer=original(action,payload,timeout)
+            if action=='submit_claim':self.backend.row['reason']='通讯作者不一致'
+            return answer
+        self.backend.call=call
+        result=self.run_once()
+        self.assertFalse(result.halted,result.reason)
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertFalse(result.roster.records[0].done)
+        self.assertEqual(self.backend.calls.count('submit_claim'),1)
+        self.assertNotIn('complete',self.backend.calls)
+
+    def test_unknown_import_and_external_processed_state_cannot_fake_completion(self):
+        self.backend.lost='import_excel_submit'
+        first=self.run_once();self.assertTrue(first.halted)
+        self.roster=first.roster;self.record=self.roster.records[0]
+        self.backend.row.update(markStatus='已处理',remark='人工处理')
+        second=self.run_once()
+        self.assertTrue(second.halted)
+        self.assertFalse(second.roster.records[0].done)
+        self.assertFalse(second.roster.records[0].skipped)
+        self.assertEqual(self.backend.calls.count('import_excel_submit'),1)
+        self.assertNotIn('complete',self.backend.calls)
+
+    def test_unknown_claim_with_changed_roles_is_not_converted_to_skip(self):
+        self.backend.claimed=False;self.backend.lost='submit_claim'
+        first=self.run_once();self.assertTrue(first.halted)
+        self.roster=first.roster;self.record=self.roster.records[0]
+        self.backend.roles_match=False
+        second=self.run_once()
+        self.assertTrue(second.halted)
+        self.assertFalse(second.roster.records[0].done)
+        self.assertFalse(second.roster.records[0].skipped)
+        self.assertEqual(self.backend.calls.count('submit_claim'),1)
+
+    def make_five_queue(self):
+        make_roster(self.roster.path,flags=(None,)*6)
+        book=load_workbook(self.roster.path);sheet=book.active
+        for index in range(5):
+            row=index+2
+            for col,value in {'B':'谭勋策','D':f'Synthetic queue paper {index}',
+                    'E':f'10.1234/queue-{index}','G':'00001','H':0,'I':'','K':''}.items():
+                sheet[f'{col}{row}']=value
+        book.save(self.roster.path);book.close()
+        self.roster=migrate_status_column(read_roster(self.roster.path))
+        replies=[];backends={}
+        for index,record in enumerate(self.roster.records[:5]):
+            _,cr,oa=example()
+            cr.update(DOI=record.doi,title=[record.title])
+            oa.update(doi='https://doi.org/'+record.doi,title=record.title)
+            replies.extend([{'message':cr},oa])
+            backend=Backend(record,merge_metadata(record,cr,oa))
+            backend.item_id=str(1234567890123456789+index)
+            backend.auto_processed=True
+            backend.claimed=index%2==0
+            backends[record.sa_id]=backend
+        self.client.get=Mock(side_effect=replies)
+        class Queue:
+            calls=[]
+            def call(queue,action,payload,timeout=90):
+                queue.calls.append((payload['sa_id'],action))
+                return backends[payload['sa_id']].call(action,payload,timeout)
+        return Queue(),backends
+
+    def test_five_consecutive_full_closures_are_serial_and_write_each_once(self):
+        queue,backends=self.make_five_queue();untouched=self.roster.records[-1]
+        result=run_metadata_batch(self.base,self.roster,self.roster.records[:5],queue,self.stop,
+                                 client=self.client,excel_builder=self.builder)
+        self.assertFalse(result.halted,result.reason)
+        self.assertEqual(result.remaining,0)
+        self.assertEqual([out['status'] for out in result.outcomes],['done']*5)
+        self.assertTrue(all(r.done and r.remark=='已入库' for r in result.roster.records[:5]))
+        self.assertEqual(result.roster.records[-1],untouched)
+        for index,record in enumerate(result.roster.records[:5]):
+            backend=backends[record.sa_id]
+            for action in ('import_excel_upload','import_excel_submit','import_excel_push','link','complete'):
+                self.assertEqual(backend.calls.count(action),1,(index,action))
+            if index:
+                previous=result.roster.records[index-1]
+                self.assertLess(queue.calls.index((previous.sa_id,'complete')),
+                                queue.calls.index((record.sa_id,'status')))
+
+    def test_one_known_author_review_does_not_stop_remaining_papers(self):
+        from zero_match import WorkflowStore
+        queue,backends=self.make_five_queue()
+        deferred=self.roster.records[1]
+        backends[deferred.sa_id].roles_match=False
+        result=run_metadata_batch(self.base,self.roster,self.roster.records[:5],queue,self.stop,
+                                 client=self.client,excel_builder=self.builder)
+        self.assertFalse(result.halted,result.reason)
+        self.assertEqual([out['status'] for out in result.outcomes],['done','skip','done','done','done'])
+        saved=result.roster.records[1]
+        self.assertTrue(saved.skipped);self.assertFalse(saved.done)
+        self.assertEqual(saved.remark,'通讯作者待核验')
+        self.assertEqual(WorkflowStore(self.base/'runtime/metadata-imports').get(saved)['phase'],'linked')
+        self.assertNotIn('submit_claim',backends[deferred.sa_id].calls)
+        self.assertNotIn('complete',backends[deferred.sa_id].calls)
+        before={key:list(backend.calls) for key,backend in backends.items()}
+        again=run_metadata_batch(self.base,result.roster,result.roster.records[:5],queue,self.stop,
+                                client=self.client,excel_builder=self.builder)
+        self.assertFalse(again.halted,again.reason)
+        self.assertEqual(before,{key:backend.calls for key,backend in backends.items()})
 
     def test_resume_completed_then_pending_paper_only_reads_previous_batch(self):
         for index,pause_at in enumerate(('status','import_excel_upload','import_excel_submit')):

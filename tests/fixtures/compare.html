@@ -57,7 +57,7 @@ const detail = {currentSaLzkId:"",dialogLoading:false,compareData:[],saLzkCompar
       {label:"DOI",compareLeftValue:testConfig.saDoi??"",compareRightValue:testConfig.libraryDoi??"10.example/demo"},
       {label:"WOS记录号",compareLeftValue:testConfig.saWos??"",compareRightValue:testConfig.libraryWos??"WOS:DEMO"}];
     if(testConfig.omitWos)this.compareData=this.compareData.filter(item=>item.label!=="WOS记录号");
-    if(testConfig.unitInfo)this.compareData.push({label:'交大是否第一单位',compareLeftValue:'是',compareRightValue:'是'});
+    if(testConfig.unitInfo)this.compareData.push({label:'交大是否第一单位',compareLeftValue:'是',compareRightValue:testConfig.libraryFirstUnit??'是'});
     this.saLzkCompareData=copy(this.compareData);
     if(testConfig.modern){
       const card=(labels,values)=>'<div class="claim-info"><div class="claim-info__row">'+labels.map((label,i)=>

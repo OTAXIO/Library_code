@@ -60,7 +60,7 @@ def verify(before, after, targets, report):
         state=json.loads(saved[1]);candidate=state.get('candidate',{})
         from metadata_pipeline import validate_batch
         from metadata_sources import merge_metadata
-        batch=validate_batch(state.get('batch'),r,pushed=True)
+        batch=validate_batch(state.get('batch'),r,pushed=True,model_id=state.get('model_id'))
         path=Path(state.get('path','')).resolve()
         if (state.get('phase')!='done' or state.get('item_id')!=item['item_id'] or batch['id']!=item['batch_id']
           or not path.is_relative_to(BASE/'runtime/metadata-imports/papers') or not path.is_file()

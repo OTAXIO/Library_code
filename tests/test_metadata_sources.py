@@ -20,6 +20,26 @@ def example():
 
 
 class MetadataSourceTests(unittest.TestCase):
+    def test_conference_uses_existing_conference_template_not_journal_fields(self):
+        r,cr,oa=example()
+        cr.update(type='proceedings-article',event={'name':'Synthetic Conference'},
+                  **{'container-title':['Synthetic Series','Synthetic Proceedings']})
+        oa['type']='conference-paper'
+        candidate=merge_metadata(r,cr,oa)
+        self.assertEqual(candidate['model_name'],'会议论文')
+        self.assertEqual(candidate['fields']['会议名称'],'Synthetic Conference')
+        self.assertEqual(candidate['fields']['出处'],'Synthetic Series / Synthetic Proceedings')
+        for label in ('发表期刊','出版者','ISSN','URL','通讯作者','WOS记录号','会议录名称'):
+            self.assertNotIn(label,candidate['fields'])
+
+    def test_conference_requires_both_sources_and_real_event_name(self):
+        for oa_type in ('article','preprint','conference-abstract','book-chapter'):
+            r,cr,oa=example();cr['type']='proceedings-article';oa['type']=oa_type
+            cr['event']={'name':'Synthetic Conference'}
+            with self.assertRaises(MetadataSkip):merge_metadata(r,cr,oa)
+        r,cr,oa=example();cr['type']='proceedings-article';oa['type']='conference-paper'
+        with self.assertRaisesRegex(MetadataSkip,'会议信息'):merge_metadata(r,cr,oa)
+
     def test_verified_flat_fields_no_fabricated_wos_or_roles(self):
         r, cr, oa = example(); c = merge_metadata(r,cr,oa)
         self.assertEqual(c['fields']['作者'],'Alice Test(1)')

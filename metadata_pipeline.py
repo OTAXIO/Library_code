@@ -21,6 +21,10 @@ from wos_policy import NonZeroMatchSkip, require_no_author_review
 from zero_match import OWNER, BatchResult, WorkflowStore, verify_import_match, verify_paper_comparison, verify_sa
 
 
+class MetadataReview(MetadataSkip):
+    """A known per-paper role disagreement, not an uncertain write or transport failure."""
+
+
 def claim_state(comparison, record):
     """Read explicit site role flags; never assign/infer an author or unit role."""
     def field(label, side):
@@ -34,23 +38,29 @@ def claim_state(comparison, record):
     for label in ("是否第一作者", "是否通讯作者"):
         flags = [re.findall(re.escape(label) + r"\s*[：:]\s*([是否])(?=\s|$)", field("作者信息", side))
                  for side in ("sa", "library")]
-        if len(flags[0]) != 1 or flags[0] != flags[1]:
-            raise SafetyStop("已入库，作者角色待核验；未自动更改。")
+        if any(len(value) != 1 for value in flags):
+            raise SafetyStop("已入库，作者角色结构待核验；未自动更改。")
+        if flags[0] != flags[1]:
+            raise MetadataReview(label.removeprefix("是否") + "待核验")
     unit = [field("交大是否第一单位", side) for side in ("sa", "library")]
-    if unit[0] not in ("是", "否") or unit[0] != unit[1]:
-        raise SafetyStop("已入库，第一单位待核验；未自动更改。")
+    if any(value not in ("是", "否") for value in unit):
+        raise SafetyStop("已入库，第一单位结构待核验；未自动更改。")
+    if unit[0] != unit[1]:
+        raise MetadataReview("第一单位待核验")
     state = field("认领状态", "library")
     if state not in ("已认领", "未认领", "无人认领", "未被认领"):
         raise SafetyStop("已入库，认领状态待核验。")
     return state == "已认领"
 
 
-def validate_batch(batch, record, previous=None, pushed=False):
+def validate_batch(batch, record, previous=None, pushed=False, *, model_id=None):
     if (not isinstance(batch, dict) or not isinstance(batch.get("id"), str) or not batch["id"]
             or not isinstance(batch.get("modelId"), str) or not batch["modelId"]
             or batch.get("source") != "人工提交" or batch.get("instructions") != "SA补充-" + record.sa_id
             or previous and batch["id"] != previous):
         raise SafetyStop("Excel 入库批次与本条任务不一致。")
+    if model_id is not None and (not isinstance(model_id, str) or not model_id or batch["modelId"] != model_id):
+        raise SafetyStop("Excel 批次模型与本次已确认模型不一致，未推送或结案。")
     for k in ("total", "actual", "fail", "status"):
         if type(batch.get(k)) not in (str, int) or not str(batch[k]).isdigit():
             raise SafetyStop("Excel 批次计数未确认。")
@@ -140,7 +150,8 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                         "instructions":state["instructions"],"batch_id":state["batch"]["id"],"expect_pushed":True})
                     if checked.get("verified") is not True:
                         raise SafetyStop("上一篇已完成批次未确认，未重置旧向导。")
-                    validate_batch(checked.get("batch"),record,state["batch"]["id"],pushed=True)
+                    validate_batch(checked.get("batch"),record,state["batch"]["id"],pushed=True,
+                                   model_id=state.get("model_id"))
                 result.outcomes.append({"sa_id": record.sa_id, "status": "already_skipped", "message": "已跳过或完成，未重复执行"})
                 result.remaining -= 1
                 continue
@@ -162,6 +173,8 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                     or str(row.get("itemId", "")).lstrip(',') != state["item_id"]
                     or str(row.get("matchCount")) != "1"):
                 raise SafetyStop("已处理记录与原入库关联断点不一致，未同步名单或覆盖。")
+            if row.get("markStatus") == "已处理" and state.get("phase") not in (None, "prepared") and not owned_processed:
+                raise SafetyStop("已有入库写入断点待核验，不能仅凭后台已处理同步完成；未重复导入。")
             synced = None if owned_processed else reconcile_processed(result.roster, record, row)
             if synced:
                 result.roster = synced.roster
@@ -170,8 +183,8 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                 continue
             verify_sa(record, row)
             verify_import_match(row, state)
-            if fresh.get("metadata_completion_protocol") != 3:
-                raise SafetyStop("请重载 0.4.29 扩展并重新绑定 SA 和导入页；旧协议未执行上传或重提。")
+            if fresh.get("metadata_completion_protocol") != 4:
+                raise SafetyStop("请重载 0.4.30 扩展并重新绑定 SA 和导入页；旧协议未执行上传或重提。")
             if not state:
                 try:
                     require_no_author_review(record.reason, row.get("reason"))
@@ -205,10 +218,24 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                     # This mode never claims an already-existing article or
                     # asserts that it imported one. Leave author cases for claim mode.
                     raise MetadataSkip("本库已有文献")
-                probe = call("import_excel_probe", {})
+                model_name = candidate.get("model_name", "期刊论文")
+                if model_name not in ("期刊论文", "会议论文"):
+                    raise SafetyStop("元数据模型未知，未上传。")
+                probe = call("import_excel_probe", {"model_name": model_name})
                 if probe.get("metadata_excel_protocol") != 1 or probe.get("source") != "人工提交" or not probe.get("model_id"):
                     raise SafetyStop("通用 Excel 导入协议未确认。")
                 state["model_id"] = probe["model_id"]
+                if probe.get("model_name", model_name) != model_name:
+                    raise SafetyStop("原生模型与文献类型不一致，未上传。")
+                fields = probe.get("fields")
+                if not isinstance(fields, list) or not fields or any(not isinstance(field, dict) for field in fields):
+                    raise SafetyStop("原生模型字段未确认，未上传。")
+                for label in candidate["fields"]:
+                    if sum(field.get("label") == label for field in fields) != 1:
+                        raise MetadataSkip("导入字段待核验")
+                if any(str(field.get("required")).lower() in ("1", "true") and not candidate["fields"].get(field.get("label"))
+                       for field in fields):
+                    raise MetadataSkip("导入必填字段缺失")
                 batches = call("import_excel_scan", payload).get("batches")
                 if batches != []:
                     raise SafetyStop("已有同说明批次，未重复上传；请核验历史批次。")
@@ -245,7 +272,8 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                     "expect_pushed": state["phase"] in ("push_intent", "pushed", "link_intent", "linked", "claim_intent", "claimed", "complete_intent", "done")})
                 if checked.get("verified") is not True:
                     raise SafetyStop("未回读到实际 Excel 入库批次。")
-                batch = validate_batch(checked.get("batch"), record, state.get("batch", {}).get("id"))
+                batch = validate_batch(checked.get("batch"), record, state.get("batch", {}).get("id"),
+                                       model_id=state.get("model_id"))
                 if state["phase"] == "push_intent" and str(batch["status"]) != "2":
                     raise SafetyStop("上次推送结果待核验；未重复推送。")
                 if str(batch["status"]) == "1":
@@ -258,9 +286,10 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                     checked = call("import_excel_check", {**payload, "batch_id": batch["id"], "expect_pushed": True})
                     if checked.get("verified") is not True:
                         raise SafetyStop("推送尚未确认。")
-                    batch = validate_batch(checked.get("batch"), record, batch["id"], pushed=True)
+                    batch = validate_batch(checked.get("batch"), record, batch["id"], pushed=True,
+                                           model_id=state.get("model_id"))
                 else:
-                    validate_batch(batch, record, pushed=True)
+                    validate_batch(batch, record, pushed=True, model_id=state.get("model_id"))
                 state.update(batch=batch)
                 if state["phase"] in ("import_intent", "imported", "push_intent"):
                     state["phase"] = "pushed"
@@ -299,10 +328,13 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
             verify_paper_comparison(fresh.get("comparison"), candidate, record)
             # Linking a newly imported paper changes a zero-match task into an
             # author-mismatch task. Import success alone must not close it.
-            require_no_author_review(row.get("reason"))
-            claimed = claim_state(fresh["comparison"], record)
             if state["phase"] == "claim_intent":
                 raise SafetyStop("上次作者认领回执未确认；保留入库断点，不重复认领或直接结案。")
+            try:
+                require_no_author_review(row.get("reason"))
+            except SafetyStop:
+                raise MetadataReview("作者角色待核验") from None
+            claimed = claim_state(fresh["comparison"], record)
             if not claimed:
                 if state["phase"] in ("claimed", "complete_intent", "done"):
                     raise SafetyStop("已认领断点与网页不一致，未重复认领。")
@@ -320,7 +352,10 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                 verify_paper_comparison(fresh.get("comparison"), candidate, record)
                 if str(row.get("matchCount")) != "1" or str(row.get("itemId", "")).lstrip(',') != item["id"]:
                     raise SafetyStop("认领后平台关联改变，未结案。")
-                require_no_author_review(row.get("reason"))
+                try:
+                    require_no_author_review(row.get("reason"))
+                except SafetyStop:
+                    raise MetadataReview("作者角色待核验") from None
                 if not claim_state(fresh["comparison"], record):
                     raise SafetyStop("作者认领未回读成功，未结案。")
             if row.get("markStatus") not in ("待处理", "已处理") or row.get("remark", "") not in ("", "已入库"):
@@ -338,11 +373,26 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                         "candidate": candidate, "batch": state["batch"], "item_id": item["id"], "xlsx_sha256": state["xlsx_sha256"]}})
             after = proof.get("row"); verify_sa(record, after)
             if (proof.get("verified") is not True or after.get("remark") != "已入库" or after.get("markStatus") != "已处理"
+                    or str(after.get("matchCount")) != "1"
                     or str(after.get("itemId", "")).lstrip(',') != item["id"]):
                 raise SafetyStop("网页批注或结案未确认；list 未标完成。")
             result.roster = reconcile_processed(result.roster, record, after).roster
+            state.pop("deferred_reason", None)
             state["phase"] = "done"; store.save(record, state)
             result.outcomes.append({"sa_id": record.sa_id, "status": "done", "message": "已入库", "batch_id": state["batch"]["id"], "item_id": item["id"]})
+            result.remaining -= 1
+        except MetadataReview as exc:
+            # Known completed writes stay in the journal. A disagreement is
+            # shelved locally, never declared a completed SA or re-imported.
+            # Unknown claim/closure intents cannot be hidden as a skip.
+            if state.get("phase") not in ("linked", "claimed"):
+                result.halted, result.reason = True, str(exc)
+                break
+            checkpoint()
+            state["deferred_reason"] = exc.note; store.save(record, state)
+            result.roster = mark_skipped_many(result.roster, [record], reasons={record.sa_id: exc.note}).roster
+            result.outcomes.append({"sa_id": record.sa_id, "status": "skip",
+                "message": exc.note + "（已入库，未结案）"})
             result.remaining -= 1
         except (MetadataSkip, NonZeroMatchSkip) as exc:
             if state.get("phase") not in (None, "prepared"):

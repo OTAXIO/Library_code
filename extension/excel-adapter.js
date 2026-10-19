@@ -39,6 +39,8 @@ async function runExcelCommand(command) {
       if(child?.drawer&&!(child===drawer&&child.__saImport?.sa_id===command.sa_id))
         fail('存在人工打开的窗口，未关闭或覆盖');
     }
+    const modelName=command.model_name??command.candidate?.model_name??'期刊论文';
+    if(!['期刊论文','会议论文'].includes(modelName))fail('文献模型未明确，未操作');
     let zero=drawer.$refs.stepZero, openedProbe=false;
     let model;
     if(['import_excel_probe','import_excel_upload'].includes(command.action)){
@@ -68,7 +70,7 @@ async function runExcelCommand(command) {
       },'等待原生机构/模型选择器初始化');
       if(!zero.source.includes('人工提交'))
         fail('缺少真实人工提交来源或数据模型');
-      model=one(zero.modelOptions.filter(m=>m.name==='期刊论文'&&typeof m.id==='string'),'期刊论文模型');
+      model=one(zero.modelOptions.filter(m=>m.name===modelName&&typeof m.id==='string'),modelName+'模型');
     } else {
       // The real wizard v-if destroys stepZero after advancing. Resume is bound
       // to the original upload's marker and desktop's native model probe, not to
@@ -90,7 +92,7 @@ async function runExcelCommand(command) {
         const panels=()=>[...(drawer.$el?.querySelectorAll?.('.el-drawer')||[])];
         await wait(()=>!drawer.drawer&&!panels().some(visible),'关闭本次空白预检向导');
       }
-      return {ok:true,data:{metadata_excel_protocol:1,source:'人工提交',model_id:model.id,
+      return {ok:true,data:{metadata_excel_protocol:1,source:'人工提交',model_id:model.id,model_name:modelName,
         fields:drawer.modelFields.map(f=>({label:f.actualLabel,field:f.fieldName,required:f.required}))}};
     }
     if(!['import_excel_upload','import_excel_upload_status','import_excel_submit'].includes(command.action))fail('未知 Excel 操作');
@@ -100,6 +102,9 @@ async function runExcelCommand(command) {
        !/^[a-f0-9]{64}$/.test(c.sha256)||!/^[a-f0-9]{64}$/.test(command.xlsx_sha256)||
        !/^[\w-]{1,160}$/.test(command.sa_id)||command.instructions!=='SA补充-'+command.sa_id)
       fail('缺少完整单篇元数据及 Excel 哈希证明');
+    if((modelName==='会议论文')!==(c.document_type==='conference-paper')||
+       (modelName==='会议论文'&&(!c.fields?.['会议名称']||!c.fields?.['出处']||c.fields?.['发表期刊'])))
+      fail('文献类型与模型或会议字段不一致，未上传');
     if(command.model_id!==model.id)fail('数据模型已改变');
     const sameForm=state=>state&&state.sa_id===command.sa_id&&state.sha256===command.xlsx_sha256&&
       state.candidate===c.sha256&&drawer.form.modelId===model.id&&drawer.form.datasource==='人工提交'&&

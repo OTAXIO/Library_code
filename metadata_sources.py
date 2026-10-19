@@ -69,7 +69,9 @@ def merge_metadata(record, crossref, openalex):
     # Other identifiers are not verifiable through these two public APIs.
     if record.wos:
         raise MetadataSkip("WOS号待核验")
-    if crossref.get("type") != "journal-article" or openalex.get("type") not in ("article", "review"):
+    conference = crossref.get("type") == "proceedings-article" and openalex.get("type") == "conference-paper"
+    journal_article = crossref.get("type") == "journal-article" and openalex.get("type") in ("article", "review")
+    if not journal_article and not conference:
         raise MetadataSkip("文献类型待核验")
     authors, byline = crossref.get("author"), openalex.get("authorships")
     if (not isinstance(authors, list) or not isinstance(byline, list) or not 1 <= len(authors) <= 100
@@ -107,7 +109,8 @@ def merge_metadata(record, crossref, openalex):
         # A negative API attribution is not sufficient to close the SA as non-SJTU.
         raise MetadataSkip("未确认交大署名")
     journal = crossref.get("container-title")
-    if not isinstance(journal, list) or len(journal) != 1 or not text(journal[0]):
+    if (not isinstance(journal, list) or not 1 <= len(journal) <= (5 if conference else 1)
+            or any(not text(value) for value in journal)):
         raise MetadataSkip("期刊信息待核验")
     date = (crossref.get("published-print") or crossref.get("published") or {}).get("date-parts")
     if (not isinstance(date, list) or len(date) != 1 or not isinstance(date[0], list)
@@ -133,10 +136,26 @@ def merge_metadata(record, crossref, openalex):
     issns = crossref.get("ISSN", [])
     if isinstance(issns, list) and all(isinstance(v, str) and re.fullmatch(r"\d{4}-\d{3}[\dX]", v) for v in issns):
         fields["ISSN"] = ";".join(issns)
+    if conference:
+        event = crossref.get("event")
+        if not isinstance(event, dict) or not text(event.get("name", "")):
+            raise MetadataSkip("会议信息不完整")
+        # Use only labels in the repository's actual conference template.
+        # Retain every supplied container title; do not guess which is a series.
+        for label in ("发表期刊", "URL", "出版者", "期号", "卷号", "ISSN"):
+            fields.pop(label, None)
+        fields.update({"出处": " / ".join(text(value) for value in journal),
+            "会议名称": text(event["name"]), "相关网址": "https://doi.org/" + cd})
+        if len(journal) == 1:
+            fields["会议录名称"] = text(journal[0])
+        if event.get("location"):
+            fields["会议地点"] = text(event["location"])
     candidate = {"kind": KIND, "title": title, "doi": cd, "wos": "", "sjtu": True,
         "source": SOURCE, "authors": ";".join(names), "author_names": names, "addresses": addresses,
         "affiliation": ";".join(addresses), "author_mapping": mappings, "fields": fields,
         "crossref_url": "https://api.crossref.org/works/" + quote(cd, safe=""), "openalex_url": oa_id}
+    if conference:
+        candidate.update(document_type="conference-paper", model_name="会议论文")
     candidate["sha256"] = digest(candidate)
     return candidate
 
@@ -157,7 +176,7 @@ class MetadataClient:
         if self.cancelled():
             raise SafetyStop("已请求暂停。")
         try:
-            request = Request(url, headers={"User-Agent": "SA-Library-Assistant/0.4.29 (metadata verification)",
+            request = Request(url, headers={"User-Agent": "SA-Library-Assistant/0.4.30 (metadata verification)",
                                            "Accept": "application/json"})
             with urlopen(request, timeout=25) as response:
                 if response.url.split('/')[2] not in ("api.crossref.org", "api.openalex.org"):

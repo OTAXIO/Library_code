@@ -110,7 +110,7 @@ async function runSACommand(command) {
       if (vm.loading) stop("列表仍在加载，请等待后重查");
       const row = snap(await fresh());
       guardSurface();
-      return {ok: true, data: {row, non_sjtu_completion_protocol: 1, import_completion_protocol: 1, metadata_completion_protocol: 3}};
+      return {ok: true, data: {row, non_sjtu_completion_protocol: 1, import_completion_protocol: 1, metadata_completion_protocol: 4}};
     }
     const drawer = vm.$refs?.compareDetailDrawer;
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");
@@ -359,7 +359,7 @@ async function runSACommand(command) {
     };
     if (command.action === "search") {
       const comparison = await showDetail();
-      return {ok: true, data: {row: before, comparison, import_completion_protocol: 1, metadata_completion_protocol: 3}};
+      return {ok: true, data: {row: before, comparison, import_completion_protocol: 1, metadata_completion_protocol: 4}};
     }
     if (["prepare_claim", "submit_claim"].includes(command.action)) {
       const submitting = command.action === "submit_claim";
@@ -570,13 +570,22 @@ async function runSACommand(command) {
       };
       if (metadata && field(comparison, "认领状态", "library").trim() !== "已认领")
         stop("已入库但作者尚未认领，不能直接结案");
-      if (processedImport) {
+      if (metadata) {
         if ([["increase","1"],["duplicateSkip","0"],["duplicateIncreaseUpdate","0"],
             ["duplicateOverallCoverage","0"]].some(([key,value])=>String(b[key])!==value))
-          stop("不是已核验的新增入库，不补写已处理备注");
+          stop("不是已核验的新增入库，不提交入库结案");
         for (const label of ["认领状态", "作者信息", "交大是否第一单位"]) for (const side of ["sa", "library"])
           if (field(comparison,label,side)!==field(command.expected_comparison,label,side))
-            stop("补备注前作者或单位详情改变，未覆盖");
+            stop("结案前作者或单位详情改变，未覆盖");
+        for (const label of ["是否第一作者", "是否通讯作者"]) {
+          const flags=["sa","library"].map(side=>[...field(comparison,"作者信息",side)
+            .matchAll(new RegExp(label+"\\s*[：:]\\s*([是否])(?=\\s|$)","g"))].map(match=>match[1]));
+          if (flags.some(values=>values.length!==1)||flags[0][0]!==flags[1][0])
+            stop("作者角色未一致确认，未结案");
+        }
+        const units=["sa","library"].map(side=>field(comparison,"交大是否第一单位",side).trim());
+        if (units.some(value=>!["是","否"].includes(value))||units[0]!==units[1])
+          stop("第一单位未一致确认，未结案");
       }
       for(const [label,key,normalize] of [["题名","title",norm],["DOI","doi",doi],["WOS记录号","wos",wos]]) {
         if(normalize(field(comparison,label,"library"))!==normalize(c[key]))stop("入库后的本库文献不一致："+label);

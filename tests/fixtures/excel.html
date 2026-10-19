@@ -6,21 +6,24 @@ window.testConfig={};window.uploads=0;window.imports=0;window.resets=0;window.pu
 const element=document.getElementById('excel');
 const tree={$options:{name:'selectTree'},treeData:[{id:'sjtu-test',name:'上海交通大学'}],label:'',
   handleNodeClick(n){this.label=n.name;zero.form.datasetId=n.id;}};
-const zero={form:{},modelOptions:[{id:'journal-test',name:'期刊论文'}],source:['WOS','人工提交'],$children:[tree]};
+const zero={form:{},modelOptions:[{id:'journal-test',name:'期刊论文'},{id:'conference-test',name:'会议论文'}],source:['WOS','人工提交'],$children:[tree]};
 const one={fileList:[],$el:element};
 const labels={'题名':'title','作者':'author','作者单位':'authorInstitution','发表日期':'issued',
   '年份':'year','发表期刊':'source','DOI':'doi','URL':'url'};
+const conferenceLabels={'题名':'title','作者':'author','作者单位':'authorInstitution','发表日期':'issued',
+  '年份':'year','出处':'source','DOI':'doi','会议名称':'conferenceName','相关网址':'url'};
 const drawer={$refs:{stepZero:zero,stepOne:one},$children:[zero,one],form:{checkDuplicationField:''},active:0,modelFields:[],columns:[],
   tableForm:{},previewTableData:[],errorInfoList:[],cellStyleList:[],isNext:false,loading:false,
   showDrawer(){this.drawer=true;if(this.active===0){
     if(testConfig.cold){setTimeout(()=>{this.$refs.stepZero=zero;},180);}else this.$refs.stepZero=zero;}},
   load(){resets++;this.active=0;zero.form={};one.fileList=[];this.form={};this.columns=[];this.tableForm={};
     this.previewTableData=[];this.errorInfoList=[];this.isNext=false;this.$refs.stepZero=zero;},
-  getModelFields(){this.modelFields=Object.entries(labels).map(([label,field])=>({actualLabel:label,fieldName:field,required:['title','author','source'].includes(field)?1:0}));},
+  getModelFields(){const mapping=this.form.modelId==='conference-test'?conferenceLabels:labels;
+    this.modelFields=Object.entries(mapping).map(([label,field])=>({actualLabel:label,fieldName:field,required:['title','author','source'].includes(field)?1:0}));},
   next(){
     if(this.active===0){this.form={...this.form,...zero.form};this.active=1;delete this.$refs.stepZero;}
     else if(this.active===1){this.form.filename=one.fileList[0].response.data.name;this.active=2;this.getModelFields();
-      this.columns=Object.keys(testConfig.candidate.fields);this.tableForm={...labels};this.previewTableData=[{...testConfig.candidate.fields}];
+      this.columns=Object.keys(testConfig.candidate.fields);this.tableForm=Object.fromEntries(this.modelFields.map(f=>[f.actualLabel,f.fieldName]));this.previewTableData=[{...testConfig.candidate.fields}];
       if(testConfig.previewChanged)this.previewTableData[0]['DOI']='10.1234/changed';
       if(testConfig.delayedMapping){this.tableForm['DOI']='skip';setTimeout(()=>{this.tableForm['DOI']='doi';},250);}
     }
