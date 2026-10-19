@@ -77,6 +77,17 @@ test('a changed import binding is rejected before tab activation or page executi
     {tabId:1,importTabId:3}),/已切换/);
 });
 
+test('selected import tab still focuses only its validated bound window before executing',async()=>{
+  const order=[];
+  const sandbox={URL,Date,setTimeout,resolveLibraryRecord(){},chrome:{
+    tabs:{get:async()=>({id:3,windowId:802,active:true,url:'http://admin.ir.lib.sjtu.edu.cn/#/collectItem/batchManage'})},
+    windows:{update:async(id,options)=>{assert.equal(id,802);assert.equal(options.focused,true);order.push('focus-bound');}},
+    scripting:{executeScript:async()=>{order.push('execute');return [{result:{ok:true,data:{verified:true,items:[]}}}];}}}};
+  loadPolicy(sandbox);
+  await sandbox.dispatchWorkflow({action:'import_excel_resolve',expires:Date.now()+30000},{tabId:1,importTabId:3});
+  assert.deepEqual(order,['focus-bound','execute']);
+});
+
 for (const origin of origins) {
   test(`${origin}: binding accepts only the exact HTTPS WOS origin`, () => {
     assert.equal(policy.validRolePage(origin + '/wos/woscc/basic-search', 'wosTabId'), true);

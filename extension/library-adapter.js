@@ -27,8 +27,9 @@ async function resolveLibraryRecord(command) {
     check();
     if(location.hash.split('?')[0]!=="#/collectItem/batchManage")fail("请先返回绑定的导入管理页");
     const c=command.candidate;
-    if(command.action!=="import_resolve"||!c||typeof c.title!=="string"||!c.title||
-       !/^WOS:\d{15}$/.test(c.wos)||typeof c.doi!=="string"||c.sjtu!==true||
+    const metadata=command.action==='import_excel_resolve'&&c?.kind==='crossref-openalex-v1';
+    if((command.action!=="import_resolve"&&!metadata)||!c||typeof c.title!=="string"||!c.title||
+       (metadata ? c.wos!==''||!/^10\.\d{4,9}\/\S+$/.test(c.doi)||c.source!=='Crossref+OpenAlex' : !/^WOS:\d{15}$/.test(c.wos))||typeof c.doi!=="string"||c.sjtu!==true||
        !/^[a-f0-9]{64}$/.test(c.sha256))fail("缺少真实 TXT 文献证据");
     const origin=one(components().filter(v=>v.$options?.name==='BatchManage'&&v.$refs?.wosDataText&&v.$refs?.batchPushModal),'批次管理组件');
     if(Object.values(origin.$refs).some(v=>v?.drawer||v?.dialogVisible))fail("存在上传或推送窗口，不能切换检索页");
@@ -65,15 +66,15 @@ async function resolveLibraryRecord(command) {
       const ut=scalar(row.metadata,'wosId').trim().toUpperCase().replace(/^WOS:/,'');
       // A matching query alone is not proof. A contradictory same-ID record
       // makes automatic resolution unsafe, not an excuse to upload a duplicate.
-      const sameId=ut===c.wos.slice(4)||Boolean(c.doi&&foundDoi===c.doi);
-      if(sameId&&(norm(title)!==norm(c.title)||(c.doi&&foundDoi!==c.doi)||ut!==c.wos.slice(4)))
+      const sameId=Boolean(!metadata&&ut===c.wos.slice(4))||Boolean(c.doi&&foundDoi===c.doi);
+      if(sameId&&(norm(title)!==norm(c.title)||(c.doi&&foundDoi!==c.doi)||!metadata&&ut!==c.wos.slice(4)))
         fail("本库相同标识的记录与 TXT 存在冲突，禁止重复导入");
       if(norm(title)===norm(c.title)&&!sameId)fail("本库同题名记录标识不同或缺失，需人工查重");
       if(sameId){
         if(typeof row.id!=='string'||!/^\d{1,40}$/.test(row.id))fail("平台唯一号不是精确数字文本");
         if(seen.has(row.id))continue;
         seen.add(row.id);
-        items.push({id:row.id,title,doi:foundDoi,wos:'WOS:'+ut});
+        items.push({id:row.id,title,doi:foundDoi,wos:ut?'WOS:'+ut:''});
       }
     }
     return {ok:true,data:{verified:true,items}};

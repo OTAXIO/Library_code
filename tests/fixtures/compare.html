@@ -56,9 +56,30 @@ const detail = {currentSaLzkId:"",dialogLoading:false,compareData:[],saLzkCompar
       {label:"DOI",compareLeftValue:testConfig.saDoi??"",compareRightValue:testConfig.libraryDoi??"10.example/demo"},
       {label:"WOS记录号",compareLeftValue:testConfig.saWos??"",compareRightValue:testConfig.libraryWos??"WOS:DEMO"}];
     if(testConfig.omitWos)this.compareData=this.compareData.filter(item=>item.label!=="WOS记录号");
-    this.saLzkCompareData=copy(this.compareData); this.dialogLoading=false;},
+    this.saLzkCompareData=copy(this.compareData);
+    if(testConfig.modern){
+      const card=(labels,values)=>'<div class="claim-info"><div class="claim-info__row">'+labels.map((label,i)=>
+        '<span class="claim-info__label">'+label+'</span><span class="claim-info__value">'+values[i]+'</span>').join('')+'</div></div>';
+      this.leftData={id:testConfig.wrongModernSa??row.saLzkId,gh:'00001',name:'测试员',doi:testConfig.saDoi??'',wos:''};
+      this.itemData={id:row.itemId.replace(/^,/,''),metadata:{doi:testConfig.libraryDoi??'10.1234/test'}};
+      this.displayFields=[{label:'DOI',key:'doi',altKeys:['doi']},{label:'WOS记录号',key:'wosId',altKeys:['wos']}];
+      this.currentRows=this.compareData.filter(value=>value.label!=='WOS记录号').map(value=>{
+        if(value.label==='认领状态')return {label:value.label,compareLeftValue:card(['姓名','工号'],['测试员',testConfig.wrongModernStaff??'00001']),
+          compareRightValue:'<div class="claim-info__status-line"><span class="claim-info__status">'+
+            (testConfig.claim??(claimedUsers[1]?'已认领':'未认领'))+'</span><button data-action="claim">认领</button></div>'};
+        if(value.label==='作者信息')return {label:value.label,
+          compareLeftValue:card(['署名','第一作者','通讯作者'],['测试员','否','否']),
+          compareRightValue:card(['署名','第一作者','通讯作者'],['Demo','否',testConfig.unknownModernRole??'否'])};
+        return value;
+      });
+      this.compareData=undefined;this.saLzkCompareData=undefined;
+    }
+    this.dialogLoading=false;},
+  getValueByKey(data,key,alternatives){const values=data.metadata||data;for(const k of [key,...(alternatives||[])]){
+    if(values[k]!=null&&values[k]!=='')return values[k];}return '';},
   editItem(id){ window.openedEditor=id; }, handleClaim(){window.openedClaim=true;claimWindow.show(synthetic.itemId.replace(/^,/,""));}
 };
+Object.defineProperty(detail,'compareRows',{get(){return testConfig.modern?this.currentRows:undefined;}});
 bindVisibility(detail,"drawer");
 window.claimWrites=0;
 window.claimedUsers={};

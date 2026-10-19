@@ -109,7 +109,7 @@ async function runSACommand(command) {
       if (vm.loading) stop("列表仍在加载，请等待后重查");
       const row = snap(await fresh());
       guardSurface();
-      return {ok: true, data: {row, non_sjtu_completion_protocol: 1, import_completion_protocol: 1}};
+      return {ok: true, data: {row, non_sjtu_completion_protocol: 1, import_completion_protocol: 1, metadata_completion_protocol: 2}};
     }
     const drawer = vm.$refs?.compareDetailDrawer;
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");
@@ -301,14 +301,64 @@ async function runSACommand(command) {
       detailSurface = drawerSurface(drawer, "只读详情");
       safeWindows();
       if (drawer.currentSaLzkId !== command.sa_id) stop("详情 ID 不一致");
-      const values = Number(row.matchCount) === 1 ? drawer.compareData : drawer.saLzkCompareData;
+      // The current site replaced the two stored arrays with computed
+      // compareRows and filters out rows whose BOTH sides are empty. Keep the
+      // legacy contract, but never mistake a missing component for blank data.
+      const modern = Array.isArray(drawer.compareRows);
+      let values = modern ? [...drawer.compareRows] :
+        Number(row.matchCount) === 1 ? drawer.compareData : drawer.saLzkCompareData;
+      if (modern) {
+        if (drawer.leftData?.id !== command.sa_id || Number(row.matchCount) === 1 &&
+            (drawer.itemData?.id !== String(row.itemId || "").replace(/^,/, "") ||
+             !drawer.itemData.metadata || typeof drawer.itemData.metadata !== "object") ||
+            !Array.isArray(drawer.displayFields) || typeof drawer.getValueByKey !== "function")
+          stop("新版详情的来源/平台号未确认，不能读取或修改");
+        for (const [label, key] of [["DOI", "doi"], ["WOS记录号", "wosId"]]) {
+          if (values.some(value => value.label === label)) continue;
+          const defs = drawer.displayFields.filter(value => value.label === label && value.key === key);
+          if (defs.length !== 1 ||
+              plain(drawer.getValueByKey(drawer.leftData, key, defs[0].altKeys)).trim() ||
+              plain(drawer.getValueByKey(drawer.itemData, key, defs[0].altKeys)).trim())
+            stop("新版详情省略字段的空值未确认：" + label);
+          values.push({label, compareLeftValue: "", compareRightValue: ""});
+        }
+      }
       if (!Array.isArray(values) || !values.length) stop("详情为空，不能据此继续修改");
-      return values.map(value => ({label: plain(value.label), sa: plain(value.compareLeftValue ?? value.leftValue),
-        library: plain(value.compareRightValue ?? value.rightValue)}));
+      const card = (html, expected) => {
+        const template = document.createElement("template");
+        template.innerHTML = String(html ?? "");
+        const labels = [...template.content.querySelectorAll(".claim-info__label")].map(el => el.textContent.trim());
+        const fields = [...template.content.querySelectorAll(".claim-info__value")].map(el => el.textContent.trim());
+        if (!equal(labels, expected) || fields.length !== labels.length || fields.some(value => !value))
+          stop("新版认领卡片字段不完整，不能推断作者或人员编号");
+        return fields;
+      };
+      return values.map(value => {
+        let left = value.compareLeftValue ?? value.leftValue, right = value.compareRightValue ?? value.rightValue;
+        if (modern && value.label === "认领状态") {
+          const [name, staff] = card(left, ["姓名", "工号"]);
+          if (!/^[0-9]{1,40}$/.test(staff) || staff !== row.gh || staff !== drawer.leftData.gh ||
+              name !== drawer.leftData.name || /[()（）]/.test(name)) stop("新版认领卡片与 SA 人员信息不一致");
+          left = `${name}(${staff})`;
+          const template = document.createElement("template");
+          template.innerHTML = String(right ?? "");
+          const states = [...template.content.querySelectorAll(".claim-info__status")].map(el => el.textContent.trim());
+          if (states.length !== 1 || !["已认领", "未认领"].includes(states[0])) stop("新版本库认领状态未唯一确认");
+          right = states[0]; // Do not concatenate the adjacent 认领 action button.
+        } else if (modern && value.label === "作者信息") {
+          const role = html => {
+            const [name, first, corresponding] = card(html, ["署名", "第一作者", "通讯作者"]);
+            if (![first, corresponding].every(flag => ["是", "否"].includes(flag))) stop("作者角色标记未明确，未推断");
+            return `署名：${name}\n是否第一作者：${first}\n是否通讯作者：${corresponding}`;
+          };
+          left = role(left); right = role(right);
+        }
+        return {label: plain(value.label), sa: plain(left), library: plain(right)};
+      });
     };
     if (command.action === "search") {
       const comparison = await showDetail();
-      return {ok: true, data: {row: before, comparison, import_completion_protocol: 1}};
+      return {ok: true, data: {row: before, comparison, import_completion_protocol: 1, metadata_completion_protocol: 2}};
     }
     if (["prepare_claim", "submit_claim"].includes(command.action)) {
       const submitting = command.action === "submit_claim";
@@ -484,7 +534,9 @@ async function runSACommand(command) {
       stop("缺少人工核验及处理备注");
     if (row.markStatus !== "待处理") stop("记录已经处理，禁止再次切换状态");
     if (imported) {
-      const proof = command.imported_evidence, c = proof?.candidate, b = proof?.batch;
+      const metadata=!!command.metadata_imported_evidence;
+      if(metadata&&command.imported_evidence)stop("结案证明来源冲突");
+      const proof = metadata?command.metadata_imported_evidence:command.imported_evidence, c = proof?.candidate, b = proof?.batch;
       const norm = value => String(value ?? "").normalize("NFKC").toLowerCase().replace(/\s+/g," ").trim();
       const doi = value => norm(value).replace(/^(?:https?:\/\/doi\.org\/|doi:)\s*/,"");
       const wos = value => {const v=String(value??"").trim().toUpperCase();return v&&!v.startsWith("WOS:")?"WOS:"+v:v;};
@@ -493,15 +545,19 @@ async function runSACommand(command) {
           String(row.itemId??"").replace(/^,/,"") !== proof.item_id || !c ||
           ["title","doi","wos","sha256","affiliation","authors"].some(key=>typeof c[key]!=="string") ||
           !c.title.trim() || !c.authors.trim() || c.doi && !/^10\.\d{4,9}\/\S+$/.test(doi(c.doi)) ||
-          !/^[a-f0-9]{64}$/.test(c.sha256) || !/^WOS:\d{15}$/.test(c.wos) ||
+          !/^[a-f0-9]{64}$/.test(c.sha256) || (metadata ? c.kind!=='crossref-openalex-v1'||c.source!=='Crossref+OpenAlex'||
+            c.sjtu!==true||c.wos!==''||!c.doi||!/^https:\/\/api\.crossref\.org\/works\//.test(c.crossref_url??'')||
+            !/^https:\/\/openalex\.org\/W\d+$/.test(c.openalex_url??'')||!Array.isArray(c.author_names)||
+            !c.author_names.length||c.author_names.join(';')!==c.authors||!Array.isArray(c.addresses)||
+            c.addresses.join(';')!==c.affiliation||!/^[a-f0-9]{64}$/.test(proof.xlsx_sha256??'') : !/^WOS:\d{15}$/.test(c.wos)) ||
           !/\bShanghai\s+(?:Jiao\s*Tong|Jiaotong)\s+Univ(?:ersity)?\b|上海交通大学/i.test(c.affiliation) ||
           !b || typeof b.id!=="string" || !b.id || typeof b.modelId!=="string" || !b.modelId ||
-          b.source!=="WOS" || b.instructions!=="SA补充-"+command.sa_id || String(b.status)!=="2" ||
+          b.source!==(metadata?'人工提交':'WOS') || b.instructions!=="SA补充-"+command.sa_id || String(b.status)!=="2" ||
           [["total","1"],["actual","1"],["fail","0"]].some(([key,value])=>
             !["string","number"].includes(typeof b[key]) || String(b[key])!==value))
         stop("缺少成功单篇入库、推送及平台关联证据，不能提交已入库结案");
       const d=doi(row.doiValue), u=wos(row.wosValue);
-      if ((!d&&!u) || norm(row.titleValue)!==norm(c.title) || d&&d!==doi(c.doi) || u&&u!==c.wos ||
+      if ((!metadata&&!d&&!u) || metadata&&u || norm(row.titleValue)!==norm(c.title) || d&&d!==doi(c.doi) || u&&u!==c.wos ||
           row.remark && row.remark!==note) stop("入库文献与 SA 不符或已有其他备注，未结案");
       const comparison=await showDetail();
       const field=(rows,label,side)=>{
@@ -509,6 +565,8 @@ async function runSACommand(command) {
         if(fields.length!==1 || typeof fields[0][side]!=="string")stop("缺少入库文献详情："+label);
         return fields[0][side];
       };
+      if (metadata && field(comparison, "认领状态", "library").trim() !== "已认领")
+        stop("已入库但作者尚未认领，不能直接结案");
       for(const [label,key,normalize] of [["题名","title",norm],["DOI","doi",doi],["WOS记录号","wos",wos]]) {
         if(normalize(field(comparison,label,"library"))!==normalize(c[key]))stop("入库后的本库文献不一致："+label);
         const saValue=key==="title"?row.titleValue:key==="doi"?row.doiValue:row.wosValue;

@@ -8,7 +8,7 @@ document.getElementById("pair").addEventListener("click", async () => {
       throw new Error("请先切换到 SA 数据比对 → 比对结果页，再点“连接 SA 比对页”。WOS 和导入页使用下方绑定按钮。");
     const result = await chrome.runtime.sendMessage({type: "pair", tabId: tab?.id,
       token: document.getElementById("token").value.trim()});
-    status.textContent = result.ok ? "已连接。自动认领可直接回桌面开始；自动导入请再绑定 WOS 页和后台导入页。" : result.error;
+    status.textContent = result.ok ? "已连接。自动认领可回桌面开始；Excel 导入再绑定后台导入页，WOS 模式才需要绑定 WOS 页。" : result.error;
     if (result.ok) document.getElementById("token").value = "";
   } catch (error) { status.textContent = error.message; }
 });
@@ -24,7 +24,7 @@ for (const [id, role] of [["wos", "wosTabId"], ["import", "importTabId"]]) {
       const result = await chrome.runtime.sendMessage({type: "bind_workflow", role, tabId: tab?.id});
       status.textContent = result.ok ? (role === "wosTabId"
         ? "WOS 页已绑定。再绑定后台导入页，然后在桌面开始自动导入。"
-        : "导入页已绑定。三个网页保持打开，在桌面开始自动导入。") : result.error;
+        : "导入页已绑定。SA 与导入页保持打开，在桌面开始；Excel 模式不需要 WOS。") : result.error;
     } catch (error) { status.textContent = error.message; }
   });
 }

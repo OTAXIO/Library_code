@@ -29,16 +29,19 @@ async function runImportCommand(command) {
     const vms=descendants([...document.querySelectorAll("*")].map(el=>el.__vue__).filter(Boolean));
     // Several unrelated components also use the name BatchManage; require refs.
     const vm=one(vms.filter(v=>v.$options?.name==="BatchManage" && v.$refs?.wosDataText && v.$refs?.batchPushModal),"导入管理页");
-    const drawer=vm.$refs.wosDataText, push=vm.$refs.batchPushModal, view=vm.$refs.batchViewModal;
+    const excel=command.candidate?.kind==='crossref-openalex-v1';
+    const source=excel?'人工提交':'WOS';
+    const drawer=excel?vm.$refs.batch:vm.$refs.wosDataText, push=vm.$refs.batchPushModal, view=vm.$refs.batchViewModal;
     if (!vm.page || !Array.isArray(vm.tableData) || typeof vm.getData!=="function" || !view ||
-        typeof vm.importWosDataText!=="function" || typeof drawer.onSubmit!=="function" ||
+        typeof vm.importWosDataText!=="function" || !drawer || (!excel&&typeof drawer.onSubmit!=="function") ||
         typeof push.onSubmit!=="function") fail("批次页面结构发生变化");
     if(command.action==='import_capabilities')return {ok:true,data:{zero_match_protocol:1,library_resolution:true}};
     if (!["import_scan","import_upload","import_submit","import_check","import_push"].includes(command.action)) fail("未知导入命令");
     if (typeof command.sa_id!=="string" || !/^[\w-]{1,160}$/.test(command.sa_id) ||
         command.instructions!=="SA补充-"+command.sa_id) fail("导入说明必须严格绑定当前名单 ID");
     const candidate=command.candidate;
-    if (!candidate || !candidate.title || !/^WOS:\d{15}$/.test(candidate.wos) || candidate.sjtu!==true ||
+    if (!candidate || !candidate.title || (excel ? candidate.wos!==''||candidate.source!=='Crossref+OpenAlex'||
+        !/^10\.\d{4,9}\/\S+$/.test(candidate.doi)||!Array.isArray(candidate.author_names)||!candidate.author_names.length : !/^WOS:\d{15}$/.test(candidate.wos)) || candidate.sjtu!==true ||
         !/^[a-f0-9]{64}$/.test(candidate.sha256)) fail("缺少已核验的单篇 WOS 证据");
     for (const child of Object.values(vm.$refs)) {
       if (child?.drawer && !(child.__saImport?.sa_id===command.sa_id && [drawer,push,view].includes(child)))
@@ -50,14 +53,14 @@ async function runImportCommand(command) {
       for (const k of ["id","modelId","batchNumber","source","instructions","total","actual","fail","status",
         "increase","duplicateSkip","duplicateIncreaseUpdate","duplicateOverallCoverage"])
         result[k]=row[k] ?? "";
-      if(row.source!=="WOS" || row.instructions!==command.instructions)fail("批次来源或说明不一致");
+      if(row.source!==source || row.instructions!==command.instructions)fail("批次来源或说明不一致");
       return result;
     };
     const query = async page => {
       await wait(()=>!vm.loading,"等待批次列表");
       const old=vm.tableData;
       vm.page.currentPage=page; vm.page.pageSize=100;
-      vm.queryForm={source:"WOS",batchNumber:"",batchName:"",startTime:"",endTime:""}; vm.queryFormShow=true;
+      vm.queryForm={source,batchNumber:"",batchName:"",startTime:"",endTime:""}; vm.queryFormShow=true;
       vm.getData(page,100,{...vm.queryForm});
       await wait(()=>!vm.loading && vm.tableData!==old,"刷新批次列表");
       if(!Number.isInteger(Number(vm.page.total)) || Number(vm.page.total)<0)fail("批次数量未知");
@@ -109,11 +112,39 @@ async function runImportCommand(command) {
       const meta=view.tableData[0].metadata;
       const scalar = key => Array.isArray(meta?.[key]) && meta[key].length===1 ? String(meta[key][0]) : "";
       const id=scalar("wosId").toUpperCase().replace(/^WOS:/,"");
-      if(norm(scalar("title"))!==norm(candidate.title) || id!==candidate.wos.replace(/^WOS:/,""))
+      if(norm(scalar("title"))!==norm(candidate.title) || !excel&&id!==candidate.wos.replace(/^WOS:/,""))
         fail("导入后的题名或 WOS 入藏号不一致/缺失");
       if(candidate.doi && norm(scalar("doi")).replace(/^https?:\/\/doi.org\//,"")!==candidate.doi)
         fail("导入后的 DOI 不一致");
+      if(excel){
+        const authors=meta?.author;
+        if(!Array.isArray(authors)||authors.length!==candidate.author_names.length||
+           authors.some((a,i)=>norm(typeof a==='string'?a:a?.fullname)!==norm(candidate.author_names[i])))
+          fail("Excel 导入后的作者顺序/姓名未确认，未推送");
+        if(!Array.isArray(meta?.authorInstitution)||!meta.authorInstitution.length||
+           !/Shanghai\s+(?:Jiao\s*Tong|Jiaotong)\s+Univ(?:ersity)?|上海交通大学/i.test(JSON.stringify(meta.authorInstitution)))
+          fail("Excel 导入后未回读到交大署名单位，未推送");
+      }
+      const ownViewPanels=descendants(view).filter(v=>v.$options?.name==='ElDrawer').map(v=>v.$refs?.drawer||v.$el);
       view.drawer=false; await vm.$nextTick();
+      await wait(()=>view.__saImport?.sa_id===command.sa_id&&view.drawer===false&&ownViewPanels.every(p=>!visible(p)),
+        '关闭本条只读批次窗口',10000);
+      if(excel&&drawer.drawer&&drawer.__saImport?.sa_id===command.sa_id&&drawer.__saImport?.submitted){
+        // Close only our successfully verified wizard, never an unrelated drawer.
+        const ownUploadPanels=descendants(drawer).filter(v=>v.$options?.name==='ElDrawer').map(v=>v.$refs?.drawer||v.$el);
+        drawer.drawer=false;await vm.$nextTick();
+        await wait(()=>drawer.drawer===false&&ownUploadPanels.every(p=>!visible(p)),'关闭本条已核验 Excel 向导',10000);
+        delete drawer.__saImport;
+      }
+      // Completion may clear the temporary upload marker while the native
+      // wizard retains active=2. Keep a distinct, read-only receipt for exactly
+      // this closed form, but ONLY after actual successful push verification.
+      // It authorizes native UI reset for the next paper, never a second import.
+      if(excel&&!drawer.drawer&&Number(batch.status)===2&&Number(batch.actual)===1&&
+          drawer.form?.instructions===command.instructions&&drawer.form.modelId===batch.modelId&&
+          drawer.form.datasource==='人工提交'){
+        drawer.__saCompleted={sa_id:command.sa_id,batch_id:batch.id,form:JSON.stringify(drawer.form)};
+      }
       return batch;
     };
     if(command.action==="import_scan")return {ok:true,data:{batches:await scan()}};

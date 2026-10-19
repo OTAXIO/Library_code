@@ -16,7 +16,7 @@ from ui_theme import P, install_theme, style_text
 from workflow_service import WorkflowService
 
 BASE = Path(__file__).resolve().parent
-VERSION = "0.4.19"
+VERSION = "0.4.28"
 SA_URL = "http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list"
 SCOPES = {"待处理": "pending", "重试跳过项": "skipped", "已完成": "done"}
 
@@ -32,7 +32,7 @@ class App:
         self.owner = tk.StringVar()
         self.scope = tk.StringVar(value="待处理")
         self.limit = tk.StringVar(value="5")
-        self.import_style = tk.StringVar(value="自动导出并入库")
+        self.import_style = tk.StringVar(value="Crossref＋OpenAlex（Excel）")
         self.status = tk.StringVar(value="读取名单后，连接浏览器并开始。")
         self.connection = tk.StringVar(value="浏览器未连接")
         self.counts = tk.StringVar()
@@ -78,7 +78,7 @@ class App:
         self.pages, self.trees, self.details = {}, {}, {}
         explanations = {
             "claim": ("自动认领", "单匹配任务：核对人员编号与署名 → 认领 → 网页批注 → 回写名单。"),
-            "import": ("自动导入", "零匹配任务：下载 WOS TXT → 核验交大文献及本库缺失 → 入库 → 批注回写。"),
+            "import": ("自动导入", "零匹配任务：获取元数据 → 核验交大署名及本库缺失 → 入库 → 批注并结案。"),
         }
         for mode, (title, explanation) in explanations.items():
             page = ttk.Frame(self.notebook, padding=(2, 4))
@@ -94,10 +94,10 @@ class App:
                 style_row.pack(fill="x", pady=(6, 0))
                 ttk.Label(style_row, text="导入方式").pack(side="left")
                 self.import_style_box = ttk.Combobox(style_row, textvariable=self.import_style,
-                    values=["自动导出并入库", "手动导出（一次一篇）"], state="readonly", width=23)
+                    values=["Crossref＋OpenAlex（Excel）", "自动导出并入库", "手动导出（一次一篇）"], state="readonly", width=27)
                 self.import_style_box.pack(side="left", padx=8)
                 self.import_style_box.bind("<<ComboboxSelected>>", lambda _: self.render())
-                ttk.Label(style_row, text="手动模式：先选一篇，再定位和导出。", style="Muted.TLabel").pack(side="left")
+                ttk.Label(style_row, text="Excel 模式不依赖 WOS。", style="Muted.TLabel").pack(side="left")
             table = ttk.Frame(page)
             table.grid(row=1, column=0, sticky="nsew")
             tree = ttk.Treeview(table, columns=("id", "title", "status"), show="headings", height=6)
@@ -141,6 +141,9 @@ class App:
 
     def manual_mode(self):
         return self.mode() == "import" and self.import_style.get() == "手动导出（一次一篇）"
+
+    def metadata_mode(self):
+        return self.mode() == "import" and self.import_style.get() == "Crossref＋OpenAlex（Excel）"
 
     def configure_actions(self):
         manual = self.manual_mode()
@@ -268,7 +271,7 @@ class App:
                     raise SafetyStop("本轮条数须为 1–100 的整数。")
                 records = self.service.select(self.roster, mode, self.owner.get(), int(self.limit.get()), scope)
             if not self.bridge or not self.bridge.online:
-                raise SafetyStop("请连接 SA 比对页；自动导入还需在扩展绑定 WOS 页和数据导入与批次管理页。")
+                raise SafetyStop("请连接 SA 比对页并绑定后台导入页；只有 WOS 模式还需绑定 WOS 页。")
         except (SafetyStop, KeyError) as exc:
             messages.showwarning("尚未开始", str(exc), parent=self.root)
             return
@@ -277,6 +280,7 @@ class App:
         self.status.set("正在定位所选这一篇；定位完成后再手动 Export。" if manual and not manual_intake else
             f"开始{'导入' if mode == 'import' else '认领'} {len(records)} 条，运行中请勿手动操作工作页。")
         roster, bridge, owner = self.roster, self.bridge, self.owner.get()
+        metadata = self.metadata_mode()
         def work():
             try:
                 progress = lambda text: self.events.put(("progress", text))
@@ -285,7 +289,8 @@ class App:
                                                         bridge, self.stop, progress)
                 else:
                     result = self.service.run(roster, records, mode, scope, bridge, self.stop, progress,
-                                              **({"manual_export": True} if manual else {}))
+                                              **({"manual_export": True} if manual else
+                                                 {"metadata_import": True} if metadata else {}))
                 self.events.put(("result", result))
             except Exception as exc:
                 text = str(exc) if isinstance(exc, SafetyStop) else f"操作异常（{type(exc).__name__}）；请核验网页，不重复提交。"

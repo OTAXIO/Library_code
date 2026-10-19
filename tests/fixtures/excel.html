@@ -1,0 +1,64 @@
+<!doctype html><html><meta charset="utf-8"><main id="app">OFFLINE Excel contract</main>
+<div id="excel" style="display:none"><input type="file" accept=".xls,.xlsx"></div>
+<div id="push" style="display:none"></div><div id="view" style="display:none"></div>
+<script>
+window.testConfig={};window.uploads=0;window.imports=0;window.resets=0;window.pushes=0;window.batches=[];
+const element=document.getElementById('excel');
+const tree={$options:{name:'selectTree'},treeData:[{id:'sjtu-test',name:'上海交通大学'}],label:'',
+  handleNodeClick(n){this.label=n.name;zero.form.datasetId=n.id;}};
+const zero={form:{},modelOptions:[{id:'journal-test',name:'期刊论文'}],source:['WOS','人工提交'],$children:[tree]};
+const one={fileList:[],$el:element};
+const labels={'题名':'title','作者':'author','作者单位':'authorInstitution','发表日期':'issued',
+  '年份':'year','发表期刊':'source','DOI':'doi','URL':'url'};
+const drawer={$refs:{stepZero:zero,stepOne:one},$children:[zero,one],form:{checkDuplicationField:''},active:0,modelFields:[],columns:[],
+  tableForm:{},previewTableData:[],errorInfoList:[],cellStyleList:[],isNext:false,loading:false,
+  showDrawer(){this.drawer=true;if(this.active===0){
+    if(testConfig.cold){setTimeout(()=>{this.$refs.stepZero=zero;},180);}else this.$refs.stepZero=zero;}},
+  load(){resets++;this.active=0;zero.form={};one.fileList=[];this.form={};this.columns=[];this.tableForm={};
+    this.previewTableData=[];this.errorInfoList=[];this.isNext=false;this.$refs.stepZero=zero;},
+  getModelFields(){this.modelFields=Object.entries(labels).map(([label,field])=>({actualLabel:label,fieldName:field,required:['title','author','source'].includes(field)?1:0}));},
+  next(){
+    if(this.active===0){this.form={...this.form,...zero.form};this.active=1;delete this.$refs.stepZero;}
+    else if(this.active===1){this.form.filename=one.fileList[0].response.data.name;this.active=2;this.getModelFields();
+      this.columns=Object.keys(testConfig.candidate.fields);this.tableForm={...labels};this.previewTableData=[{...testConfig.candidate.fields}];
+      if(testConfig.previewChanged)this.previewTableData[0]['DOI']='10.1234/changed';
+      if(testConfig.delayedMapping){this.tableForm['DOI']='skip';setTimeout(()=>{this.tableForm['DOI']='doi';},250);}
+    }
+  },
+  submitForm(){this.fieldColumnRelations=Object.entries(this.tableForm).map(([label,field])=>field+':'+label);
+    this.errorInfoList=testConfig.validationError?[{type:5}]:[];this.isNext=true;},
+  importData(){window.imports++;},
+  initProgress(){this.isImport=true;}
+};
+Object.defineProperty(drawer,'drawer',{get(){return element.style.display==='block';},set(v){element.style.display=v?'block':'none';}});
+element.querySelector('input').addEventListener('change',event=>{
+  uploads++;const f=event.target.files[0];one.fileList=[{name:f.name,size:f.size,status:'success',response:{success:true,data:{name:'server-single.xlsx'}}}];
+});
+const push={modelFieldsList:[{fieldName:'title'}],duplicateQueryTypes:[{value:'ppt-composite',
+ label:'唯一标识 + (期刊 & 发表时间 & 页码 & 卷 & 期 & 题名相似度) + 题名相似度'}],form:{},drawer:false,
+ showDrawer(row){this.form={batchId:row.id,modelId:row.modelId};this.drawer=true;},
+ onSubmit(){pushes++;const row=batches.find(b=>b.id===this.form.batchId);row.status=2;row.actual=1;row.increase=1;this.drawer=false;}};
+const view={drawer:false,loading:false,tableData:[],page:{total:0},
+ showDrawer(id){const row=batches.find(b=>b.id===id),c=row.paper;this.id=id;this.drawer=true;
+ this.tableData=[{metadata:{title:[c.title],doi:[c.doi],author:c.author_names.map(fullname=>({fullname})),
+ authorInstitution:c.addresses.map(address=>({address}))}}];this.page.total=1;}};
+const vm={$options:{name:'BatchManage'},$refs:{batch:drawer,wosDataText:{},batchPushModal:push,batchViewModal:view},
+ $children:[drawer,push,view],$nextTick:()=>Promise.resolve(),page:{currentPage:1,pageSize:100,total:0},tableData:[],loading:false,
+ getData(page,size){this.loading=false;this.page.total=batches.length;this.tableData=batches.slice((page-1)*size,page*size).map(b=>({...b}));},
+ importWosDataText(){throw Error('WOS not part of Excel mode');},batchPush(row){push.showDrawer(row);},
+ async $http(config){
+  if(!config.params?.modelId)throw Error('missing modelId');
+  if(config.url==='/api/cspace-collection/collectItem/verificationDataFormat')return {status:200,data:{success:true,code:200,
+    data:testConfig.validationError?{errorInfoList:[{type:5}]}:null}};
+  if(config.url==='/api/cspace-collection/collectItem/importData'){
+   if(!Object.hasOwn(config.params,'checkDuplicationField'))throw {response:{status:400,data:{msg:'缺少必要的请求参数：checkDuplicationField'}}};
+   if(testConfig.importRejected)throw {response:{status:400,data:{msg:'测试：本次导入已拒绝'}}};
+   imports++;drawer.loading=false;
+   batches.push({id:'batch-'+imports,modelId:config.params.modelId,source:'人工提交',instructions:config.params.instructions,
+    batchNumber:'synthetic-'+imports,status:1,total:1,actual:0,fail:0,increase:0,duplicateSkip:0,
+    duplicateIncreaseUpdate:0,duplicateOverallCoverage:0,paper:JSON.parse(JSON.stringify(testConfig.candidate))});
+   return {status:200,data:{success:true,code:200,data:null}};}
+  throw Error('unexpected request');
+ }};
+document.getElementById('app').__vue__=vm;
+</script></html>

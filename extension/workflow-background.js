@@ -97,6 +97,13 @@ async function dispatchWorkflow(command,pair) {
   // are not throttled. Diagnostics remain read-only and do not switch tabs.
   if(!["wos_diagnose","wos_recover_download"].includes(command.action) && tab.active===false)
     await chrome.tabs.update(id,{active:true});
+  // A selected tab in a covered/minimized window is still backgrounded. Native
+  // drawer transitions stalled there in live acceptance, while the identical
+  // read-only sequence completed immediately in the foreground. Focus only the
+  // already validated, explicitly bound work window; never enumerate others.
+  if(!["wos_diagnose","wos_recover_download"].includes(command.action) &&
+     Number.isInteger(tab.windowId)&&typeof chrome.windows?.update==='function')
+    await chrome.windows.update(tab.windowId,{focused:true});
   const execute=async(fn,cmd,probeWorld)=>{
     const current=await chrome.tabs.get(id);
     if(!validRolePage(current.url,role))throw new Error("工作标签页目标发生变化");
@@ -145,7 +152,22 @@ async function dispatchWorkflow(command,pair) {
       result_reader:'shared-diagnostic',read_results_world:'ISOLATED',page}};
   }
   if(role==="importTabId") {
-    if(command.action==='import_resolve')return execute(resolveLibraryRecord,command);
+    if(command.action==='import_resolve'||command.action==='import_excel_resolve')return execute(resolveLibraryRecord,command);
+    if(command.action.startsWith('import_excel_')){
+      if(['import_excel_probe','import_excel_upload','import_excel_upload_status','import_excel_submit'].includes(command.action)){
+        if(command.action==='import_excel_upload'){
+          if(typeof command.content!=='string'||command.content.length>700000)throw Error('Excel 文件大小异常');
+          const bytes=Uint8Array.from(atob(command.content),c=>c.charCodeAt(0));
+          const hash=[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(x=>x.toString(16).padStart(2,'0')).join('');
+          if(hash!==command.xlsx_sha256)throw Error('Excel 文件哈希不一致，拒绝上传');
+          command={...command,contentSha:hash};
+        }
+        return execute(runExcelCommand,command);
+      }
+      if(!['import_excel_scan','import_excel_check','import_excel_push'].includes(command.action))throw Error('未知 Excel 命令');
+      if(command.candidate?.kind!=='crossref-openalex-v1')throw Error('缺少跨来源元数据证明');
+      return execute(runImportCommand,{...command,action:command.action.replace('import_excel_','import_')});
+    }
     if(command.action==="import_upload"){
       if(typeof command.content!=="string" || command.content.length>700000)throw new Error("TXT 文件大小异常");
       const bytes=Uint8Array.from(atob(command.content),c=>c.charCodeAt(0));

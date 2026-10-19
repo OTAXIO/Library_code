@@ -48,4 +48,19 @@ Export 返回后先记录实际路径（`export_received`），再解析并存�
 
 参考 [Lawrenclia/Library_code 的框架](https://github.com/Lawrenclia/Library_code/blob/ec31b672e29135d590c7b99c4efbc79811fcfbf4/docs/FRAMEWORK.md)和下载、写入服务的职责划分。借鉴的是分层、文件身份核验、持久意图与回读的设计；没有合并其桌面框架、额外业务入口或执行未经核验的第三方代码。
 
-当前验收仍以真实 WOS TXT、后台批次回读及名单结果为准。离线用例不能替代现场验收。
+最终验收以对应来源的原始元数据或真实 WOS TXT、后台新增/失败计数、作者认领、网页结案和名单回读为准。离线用例不能替代现场验收，也不能把一篇分段成功说成连续多篇全部通过。
+
+# Crossref＋OpenAlex / 通用 Excel（0.4.28）
+
+新入口保留两大任务结构，不改变 `zero_match.py` 的 WOS 编排和认领规则。
+
+- `metadata_sources.py`：公开 HTTPS GET、严格标识/题名/完整作者顺序和原始署名单位核验、原始 JSON 归档；404 才是源内无记录，超时/429/5xx 不作为无记录。
+- `metadata_excel.py` / `.mjs`：Artifact Tool 创建单篇平面表，独立读取核对全部字段、非公式文本、行数和哈希；不重保存 list。
+- `metadata_pipeline.py`：独立持久意图，先查重，再上传/格式校验、单次导入、PPT 推送、读回、关联、精确认领、备注已入库与结案。只处理谭勋策零匹配，上传/推送/认领/结案结果未知不重放，暂停后保留回执。作者角色及第一单位只能核对现有明确标记，不自动修正。
+- `extension/excel-adapter.js`：现有 `BatchManage → batch → stepZero/stepOne` 通用向导，只使用公开组件、原生上传控件及页面公开客户端。真实后台的原生 URLSearchParams 表单在格式检查时出现 HTTP 400 缺 modelId；经过现场只读复现，使用原有四个命名参数的 params 形式返回成功。导入也兼容同一传参缺陷，保持原生进度初始化和后续真实批次回读，不读取认证头、令牌或加解密状态。`import-adapter.js` 的公共批次核验/推送仅对明确的跨源候选分支使用人工提交来源，原 WOS 校验仍严格要求真实 UT。
+- `library-adapter.js`：Excel 只读分支必须精确 DOI＋题名；原 WOS 分支仍要求 DOI/UT。查不到不等于成功，完整扫描才能证明本库缺失。
+- SA 的 `metadata_imported_evidence` 与原 `imported_evidence` 分开，不允许混用。仅实际单篇成功、已推送、已关联且回读为已认领的记录可写“已入库”。兼容新 `compareRows`、姓名/工号卡片与原详情数组；空行被页面省略不能直接当作无字段或无结果。
+- 连续导入不靠刷新页面。原生向导冷启动时先只读挂载第一步；上一篇关闭后仍停留在校验步骤时，必须有真实已推送批次对应的精确表单回执，才能调用原生“继续导入”重置。不能把 `showDrawer()` 误当作自动重置，也不清除尚待确认的上传或人工表单。该回执与临时上传标记分开，避免关闭第一篇后阻塞下一篇。
+- 原生初始表单有空的 `checkDuplicationField`，`load()` 重置却遗漏它；提交时补齐同一已观察到的默认空参数，保留人工非空选择并停止，不覆盖。接口抛出的字符串/对象错误只提取公开错误文字和 HTTP 状态，不读取或输出请求头；未知结果仍不自动重提。已存在的旧提交意图不会因升级而被清除。
+
+`maintenance/metadata_acceptance.py` 是 1–5 条真实验收入口，不属于生产依赖。只在本机界面显示配对码；专用配对记录留在忽略的 runtime 内，便于修改代码后继续验收。`--control-file` 接受 RUN/STATUS/PAUSE/QUIT，避免后台标准输入关闭造成假启动。成功的 RUN 期间不使用 BrowserSkill 操作页面。

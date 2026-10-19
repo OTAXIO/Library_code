@@ -85,10 +85,10 @@ class WorkflowService:
     def _check_skip_journals(self, record):
         # Read existing journals without initializing tables, resetting progress,
         # or depending on the very SA query the operator is trying to set aside.
-        root = self.base / "runtime" / "wos-imports"
-        for name, table, safe_phase in (("imports.sqlite3", "imports", "exported"),
-                                        ("zero-match.sqlite3", "jobs", "downloaded")):
-            path = root / name
+        for relative, table, safe_phase in (("wos-imports/imports.sqlite3", "imports", "exported"),
+                                        ("wos-imports/zero-match.sqlite3", "jobs", "downloaded"),
+                                        ("metadata-imports/zero-match.sqlite3", "jobs", "prepared")):
+            path = self.base / "runtime" / relative
             if not path.exists():
                 continue
             if path.is_symlink() or not path.resolve().is_relative_to(self.base.resolve()):
@@ -169,7 +169,9 @@ class WorkflowService:
                 "已定位这一篇。请在 WOS 手动导出制表符文件、Full Record，下载完成后点“接回 TXT 并入库”。")
         return TaskResult(roster, {record.sa_id: text}, text)
 
-    def run(self, roster, records, mode, scope, bridge, stop, progress, *, manual_export=False):
+    def run(self, roster, records, mode, scope, bridge, stop, progress, *, manual_export=False, metadata_import=False):
+        if type(metadata_import) is not bool or metadata_import and (mode != "import" or manual_export):
+            raise SafetyStop("跨来源 Excel 模式仅用于零匹配导入，不能与 WOS 手动模式混用。")
         if type(manual_export) is not bool or manual_export and (mode != "import" or len(records) != 1):
             raise SafetyStop("手动导出模式仅允许一篇零匹配导入任务。")
         expected = ([self.select_manual(roster, OWNER, scope, records[0].sa_id)] if manual_export else
@@ -190,11 +192,27 @@ class WorkflowService:
             tail = getattr(result, "reason", "") or tail
             summary = f"完成 {len(result.completed_ids)} · 原已处理 {len(result.synced_ids)} · 跳过 {len(result.skipped)}。{tail}"
         else:
-            imports = ImportStore(self.base / "runtime" / "wos-imports")
-            download = SerialWOS(bridge, default_store(self.base), stop, progress)
-            result = run_batch(roster, records, bridge, download, imports,
-                WorkflowStore(imports.root), stop, progress, audit, retry_skipped=scope == "skipped",
-                manual_export=manual_export)
+            if metadata_import:
+                from metadata_pipeline import run_metadata_batch
+                result = run_metadata_batch(self.base, roster, records, bridge, stop, progress, audit,
+                                            retry_skipped=scope == "skipped")
+            else:
+                # Switching modes must not bypass an unresolved Excel write.
+                for record in records:
+                    path = self.base / "runtime/metadata-imports/zero-match.sqlite3"
+                    if path.exists():
+                        db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+                        try:
+                            saved = db.execute("SELECT data FROM jobs WHERE sa_id=?", (record.sa_id,)).fetchone()
+                        finally:
+                            db.close()
+                        if saved and json.loads(saved[0]).get("phase") != "prepared":
+                            raise SafetyStop("此条存在 Excel 入库写入断点，请用 Crossref＋OpenAlex 模式续验，未重复导入。")
+                imports = ImportStore(self.base / "runtime" / "wos-imports")
+                download = SerialWOS(bridge, default_store(self.base), stop, progress)
+                result = run_batch(roster, records, bridge, download, imports,
+                    WorkflowStore(imports.root), stop, progress, audit, retry_skipped=scope == "skipped",
+                    manual_export=manual_export)
             messages = {e["sa_id"]: e["message"] for e in result.outcomes}
             completed = sum(e["status"] == "done" for e in result.outcomes)
             synced = sum(e["status"] == "synced" for e in result.outcomes)

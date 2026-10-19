@@ -1,4 +1,4 @@
-importScripts("adapter.js", "import-adapter.js", "wos-adapter.js", "workflow-background.js", "page-diagnostics.js", "library-adapter.js");
+importScripts("adapter.js", "import-adapter.js", "excel-adapter.js", "wos-adapter.js", "workflow-background.js", "page-diagnostics.js", "library-adapter.js");
 let polling = false;
 let busy = false;
 let updatingConnection = false;
@@ -138,6 +138,8 @@ async function pollBridge(senderTab, fromAlarm=false) {
             // can be throttled/frozen after WOS work, delaying the result past
             // the bridge deadline. Activate only the already validated work tab.
             if (tab.active === false) await chrome.tabs.update(tab.id, {active: true});
+            if(Number.isInteger(tab.windowId)&&typeof chrome.windows?.update==='function')
+              await chrome.windows.update(tab.windowId,{focused:true});
             const outcomes = await chrome.scripting.executeScript({target: {tabId: pair.tabId},
               world: "MAIN", func: runSACommand, args: [command]});
             result = outcomes[0]?.result || {ok: false, error: "页面没有返回执行结果"};
