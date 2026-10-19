@@ -22,6 +22,8 @@ class Backend:
         self.candidate=candidate;self.row={'saLzkId':record.sa_id,'titleValue':record.title,'doiValue':record.doi,
           'wosValue':'','gh':record.staff_id,'markStatus':'待处理','matchCount':0,'itemId':'','reason':'','remark':''}
         self.phase=0;self.calls=[];self.lost='';self.validation_error=False;self.claimed=True;self.roles_match=True
+        self.auto_processed=False
+        self.auto_processed_claim=False
 
     def call(self, action, p, timeout=90):
         self.calls.append(action);c=self.candidate
@@ -36,7 +38,7 @@ class Backend:
                     {'label':'作者信息','sa':'是否第一作者：否\n是否通讯作者：否',
                      'library':'是否第一作者：否\n是否通讯作者：'+('否' if self.roles_match else '是')},
                     {'label':'交大是否第一单位','sa':'是','library':'是'}])
-            return {'metadata_completion_protocol':2,'row':copy.deepcopy(self.row),'comparison':comparison}
+            return {'metadata_completion_protocol':3,'row':copy.deepcopy(self.row),'comparison':comparison}
         if action=='import_excel_resolve':
             return {'verified':True,'items':[] if self.phase!=2 else [{'id':'1234567890123456789',
               'title':c['title'],'doi':c['doi'],'wos':''}]}
@@ -52,7 +54,10 @@ class Backend:
               'instructions':p['instructions'],'total':1,'actual':1 if self.phase==2 else 0,'fail':0,'status':self.phase,
               'increase':1 if self.phase==2 else 0,'duplicateSkip':0,'duplicateIncreaseUpdate':0,'duplicateOverallCoverage':0}}
         elif action=='import_excel_push':self.phase=2;result={'submitted':True}
-        elif action=='link':self.row.update(itemId=p['item_id'],matchCount=1);result={'verified':True,'row':copy.deepcopy(self.row)}
+        elif action=='link':
+            self.row.update(itemId=p['item_id'],matchCount=1)
+            if self.auto_processed:self.row['markStatus']='已处理'
+            result={'verified':True,'row':copy.deepcopy(self.row)}
         elif action=='prepare_claim':
             return {**self.call('search',p), 'suggested_index':0, 'prepared':{
                 'item_id':self.row['itemId'],'staff_id':'00001','sa_text':'Alice Test(00001)',
@@ -61,6 +66,7 @@ class Backend:
                             'eligible':True,'scholarId':'','relations':[]}]}}
         elif action=='submit_claim':
             self.claimed=True
+            if self.auto_processed_claim:self.row['markStatus']='已处理'
             result={'row':copy.deepcopy(self.row),'verified':True,'claimed':True,'staff_id':'00001',
                     'scholar_id':'person-one','author':'Alice Test','order':1}
         elif action=='complete':self.row.update(markStatus='已处理',remark=p['note']);result={'verified':True,'row':copy.deepcopy(self.row)}
@@ -135,10 +141,10 @@ class PipelineTests(unittest.TestCase):
         original=self.backend.call
         def call(action,payload,timeout=90):
             result=original(action,payload,timeout)
-            if action=='status':result['metadata_completion_protocol']=1
+            if action=='status':result['metadata_completion_protocol']=2
             return result
         self.backend.call=call
-        result=self.run_once();self.assertTrue(result.halted);self.assertIn('0.4.28',result.reason)
+        result=self.run_once();self.assertTrue(result.halted);self.assertIn('0.4.29',result.reason)
         self.assertEqual(self.backend.calls,['status']);self.client.get.assert_not_called()
         self.assertEqual(result.roster.sha256,self.roster.sha256)
 
@@ -154,6 +160,70 @@ class PipelineTests(unittest.TestCase):
         self.stop.clear();self.roster=result.roster;self.record=self.roster.records[0]
         second=self.run_once();self.assertFalse(second.halted,second.reason)
         self.assertEqual(self.backend.calls.count('import_excel_upload'),1)
+
+    def test_native_auto_processed_after_link_still_gets_intake_note(self):
+        self.backend.auto_processed=True
+        result=self.run_once()
+        self.assertFalse(result.halted,result.reason)
+        self.assertTrue(result.roster.records[0].done)
+        self.assertEqual(result.roster.records[0].remark,'已入库')
+        self.assertEqual(self.backend.row['markStatus'],'已处理')
+        self.assertEqual(self.backend.row['remark'],'已入库')
+        self.assertEqual(self.backend.calls.count('import_excel_submit'),1)
+        self.assertEqual(self.backend.calls.count('complete'),1)
+
+    def test_native_auto_processed_lost_note_ack_is_read_only_reconciled(self):
+        from zero_match import WorkflowStore
+        self.backend.auto_processed=True;self.backend.lost='complete'
+        first=self.run_once();self.assertTrue(first.halted)
+        self.roster=first.roster;self.record=self.roster.records[0]
+        second=self.run_once();self.assertFalse(second.halted,second.reason)
+        self.assertTrue(second.roster.records[0].done)
+        state=WorkflowStore(self.base/'runtime/metadata-imports').get(self.record)
+        self.assertEqual(state['phase'],'done')
+        for action in ('import_excel_upload','import_excel_submit','import_excel_push','link','complete'):
+            self.assertEqual(self.backend.calls.count(action),1,action)
+
+    def test_owned_auto_processed_manual_note_is_not_generic_sync_or_overwritten(self):
+        self.backend.auto_processed=True
+        original=self.backend.call
+        def call(action,payload,timeout=90):
+            answer=original(action,payload,timeout)
+            if action=='link':self.backend.row['remark']='人工保留备注'
+            return answer
+        self.backend.call=call
+        first=self.run_once();self.assertTrue(first.halted)
+        self.roster=first.roster;self.record=self.roster.records[0]
+        second=self.run_once();self.assertTrue(second.halted)
+        self.assertFalse(second.roster.records[0].done)
+        self.assertEqual(self.backend.row['remark'],'人工保留备注')
+        self.assertNotIn('complete',self.backend.calls)
+        self.assertEqual(self.backend.calls.count('import_excel_submit'),1)
+
+    def test_auto_processed_unknown_claim_ack_cannot_bypass_claim_intent(self):
+        self.backend.claimed=False;self.backend.auto_processed_claim=True;self.backend.lost='submit_claim'
+        first=self.run_once();self.assertTrue(first.halted)
+        self.roster=first.roster;self.record=self.roster.records[0]
+        second=self.run_once();self.assertTrue(second.halted)
+        self.assertFalse(second.roster.records[0].done)
+        self.assertNotIn('complete',self.backend.calls)
+        self.assertEqual(self.backend.calls.count('submit_claim'),1)
+
+    def test_auto_processed_changed_owned_link_is_not_generic_completion_sync(self):
+        self.backend.auto_processed=True
+        original=self.backend.call
+        def call(action,payload,timeout=90):
+            answer=original(action,payload,timeout)
+            if action=='link':self.backend.row['itemId']='9999999999999999999'
+            return answer
+        self.backend.call=call
+        first=self.run_once();self.assertTrue(first.halted)
+        self.roster=first.roster;self.record=self.roster.records[0]
+        second=self.run_once();self.assertTrue(second.halted)
+        self.assertFalse(second.roster.records[0].done)
+        self.assertIn('原入库关联断点',second.reason)
+        self.assertNotIn('complete',self.backend.calls)
+        self.assertEqual(self.backend.calls.count('import_excel_submit'),1)
 
     def test_newly_linked_unclaimed_author_is_claimed_before_closure(self):
         self.backend.claimed=False

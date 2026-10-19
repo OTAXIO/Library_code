@@ -1,6 +1,7 @@
 /* Executed only on the paired page, in the page's JS world. Uses the existing
- * dataCompare component and its own UI methods; no tokens, axios, crypto, arbitrary
- * URLs, or generic API endpoints are exposed to the desktop process. */
+ * dataCompare component and its own UI methods. One fixed, observed public
+ * business-client request can fill a verified intake note without toggling an
+ * already-processed task. No credentials, auth internals or generic API proxy. */
 async function runSACommand(command) {
   let submitted = false;
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -109,7 +110,7 @@ async function runSACommand(command) {
       if (vm.loading) stop("列表仍在加载，请等待后重查");
       const row = snap(await fresh());
       guardSurface();
-      return {ok: true, data: {row, non_sjtu_completion_protocol: 1, import_completion_protocol: 1, metadata_completion_protocol: 2}};
+      return {ok: true, data: {row, non_sjtu_completion_protocol: 1, import_completion_protocol: 1, metadata_completion_protocol: 3}};
     }
     const drawer = vm.$refs?.compareDetailDrawer;
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");
@@ -358,7 +359,7 @@ async function runSACommand(command) {
     };
     if (command.action === "search") {
       const comparison = await showDetail();
-      return {ok: true, data: {row: before, comparison, import_completion_protocol: 1, metadata_completion_protocol: 2}};
+      return {ok: true, data: {row: before, comparison, import_completion_protocol: 1, metadata_completion_protocol: 3}};
     }
     if (["prepare_claim", "submit_claim"].includes(command.action)) {
       const submitting = command.action === "submit_claim";
@@ -532,7 +533,9 @@ async function runSACommand(command) {
     const imported = note === "已入库";
     if (!command.reviewed || !note || (note.length < 6 && !knownShortNote && !nonSJTU && !imported) || note.length > 2000)
       stop("缺少人工核验及处理备注");
-    if (row.markStatus !== "待处理") stop("记录已经处理，禁止再次切换状态");
+    const processedImport = command.action === "complete" && imported &&
+      !!command.metadata_imported_evidence && row.markStatus === "已处理";
+    if (row.markStatus !== "待处理" && !processedImport) stop("记录已经处理，禁止再次切换状态");
     if (imported) {
       const metadata=!!command.metadata_imported_evidence;
       if(metadata&&command.imported_evidence)stop("结案证明来源冲突");
@@ -567,6 +570,14 @@ async function runSACommand(command) {
       };
       if (metadata && field(comparison, "认领状态", "library").trim() !== "已认领")
         stop("已入库但作者尚未认领，不能直接结案");
+      if (processedImport) {
+        if ([["increase","1"],["duplicateSkip","0"],["duplicateIncreaseUpdate","0"],
+            ["duplicateOverallCoverage","0"]].some(([key,value])=>String(b[key])!==value))
+          stop("不是已核验的新增入库，不补写已处理备注");
+        for (const label of ["认领状态", "作者信息", "交大是否第一单位"]) for (const side of ["sa", "library"])
+          if (field(comparison,label,side)!==field(command.expected_comparison,label,side))
+            stop("补备注前作者或单位详情改变，未覆盖");
+      }
       for(const [label,key,normalize] of [["题名","title",norm],["DOI","doi",doi],["WOS记录号","wos",wos]]) {
         if(normalize(field(comparison,label,"library"))!==normalize(c[key]))stop("入库后的本库文献不一致："+label);
         const saValue=key==="title"?row.titleValue:key==="doi"?row.doiValue:row.wosValue;
@@ -646,15 +657,30 @@ async function runSACommand(command) {
     if (command.action === "complete") {
       const modal = vm.$refs.compareStatusDialog;
       if (!modal || typeof modal.show !== "function" || typeof modal.handleConfirm !== "function") stop("状态弹窗结构不兼容");
-      vm.handleEdit(row);
-      await vm.$nextTick();
-      if (!modal.dialogVisible || modal.currentRow?.saLzkId !== command.sa_id || modal.currentRow.markStatus !== "待处理") stop("状态弹窗的目标不一致");
-      modal.editForm.remark = command.note.trim();
-      await vm.$nextTick();
-      check();
-      submitted = true;
-      modal.handleConfirm();
-      await wait(() => !modal.dialogVisible, "提交处理状态");
+      if (processedImport) {
+        // CompareStatusDialog.handleConfirm ALWAYS toggles its source status.
+        // Do not call it, fake a pending currentRow, or reopen a processed task.
+        // Its observed dc7a.i contract is this fixed endpoint + JSON row body.
+        // The page's public client handles its own transport/authentication.
+        if (row.remark !== note) {
+          if (row.remark || typeof vm.$http !== "function") stop("已有其他备注或公开保存客户端不可用");
+          check(); submitted = true;
+          const response = await vm.$http({url:"/api/cspace-middle/saLzkCompare/updateCompareData",
+            method:"post",data:{...row,markStatus:"已处理",remark:note}});
+          if (response?.status !== 200 || response.data?.code !== 200 || response.data?.success === false)
+            stop("补写备注回执未确认，只读核验，不重复提交");
+        }
+      } else {
+        vm.handleEdit(row);
+        await vm.$nextTick();
+        if (!modal.dialogVisible || modal.currentRow?.saLzkId !== command.sa_id || modal.currentRow.markStatus !== "待处理") stop("状态弹窗的目标不一致");
+        modal.editForm.remark = command.note.trim();
+        await vm.$nextTick();
+        check();
+        submitted = true;
+        modal.handleConfirm();
+        await wait(() => !modal.dialogVisible, "提交处理状态");
+      }
     } else {
       if (!/^[0-9]{1,40}$/.test(command.item_id || "")) stop("平台唯一号必须是完整数字文本，不支持多号合并");
       if (String(row.itemId || "").replace(/^,/, "") === command.item_id) stop("平台唯一号没有变化，无需重复写入");

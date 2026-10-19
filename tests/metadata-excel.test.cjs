@@ -122,6 +122,38 @@ const base=()=>({id:'metadata-test',expires:Date.now()+60000,sa_id:'demo-001',in
    assert.equal(await page.evaluate(()=>claimWrites),0);
    console.log('PASS metadata closure '+scenario);
   }
+  for(const scenario of ['valid','lostAck','manualRemark','noProof','duplicateBatch','roleChanged','rejected']){
+   await page.goto('about:blank');await page.goto('http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list');
+   await page.evaluate(scenario=>{
+    Object.assign(synthetic,{doiValue:'10.1234/test',wosValue:'',markStatus:'已处理',
+      remark:scenario==='manualRemark'?'人工保留备注':''});
+    Object.assign(testConfig,{modern:true,unitInfo:true,saDoi:'10.1234/test',libraryDoi:'10.1234/test',
+      libraryWos:'',claim:'已认领',annotationLostAck:scenario==='lostAck',annotationRejected:scenario==='rejected'});
+   },scenario);
+   const read=await page.evaluate(runSACommand,{...base(),action:'search'});
+   assert.equal(read.ok,true,JSON.stringify(read));
+   const batch={id:'batch-metadata',modelId:'article',instructions:'SA补充-demo-001',source:'人工提交',
+    status:2,total:1,actual:1,fail:0,increase:scenario==='duplicateBatch'?0:1,
+    duplicateSkip:0,duplicateIncreaseUpdate:0,duplicateOverallCoverage:0};
+   const proof={candidate,batch,item_id:'1234567890123456789',xlsx_sha256:'b'.repeat(64)};
+   if(scenario==='roleChanged')await page.evaluate(()=>testConfig.unknownModernRole='是');
+   const params={...base(),action:'complete',expected:read.data.row,expected_comparison:read.data.comparison,
+    reviewed:true,owner:'谭勋策',note:'已入库',metadata_imported_evidence:scenario==='noProof'?null:proof};
+   const result=await page.evaluate(runSACommand,params);
+   assert.equal(result.ok,scenario==='valid',scenario+JSON.stringify(result));
+   assert.equal(await page.evaluate(()=>synthetic.markStatus),'已处理','never reopen or toggle processed task');
+   assert.equal(await page.evaluate(()=>annotationRequests),['valid','lostAck','rejected'].includes(scenario)?1:0,scenario);
+   assert.equal(await page.evaluate(()=>writeCount),['valid','lostAck'].includes(scenario)?1:0,scenario);
+   assert.equal(await page.evaluate(()=>document.getElementById('status').style.display),'none','never open toggle dialog');
+   if(scenario==='manualRemark')assert.equal(await page.evaluate(()=>synthetic.remark),'人工保留备注');
+   if(['valid','lostAck'].includes(scenario)){
+    const again=await page.evaluate(runSACommand,{...base(),action:'search'});
+    const resumed=await page.evaluate(runSACommand,{...params,expected:again.data.row,expected_comparison:again.data.comparison});
+    assert.equal(resumed.ok,true,JSON.stringify(resumed));
+    assert.equal(await page.evaluate(()=>annotationRequests),1,'existing intake note is a read-only success');
+   }
+   console.log('PASS already-processed intake annotation '+scenario);
+  }
   for(const scenario of ['valid','wrongModernSa','wrongModernStaff','unknownModernRole']){
    await page.goto('about:blank');await page.goto('http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list');
    await page.evaluate(scenario=>{
@@ -134,7 +166,7 @@ const base=()=>({id:'metadata-test',expires:Date.now()+60000,sa_id:'demo-001',in
    const read=await page.evaluate(runSACommand,{...base(),action:'search'});
    assert.equal(read.ok,scenario==='valid',scenario+JSON.stringify(read));
    if(scenario==='valid'){
-    assert.equal(read.data.metadata_completion_protocol,2);
+    assert.equal(read.data.metadata_completion_protocol,3);
     const field=label=>read.data.comparison.find(row=>row.label===label);
     assert.equal(field('WOS记录号').sa,'');assert.equal(field('WOS记录号').library,'');
     assert.equal(field('认领状态').sa,'测试员(00001)');assert.equal(field('认领状态').library,'未认领');

@@ -153,7 +153,16 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
             if state.get("phase") in ("complete_intent", "done") and row.get("markStatus") == "已处理":
                 if row.get("remark") != "已入库" or str(row.get("itemId", "")).lstrip(',') != state.get("item_id"):
                     raise SafetyStop("原结案断点与后台状态不一致，未同步。")
-            synced = reconcile_processed(result.roster, record, row)
+            # Linking (or native claiming) can itself mark a correct SA as
+            # processed. An owned import still needs the truthful intake note;
+            # do not mistake that for an unrelated, already-completed task.
+            owned_processed = (row.get("markStatus") == "已处理"
+                and state.get("phase") in ("link_intent", "linked", "claim_intent", "claimed", "complete_intent", "done"))
+            if owned_processed and (not isinstance(state.get("item_id"), str) or not state["item_id"]
+                    or str(row.get("itemId", "")).lstrip(',') != state["item_id"]
+                    or str(row.get("matchCount")) != "1"):
+                raise SafetyStop("已处理记录与原入库关联断点不一致，未同步名单或覆盖。")
+            synced = None if owned_processed else reconcile_processed(result.roster, record, row)
             if synced:
                 result.roster = synced.roster
                 result.outcomes.append({"sa_id": record.sa_id, "status": "synced", "message": "后台已处理，仅同步名单"})
@@ -161,8 +170,8 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                 continue
             verify_sa(record, row)
             verify_import_match(row, state)
-            if fresh.get("metadata_completion_protocol") != 2:
-                raise SafetyStop("请重载 0.4.28 扩展并重新绑定 SA 和导入页；旧协议未执行上传或重提。")
+            if fresh.get("metadata_completion_protocol") != 3:
+                raise SafetyStop("请重载 0.4.29 扩展并重新绑定 SA 和导入页；旧协议未执行上传或重提。")
             if not state:
                 try:
                     require_no_author_review(record.reason, row.get("reason"))
@@ -314,14 +323,19 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                 require_no_author_review(row.get("reason"))
                 if not claim_state(fresh["comparison"], record):
                     raise SafetyStop("作者认领未回读成功，未结案。")
-            if state["phase"] in ("complete_intent", "done"):
-                raise SafetyStop("上次结案结果待核验，不重复提交。")
-            if row.get("markStatus") != "待处理" or row.get("remark", "") not in ("", "已入库"):
+            if row.get("markStatus") not in ("待处理", "已处理") or row.get("remark", "") not in ("", "已入库"):
                 raise SafetyStop("结案前状态或人工备注改变，未覆盖。")
-            state["phase"] = "complete_intent"; store.save(record, state)
-            proof = call("complete", {"expected": row, "expected_comparison": fresh["comparison"],
-                "reviewed": True, "owner": OWNER, "note": "已入库", "metadata_imported_evidence": {
-                    "candidate": candidate, "batch": state["batch"], "item_id": item["id"], "xlsx_sha256": state["xlsx_sha256"]}})
+            if state["phase"] in ("complete_intent", "done"):
+                if row.get("markStatus") != "已处理" or row.get("remark") != "已入库":
+                    raise SafetyStop("上次结案结果待核验，不重复提交。")
+                # A lost ACK can be reconciled only after the exact batch,
+                # item, claim, roles and website note above were read again.
+                proof = {"verified": True, "row": row}
+            else:
+                state["phase"] = "complete_intent"; store.save(record, state)
+                proof = call("complete", {"expected": row, "expected_comparison": fresh["comparison"],
+                    "reviewed": True, "owner": OWNER, "note": "已入库", "metadata_imported_evidence": {
+                        "candidate": candidate, "batch": state["batch"], "item_id": item["id"], "xlsx_sha256": state["xlsx_sha256"]}})
             after = proof.get("row"); verify_sa(record, after)
             if (proof.get("verified") is not True or after.get("remark") != "已入库" or after.get("markStatus") != "已处理"
                     or str(after.get("itemId", "")).lstrip(',') != item["id"]):
