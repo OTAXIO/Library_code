@@ -26,6 +26,7 @@ class Backend:
         self.auto_processed_claim=False
         self.item_id='1234567890123456789'
         self.model_id='journal'
+        self.pushed_counts=None
 
     def call(self, action, p, timeout=90):
         self.calls.append(action);c=self.candidate
@@ -56,9 +57,11 @@ class Backend:
         elif action=='import_excel_submit':self.phase=1;result={'submitted':True}
         elif action=='import_excel_check':
             if not self.phase:raise SafetyStop('无批次；未重试提交')
-            return {'verified':True,'batch':{'id':'batch-one','modelId':self.model_id,'source':'人工提交',
+            batch={'id':'batch-one','modelId':self.model_id,'source':'人工提交',
               'instructions':p['instructions'],'total':1,'actual':1 if self.phase==2 else 0,'fail':0,'status':self.phase,
-              'increase':1 if self.phase==2 else 0,'duplicateSkip':0,'duplicateIncreaseUpdate':0,'duplicateOverallCoverage':0}}
+              'increase':1 if self.phase==2 else 0,'duplicateSkip':0,'duplicateIncreaseUpdate':0,'duplicateOverallCoverage':0}
+            if self.phase==2 and self.pushed_counts is not None:batch.update(self.pushed_counts)
+            return {'verified':True,'batch':batch}
         elif action=='import_excel_push':self.phase=2;result={'submitted':True}
         elif action=='link':
             self.row.update(itemId=p['item_id'],matchCount=1)
@@ -293,6 +296,94 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn('link',self.backend.calls)
         self.assertFalse(result.roster.records[0].done)
 
+    def test_explicit_single_duplicate_is_shelved_never_counted_new_or_closed(self):
+        from zero_match import WorkflowStore
+        for index,key in enumerate(('duplicateSkip','duplicateIncreaseUpdate','duplicateOverallCoverage')):
+            with self.subTest(key=key):
+                if index:self.setUp()
+                self.backend.pushed_counts={'increase':0,key:1}
+                result=self.run_once()
+                self.assertFalse(result.halted,result.reason)
+                self.assertTrue(result.roster.records[0].skipped)
+                self.assertFalse(result.roster.records[0].done)
+                self.assertEqual(result.roster.records[0].remark,'本库重复待核验')
+                state=WorkflowStore(self.base/'runtime/metadata-imports').get(result.roster.records[0])
+                self.assertEqual(state['phase'],'duplicate_review')
+                self.assertEqual(state['batch'][key],1)
+                self.assertNotIn('link',self.backend.calls)
+                self.assertNotIn('complete',self.backend.calls)
+                for action in ('import_excel_upload','import_excel_submit','import_excel_push'):
+                    self.assertEqual(self.backend.calls.count(action),1)
+
+    def test_unknown_or_conflicting_push_counters_never_become_skips(self):
+        for index,counts in enumerate(({'increase':0},{'increase':0,'duplicateIncreaseUpdate':True},
+                {'increase':0,'duplicateSkip':1,'duplicateIncreaseUpdate':1},
+                {'increase':1,'duplicateSkip':1},{'increase':0,'duplicateSkip':''})):
+            with self.subTest(counts=counts):
+                if index:self.setUp()
+                self.backend.pushed_counts=counts
+                result=self.run_once()
+                self.assertTrue(result.halted)
+                self.assertFalse(result.roster.records[0].done)
+                self.assertFalse(result.roster.records[0].skipped)
+                self.assertNotIn('link',self.backend.calls)
+                self.assertNotIn('complete',self.backend.calls)
+
+    def test_lost_push_ack_can_only_read_verified_duplicate_without_replaying(self):
+        self.backend.pushed_counts={'increase':0,'duplicateIncreaseUpdate':1}
+        self.backend.lost='import_excel_push'
+        first=self.run_once()
+        self.assertTrue(first.halted)
+        self.assertFalse(first.roster.records[0].skipped)
+        self.roster=first.roster;self.record=self.roster.records[0]
+        second=self.run_once()
+        self.assertFalse(second.halted,second.reason)
+        self.assertTrue(second.roster.records[0].skipped)
+        self.assertEqual(self.backend.calls.count('import_excel_push'),1)
+        self.assertEqual(self.backend.calls.count('import_excel_submit'),1)
+
+    def test_duplicate_recognition_still_requires_exact_batch_model_and_counts(self):
+        from metadata_pipeline import verified_pushed_duplicate
+        self.backend.phase=2
+        self.backend.pushed_counts={'increase':0,'duplicateIncreaseUpdate':1}
+        batch=self.backend.call('import_excel_check',{'instructions':'SA补充-'+self.record.sa_id})['batch']
+        self.assertTrue(verified_pushed_duplicate(batch,self.record,'batch-one',model_id='journal'))
+        for change in ({'source':'WOS'},{'instructions':'SA补充-other'},{'id':'other'},
+                {'modelId':'other'},{'status':1},{'fail':1},{'total':2},{'actual':0}):
+            self.assertFalse(verified_pushed_duplicate({**batch,**change},self.record,'batch-one',model_id='journal'))
+        self.assertFalse(verified_pushed_duplicate(batch,self.record,'batch-one',model_id=None))
+
+    def test_retry_known_duplicate_never_uploads_pushes_or_closes_again(self):
+        self.backend.pushed_counts={'increase':0,'duplicateIncreaseUpdate':1}
+        first=self.run_once();self.assertFalse(first.halted,first.reason)
+        previous=len(self.backend.calls)
+        second=run_metadata_batch(self.base,first.roster,[first.roster.records[0]],self.backend,self.stop,
+                                 retry_skipped=True,client=self.client,excel_builder=self.builder)
+        self.assertFalse(second.halted,second.reason)
+        self.assertTrue(second.roster.records[0].skipped)
+        self.assertFalse(second.roster.records[0].done)
+        self.assertFalse(set(self.backend.calls[previous:])&{'import_excel_upload','import_excel_submit',
+            'import_excel_push','link','submit_claim','complete'})
+        self.assertEqual(second.roster.sha256,first.roster.sha256)
+
+    def test_previous_verified_new_batch_cannot_be_reclassified_as_a_duplicate(self):
+        from zero_match import WorkflowStore
+        original=self.backend.call
+        def call(action,payload,timeout=90):
+            if action=='import_excel_resolve' and self.backend.phase==2:
+                raise SafetyStop('暂停本库索引回读')
+            return original(action,payload,timeout)
+        self.backend.call=call
+        first=self.run_once();self.assertTrue(first.halted)
+        saved=WorkflowStore(self.base/'runtime/metadata-imports').get(first.roster.records[0])
+        self.assertEqual(saved['phase'],'pushed');self.assertEqual(saved['batch']['increase'],1)
+        self.backend.call=original;self.backend.pushed_counts={'increase':0,'duplicateIncreaseUpdate':1}
+        self.roster=first.roster;self.record=self.roster.records[0]
+        second=self.run_once();self.assertTrue(second.halted)
+        self.assertFalse(second.roster.records[0].done);self.assertFalse(second.roster.records[0].skipped)
+        self.assertEqual(WorkflowStore(self.base/'runtime/metadata-imports').get(self.record),saved)
+        self.assertEqual(self.backend.calls.count('import_excel_push'),1)
+
     def test_completion_with_changed_match_count_does_not_complete_list(self):
         original=self.backend.call
         def call(action,payload,timeout=90):
@@ -457,6 +548,22 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual([item['status'] for item in result.outcomes],['skip','done','done','done','done'])
         self.assertIsNone(opened)
         self.assertNotIn('complete',backends[self.roster.records[0].sa_id].calls)
+
+    def test_known_duplicate_does_not_stop_later_papers_or_rewrite_done_rows(self):
+        queue,backends=self.make_five_queue()
+        first=self.roster.records[0]
+        backends[first.sa_id].pushed_counts={'increase':0,'duplicateIncreaseUpdate':1}
+        result=run_metadata_batch(self.base,self.roster,self.roster.records[:5],queue,self.stop,
+                                 client=self.client,excel_builder=self.builder)
+        self.assertFalse(result.halted,result.reason)
+        self.assertEqual([out['status'] for out in result.outcomes],['skip','done','done','done','done'])
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertNotIn('complete',backends[first.sa_id].calls)
+        before={key:list(backend.calls) for key,backend in backends.items()}
+        again=run_metadata_batch(self.base,result.roster,result.roster.records[:5],queue,self.stop,
+                                client=self.client,excel_builder=self.builder)
+        self.assertFalse(again.halted,again.reason)
+        self.assertEqual(before,{key:backend.calls for key,backend in backends.items()})
 
     def test_resume_old_deferred_drawer_only_reads_it_and_continues_other_papers(self):
         queue,backends=self.make_five_queue()

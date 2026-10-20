@@ -25,6 +25,10 @@ class MetadataReview(MetadataSkip):
     """A known per-paper role disagreement, not an uncertain write or transport failure."""
 
 
+class MetadataDuplicateReview(MetadataSkip):
+    """An exact, fully counted pushed duplicate; never a new admission or closure."""
+
+
 def claim_state(comparison, record):
     """Read explicit site role flags; never assign/infer an author or unit role."""
     def field(label, side):
@@ -53,7 +57,7 @@ def claim_state(comparison, record):
     return state == "已认领"
 
 
-def validate_batch(batch, record, previous=None, pushed=False, *, model_id=None):
+def _validated_batch_base(batch, record, previous=None, pushed=False, *, model_id=None):
     if (not isinstance(batch, dict) or not isinstance(batch.get("id"), str) or not batch["id"]
             or not isinstance(batch.get("modelId"), str) or not batch["modelId"]
             or batch.get("source") != "人工提交" or batch.get("instructions") != "SA补充-" + record.sa_id
@@ -68,11 +72,30 @@ def validate_batch(batch, record, previous=None, pushed=False, *, model_id=None)
             or int(batch["actual"]) not in (0, 1)
             or (pushed or int(batch["status"]) == 2) and (int(batch["status"]) != 2 or int(batch["actual"]) != 1)):
         raise SafetyStop("尚未确认单篇入库成功、失败零及推送完成。")
+    return batch
+
+
+def validate_batch(batch, record, previous=None, pushed=False, *, model_id=None):
+    batch = _validated_batch_base(batch, record, previous, pushed, model_id=model_id)
     if int(batch["status"]) == 2 and any(type(batch.get(k)) not in (str, int) or str(batch[k]) != expected
             for k, expected in (("increase", "1"), ("duplicateSkip", "0"),
                                 ("duplicateIncreaseUpdate", "0"), ("duplicateOverallCoverage", "0"))):
         raise SafetyStop("批次未确认为新增一篇、重复覆盖零；未冒充新增入库结案。")
     return batch
+
+
+def verified_pushed_duplicate(batch, record, previous, *, model_id):
+    """Recognize only a complete non-new result; never infer it from a zero/missing counter."""
+    if not isinstance(model_id, str) or not model_id:
+        return False
+    try:
+        _validated_batch_base(batch, record, previous, pushed=True, model_id=model_id)
+    except SafetyStop:
+        return False
+    keys = ("increase", "duplicateSkip", "duplicateIncreaseUpdate", "duplicateOverallCoverage")
+    if any(type(batch.get(key)) not in (str, int) or str(batch[key]) not in ("0", "1") for key in keys):
+        return False
+    return str(batch["increase"]) == "0" and sum(int(batch[key]) for key in keys[1:]) == 1
 
 
 def resolved(answer, candidate):
@@ -137,6 +160,21 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
         except Exception:
             progress("log.txt 保存失败；独立入库断点仍保留。")
         return value
+    def accept_batch(batch, previous=None, pushed=False):
+        try:
+            return validate_batch(batch, record, previous, pushed, model_id=state.get("model_id"))
+        except SafetyStop:
+            # The transport has already returned verified=True and the exact
+            # native batch has a complete single-record pushed tally. Preserve
+            # that real result; do not pretend this was a new paper, replay a
+            # push, link a conflicting identity, or convert unknown ACKs to skips.
+            if (state.get("phase") not in ("import_intent", "imported", "push_intent")
+                    or not verified_pushed_duplicate(batch, record, previous, model_id=state.get("model_id"))):
+                raise
+            state.update(review_origin_phase=state["phase"], phase="duplicate_review", batch=batch,
+                         deferred_reason="本库重复待核验")
+            store.save(record, state)
+            raise MetadataDuplicateReview("本库重复待核验") from None
     for position, original in enumerate(records, 1):
         record = next(r for r in result.roster.records if r.sa_id == original.sa_id)
         state = store.get(record)
@@ -235,6 +273,15 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
             payload = {"candidate": candidate, "instructions": state["instructions"]}
             result.roster = record_data_sources(result.roster, [record], SOURCE).roster
             record = next(r for r in result.roster.records if r.sa_id == record.sa_id)
+            if state["phase"] == "duplicate_review":
+                # Explicit retry is read-only. The original batch and all its
+                # counts must still agree; no upload/import/push is repeated.
+                checked = call("import_excel_check", {**payload, "batch_id": state["batch"]["id"], "expect_pushed": True})
+                if (checked.get("verified") is not True or not verified_pushed_duplicate(checked.get("batch"),
+                        record, state["batch"]["id"], model_id=state.get("model_id"))):
+                    raise SafetyStop("原重复批次结果改变，保留断点待核验，未重传或结案。")
+                state["batch"] = checked["batch"]; store.save(record, state)
+                raise MetadataDuplicateReview("本库重复待核验")
             if state["phase"] == "prepared":
                 item = resolved(call("import_excel_resolve", payload), candidate)
                 if item:
@@ -295,8 +342,7 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                     "expect_pushed": state["phase"] in ("push_intent", "pushed", "link_intent", "linked", "claim_intent", "claimed", "complete_intent", "done")})
                 if checked.get("verified") is not True:
                     raise SafetyStop("未回读到实际 Excel 入库批次。")
-                batch = validate_batch(checked.get("batch"), record, state.get("batch", {}).get("id"),
-                                       model_id=state.get("model_id"))
+                batch = accept_batch(checked.get("batch"), state.get("batch", {}).get("id"))
                 if state["phase"] == "push_intent" and str(batch["status"]) != "2":
                     raise SafetyStop("上次推送结果待核验；未重复推送。")
                 if str(batch["status"]) == "1":
@@ -309,8 +355,7 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                     checked = call("import_excel_check", {**payload, "batch_id": batch["id"], "expect_pushed": True})
                     if checked.get("verified") is not True:
                         raise SafetyStop("推送尚未确认。")
-                    batch = validate_batch(checked.get("batch"), record, batch["id"], pushed=True,
-                                           model_id=state.get("model_id"))
+                    batch = accept_batch(checked.get("batch"), batch["id"], pushed=True)
                 else:
                     validate_batch(batch, record, pushed=True, model_id=state.get("model_id"))
                 state.update(batch=batch)
@@ -403,6 +448,14 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
             state.pop("deferred_reason", None)
             state["phase"] = "done"; store.save(record, state)
             result.outcomes.append({"sa_id": record.sa_id, "status": "done", "message": "已入库", "batch_id": state["batch"]["id"], "item_id": item["id"]})
+            result.remaining -= 1
+        except MetadataDuplicateReview as exc:
+            if state.get("phase") != "duplicate_review":
+                result.halted, result.reason = True, str(exc)
+                break
+            checkpoint()
+            result.roster = mark_skipped_many(result.roster, [record], reasons={record.sa_id: exc.note}).roster
+            result.outcomes.append({"sa_id": record.sa_id, "status": "skip", "message": exc.note + "（未新增，未结案）"})
             result.remaining -= 1
         except MetadataReview as exc:
             # Known completed writes stay in the journal. A disagreement is
