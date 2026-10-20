@@ -127,7 +127,11 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
     def call(action, payload):
         checkpoint()
         progress(f"Crossref＋OpenAlex · {position}/{len(records)} · {action} · {record.sa_id}")
+        if action == "search":
+            payload = {**payload, "close_detail": True}
         value = bridge.call(action, {"sa_id": record.sa_id, **payload}, timeout=90)
+        if action == "search" and value.get("detail_released") is not True:
+            raise SafetyStop("本条只读详情尚未确认收起，未继续下一篇或提交认领结案。")
         try:
             audit(action, "已执行", record.sa_id)
         except Exception:
@@ -152,6 +156,25 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                         raise SafetyStop("上一篇已完成批次未确认，未重置旧向导。")
                     validate_batch(checked.get("batch"),record,state["batch"]["id"],pushed=True,
                                    model_id=state.get("model_id"))
+                elif (record.skipped and state.get("phase") in ("linked", "claimed")
+                      and state.get("deferred_reason") and pending):
+                    # An explicit resume can begin with a previously shelved
+                    # import whose old extension retained its read-only drawer.
+                    # Retire ONLY that exact record, without uploading, claiming,
+                    # closing the SA task or rewriting its skip/note.
+                    fresh = call("status", {})
+                    if fresh.get("metadata_detail_protocol") != 1:
+                        raise SafetyStop("请重载 0.4.31 扩展后续验；旧版只读窗口未自动丢弃。")
+                    verify_sa(record, fresh.get("row"))
+                    verify_import_match(fresh["row"], state)
+                    if str(fresh["row"].get("matchCount")) != "1":
+                        raise SafetyStop("跳过项原关联尚未确认，未清理窗口或重导。")
+                    released = call("search", {})
+                    verify_sa(record, released.get("row"))
+                    verify_import_match(released["row"], state)
+                    if str(released["row"].get("matchCount")) != "1":
+                        raise SafetyStop("收起只读详情时原关联改变，未继续后续任务。")
+                    verify_paper_comparison(released.get("comparison"), state["candidate"], record)
                 result.outcomes.append({"sa_id": record.sa_id, "status": "already_skipped", "message": "已跳过或完成，未重复执行"})
                 result.remaining -= 1
                 continue
@@ -183,8 +206,8 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                 continue
             verify_sa(record, row)
             verify_import_match(row, state)
-            if fresh.get("metadata_completion_protocol") != 4:
-                raise SafetyStop("请重载 0.4.30 扩展并重新绑定 SA 和导入页；旧协议未执行上传或重提。")
+            if fresh.get("metadata_completion_protocol") != 4 or fresh.get("metadata_detail_protocol") != 1:
+                raise SafetyStop("请重载 0.4.31 扩展并重新绑定 SA 和导入页；旧协议未执行上传或重提。")
             if not state:
                 try:
                     require_no_author_review(record.reason, row.get("reason"))

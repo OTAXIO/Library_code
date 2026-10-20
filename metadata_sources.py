@@ -176,7 +176,7 @@ class MetadataClient:
         if self.cancelled():
             raise SafetyStop("已请求暂停。")
         try:
-            request = Request(url, headers={"User-Agent": "SA-Library-Assistant/0.4.30 (metadata verification)",
+            request = Request(url, headers={"User-Agent": "SA-Library-Assistant/0.4.31 (metadata verification)",
                                            "Accept": "application/json"})
             with urlopen(request, timeout=25) as response:
                 if response.url.split('/')[2] not in ("api.crossref.org", "api.openalex.org"):

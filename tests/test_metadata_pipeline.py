@@ -40,7 +40,9 @@ class Backend:
                     {'label':'作者信息','sa':'是否第一作者：否\n是否通讯作者：否',
                      'library':'是否第一作者：否\n是否通讯作者：'+('否' if self.roles_match else '是')},
                     {'label':'交大是否第一单位','sa':'是','library':'是'}])
-            return {'metadata_completion_protocol':4,'row':copy.deepcopy(self.row),'comparison':comparison}
+            return {'metadata_completion_protocol':4,'metadata_detail_protocol':1,
+                    'detail_released':action=='search' and p.get('close_detail') is True,
+                    'row':copy.deepcopy(self.row),'comparison':comparison}
         if action=='import_excel_resolve':
             return {'verified':True,'items':[] if self.phase!=2 else [{'id':self.item_id,
               'title':c['title'],'doi':c['doi'],'wos':''}]}
@@ -148,9 +150,35 @@ class PipelineTests(unittest.TestCase):
             if action=='status':result['metadata_completion_protocol']=2
             return result
         self.backend.call=call
-        result=self.run_once();self.assertTrue(result.halted);self.assertIn('0.4.30',result.reason)
+        result=self.run_once();self.assertTrue(result.halted);self.assertIn('0.4.31',result.reason)
         self.assertEqual(self.backend.calls,['status']);self.client.get.assert_not_called()
         self.assertEqual(result.roster.sha256,self.roster.sha256)
+
+    def test_old_detail_protocol_stops_before_upload(self):
+        original=self.backend.call
+        def call(action,payload,timeout=90):
+            answer=original(action,payload,timeout)
+            answer.pop('metadata_detail_protocol',None)
+            return answer
+        self.backend.call=call
+        result=self.run_once()
+        self.assertTrue(result.halted)
+        self.assertEqual(self.backend.calls,['status'])
+        self.client.get.assert_not_called()
+
+    def test_unconfirmed_detail_release_never_claims_or_completes(self):
+        original=self.backend.call
+        def call(action,payload,timeout=90):
+            answer=original(action,payload,timeout)
+            if action=='search':answer['detail_released']=False
+            return answer
+        self.backend.call=call
+        result=self.run_once()
+        self.assertTrue(result.halted)
+        self.assertFalse(result.roster.records[0].done)
+        self.assertFalse(result.roster.records[0].skipped)
+        self.assertNotIn('prepare_claim',self.backend.calls)
+        self.assertNotIn('complete',self.backend.calls)
 
     def test_pause_after_upload_saves_receipt_and_never_submits(self):
         original=self.backend.call
@@ -407,6 +435,56 @@ class PipelineTests(unittest.TestCase):
                                 client=self.client,excel_builder=self.builder)
         self.assertFalse(again.halted,again.reason)
         self.assertEqual(before,{key:backend.calls for key,backend in backends.items()})
+
+    def test_author_review_releases_native_detail_before_next_exact_status(self):
+        queue,backends=self.make_five_queue()
+        backends[self.roster.records[0].sa_id].roles_match=False
+        original=queue.call
+        opened=None
+        def call(action,payload,timeout=90):
+            nonlocal opened
+            if action=='status' and opened and opened!=payload['sa_id']:
+                raise SafetyStop('网页有未关闭的窗口')
+            answer=original(action,payload,timeout)
+            if action=='search':
+                opened=None if payload.get('close_detail') is True else payload['sa_id']
+                answer['detail_released']=payload.get('close_detail') is True
+            return answer
+        queue.call=call
+        result=run_metadata_batch(self.base,self.roster,self.roster.records[:5],queue,self.stop,
+                                 client=self.client,excel_builder=self.builder)
+        self.assertFalse(result.halted,result.reason)
+        self.assertEqual([item['status'] for item in result.outcomes],['skip','done','done','done','done'])
+        self.assertIsNone(opened)
+        self.assertNotIn('complete',backends[self.roster.records[0].sa_id].calls)
+
+    def test_resume_old_deferred_drawer_only_reads_it_and_continues_other_papers(self):
+        queue,backends=self.make_five_queue()
+        first=self.roster.records[0]
+        backends[first.sa_id].roles_match=False
+        partial=run_metadata_batch(self.base,self.roster,[first],queue,self.stop,
+                                  client=self.client,excel_builder=self.builder)
+        self.assertTrue(partial.roster.records[0].skipped)
+        previous_calls=list(backends[first.sa_id].calls)
+        original=queue.call
+        opened=first.sa_id
+        def call(action,payload,timeout=90):
+            nonlocal opened
+            if action=='status' and opened and opened!=payload['sa_id']:
+                raise SafetyStop('网页有未关闭的窗口')
+            answer=original(action,payload,timeout)
+            if action=='search':
+                opened=None if payload.get('close_detail') is True else payload['sa_id']
+                answer['detail_released']=payload.get('close_detail') is True
+            return answer
+        queue.call=call
+        result=run_metadata_batch(self.base,partial.roster,partial.roster.records[:5],queue,self.stop,
+                                 client=self.client,excel_builder=self.builder)
+        self.assertFalse(result.halted,result.reason)
+        self.assertEqual([out['status'] for out in result.outcomes],['already_skipped','done','done','done','done'])
+        self.assertEqual(backends[first.sa_id].calls[len(previous_calls):],['status','search'])
+        self.assertEqual(result.roster.records[0],partial.roster.records[0])
+        self.assertIsNone(opened)
 
     def test_resume_completed_then_pending_paper_only_reads_previous_batch(self):
         for index,pause_at in enumerate(('status','import_excel_upload','import_excel_submit')):

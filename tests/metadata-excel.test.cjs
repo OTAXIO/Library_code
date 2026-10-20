@@ -69,6 +69,15 @@ const base=()=>({id:'metadata-test',expires:Date.now()+60000,sa_id:'demo-001',in
    console.log('PASS native Excel initialization '+scenario);
   }
   await page.goto('about:blank');await page.goto('http://admin.ir.lib.sjtu.edu.cn/#/collectItem/batchManage');
+  const queueSite=await ctx.newPage();
+  await queueSite.route('**/*',r=>r.fulfill({status:200,contentType:'text/html',body:saFixture}));
+  await queueSite.goto('http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list');
+  await queueSite.evaluate(()=>{
+    const show=vm.showItemId;
+    vm.showItemId=function(row){show.call(this,row);
+      for(const field of detail.currentRows||[])if(field.label==='题名')
+        field.compareLeftValue=field.compareRightValue=synthetic.titleValue;};
+  });
   for(let i=1;i<=5;i++){
    const c={...candidate,title:'Synthetic paper '+i,doi:'10.1234/test'+i,
      fields:{...candidate.fields,'题名':'Synthetic paper '+i,'DOI':'10.1234/test'+i}};
@@ -79,6 +88,15 @@ const base=()=>({id:'metadata-test',expires:Date.now()+60000,sa_id:'demo-001',in
    }
    const params={...base(),sa_id:'continuous-'+i,instructions:'SA补充-continuous-'+i,candidate:c};
    if(i%2===0)params.model_id='conference-test';
+   await queueSite.evaluate(({c,id,i})=>{
+    Object.assign(synthetic,{saLzkId:id,titleValue:c.title,doiValue:c.doi,wosValue:'',
+      itemId:'',matchCount:0,markStatus:'待处理',reason:'',remark:''});
+    Object.assign(testConfig,{modern:true,unitInfo:true,saDoi:c.doi,libraryDoi:c.doi,
+      libraryWos:'',claim:'已认领',unknownModernRole:i===2?'是':'否'});
+   },{c,id:params.sa_id,i});
+   const saBefore=await queueSite.evaluate(runSACommand,{...params,action:'status'});
+   assert.equal(saBefore.ok,true,'previous drawer must not block next paper: '+JSON.stringify(saBefore));
+   assert.equal(saBefore.data.row.matchCount,0);
    await page.evaluate(c=>testConfig.candidate=c,c);
    const probe=await page.evaluate(runExcelCommand,{...params,action:'import_excel_probe'});
    assert.equal(probe.ok,true,JSON.stringify(probe));
@@ -95,7 +113,27 @@ const base=()=>({id:'metadata-test',expires:Date.now()+60000,sa_id:'demo-001',in
    const verified=await page.evaluate(runImportCommand,{...params,action:'import_check',batch_id:checked.data.batch.id,expect_pushed:true});
    assert.equal(verified.ok,true,JSON.stringify(verified));assert.equal(verified.data.batch.increase,1);
    assert.equal(await page.evaluate(()=>drawer.__saCompleted.batch_id),checked.data.batch.id);
+   const itemId=String(1234567890123456789n+BigInt(i));
+   const link=await queueSite.evaluate(runSACommand,{...params,action:'link',expected:saBefore.data.row,
+     reviewed:true,note:'已核验两源及本库同一文献',item_id:itemId});
+   assert.equal(link.ok,true,JSON.stringify(link));
+   const saRead=await queueSite.evaluate(runSACommand,{...params,action:'search',close_detail:true});
+   assert.equal(saRead.ok,true,JSON.stringify(saRead));assert.equal(saRead.data.detail_released,true);
+   assert.equal(await queueSite.evaluate(()=>detail.dialogVisible),false);
+   if(i!==2){
+    const complete=await queueSite.evaluate(runSACommand,{...params,action:'complete',
+      expected:saRead.data.row,expected_comparison:saRead.data.comparison,reviewed:true,owner:'谭勋策',note:'已入库',
+      metadata_imported_evidence:{candidate:c,batch:verified.data.batch,item_id:itemId,xlsx_sha256:params.xlsx_sha256}});
+    assert.equal(complete.ok,true,JSON.stringify(complete));
+    assert.equal(complete.data.row.remark,'已入库');assert.equal(complete.data.row.markStatus,'已处理');
+   } else {
+    assert.match(saRead.data.comparison.find(row=>row.label==='作者信息').library,/是否通讯作者：是/);
+    assert.equal(await queueSite.evaluate(()=>synthetic.remark),'','role review must never be marked closed');
+   }
   }
+  assert.equal(await queueSite.evaluate(()=>writeCount),9,'five links and four closures; no closure for role review');
+  assert.equal(await queueSite.evaluate(()=>claimWrites),0);
+  await queueSite.close();
   assert.deepEqual(await page.evaluate(()=>({uploads,imports,pushes,resets})),{uploads:5,imports:5,pushes:5,resets:4});
   console.log('PASS five consecutive mixed journal/conference papers: upload -> validation -> import -> push -> verified native reset');
   await page.goto('about:blank');await page.goto('http://admin.ir.lib.sjtu.edu.cn/#/collectItem/batchManage');

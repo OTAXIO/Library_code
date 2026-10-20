@@ -52,6 +52,8 @@ Export 返回后先记录实际路径（`export_received`），再解析并存�
 
 # Crossref＋OpenAlex / 通用 Excel（0.4.30）
 
+0.4.31 的队列只读协议单独协商 `metadata_detail_protocol=1`。仅元数据队列的 `search` 携带 `close_detail=true`，必须收到 `detail_released=true` 才进入认领/结案或下一篇；适配器读取并核验本条详情后使用已有关闭事件与动画守卫收起该只读面板，不放宽 `status` 对其他记录窗口的保护。普通人工查询仍保留窗口。旧版已跳过且原入库为已知 linked/claimed 的显式恢复只核对精确 SA、平台号和原始文献后收起详情，原批次与名单跳过状态不改。
+
 批量维护须区分“明确的本篇角色分歧”和“未知写入/会话异常”：前者仅在 linked/claimed 的已知断点写短备注与 2 后继续，原批次不删除；后者暂停全批，不能由其他人的“已处理”状态覆盖。批次 modelId 必须与预检所选模型相等。结案回读仍须唯一关联，扩展完成协议 4 在任何状态下都复核作者/单位快照、角色一致和真正新增计数。
 
 期刊与会议使用仓库已有的对应模板标签，模型按 Crossref/OpenAlex 双源类型确定，上传前读取原生字段并拒绝缺失必填值。会议还必须有实际 event.name，不从标题/系列猜会议；多条 container-title 全部保留在“出处”，不猜哪一条是会议录；只有单条时写“会议录名称”。类型定义与原始单位字段依据 [OpenAlex 类型](https://help.openalex.org/data/work-types/)和[原始署名单位](https://help.openalex.org/data/raw-affiliation-strings/)。原期刊缓存结构保持兼容；作者判断、预印本和不完整单位仍不自动提交。

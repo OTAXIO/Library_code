@@ -62,6 +62,35 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.equal(await page.evaluate(()=>window.closeCalls||0),0);
     assert.equal(await page.evaluate(()=>writeCount),0);
   });
+  test('queue read releases only its own detail and permits five following status checks',async()=>{
+    for(let index=0;index<5;index++) {
+      const id='queue-'+index;
+      await page.evaluate(id=>synthetic.saLzkId=id,id);
+      const result=await execute(command('search',{sa_id:id,close_detail:true}));
+      assert.equal(result.ok,true,JSON.stringify(result));
+      assert.equal(result.data.detail_released,true);
+      assert.equal(await page.evaluate(()=>detail.dialogVisible),false);
+      assert.equal(await page.evaluate(()=>document.getElementById('drawer-wrapper').style.display),'none');
+      await page.evaluate(id=>synthetic.saLzkId=id,id+'-next');
+      const next=await execute(command('status',{sa_id:id+'-next'}));
+      assert.equal(next.ok,true,JSON.stringify(next));
+      assert.equal(next.data.metadata_detail_protocol,1);
+    }
+    assert.equal(await page.evaluate(()=>window.closeCalls),5);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('queue read never dismisses an editor introduced during the read',async()=>{
+    await page.evaluate(()=>{
+      const show=vm.showItemId;
+      vm.showItemId=function(row){show.call(this,row);detail.$refs.itemEdit={drawer:true};};
+    });
+    const result=await execute(command('search',{close_detail:true}));
+    assert.equal(result.ok,false);
+    assert.match(result.error,/元数据编辑窗口/);
+    assert.equal(await page.evaluate(()=>window.closeCalls||0),0);
+    assert.equal(await page.evaluate(()=>detail.$refs.itemEdit.drawer),true);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
   test('status does not refresh behind another record or an unbound drawer',async()=>{
     for(const change of ['other-record','other-panel','duplicate-owner','loading']) {
       await reset();assert.equal((await execute(command('search'))).ok,true);

@@ -55,6 +55,9 @@ async function runSACommand(command) {
     check();
     if (!["status", "search", "open_metadata", "open_claim", "prepare_claim", "submit_claim", "link", "complete"].includes(command.action)) stop("不支持的命令");
     if (typeof command.sa_id !== "string" || !command.sa_id || command.sa_id.length > 160) stop("名单 ID 不合法");
+    if (command.close_detail !== undefined &&
+        (command.action !== "search" || typeof command.close_detail !== "boolean"))
+      stop("只读详情收起参数无效，未操作窗口");
     const roots = [...document.querySelectorAll("*")].map(el => el.__vue__).filter(Boolean);
     const found = new Set(), visited = new Set();
     const visit = vm => {
@@ -110,7 +113,8 @@ async function runSACommand(command) {
       if (vm.loading) stop("列表仍在加载，请等待后重查");
       const row = snap(await fresh());
       guardSurface();
-      return {ok: true, data: {row, non_sjtu_completion_protocol: 1, import_completion_protocol: 1, metadata_completion_protocol: 4}};
+      return {ok: true, data: {row, non_sjtu_completion_protocol: 1, import_completion_protocol: 1,
+        metadata_completion_protocol: 4, metadata_detail_protocol: 1}};
     }
     const drawer = vm.$refs?.compareDetailDrawer;
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");
@@ -359,7 +363,14 @@ async function runSACommand(command) {
     };
     if (command.action === "search") {
       const comparison = await showDetail();
-      return {ok: true, data: {row: before, comparison, import_completion_protocol: 1, metadata_completion_protocol: 4}};
+      // Queue reads must not leave the previous paper's drawer blocking the
+      // next exact-ID status check. Keep interactive/manual reads unchanged.
+      // This is the detail just read by this command; the existing lifecycle
+      // guards refuse editors, claim selections, target changes and strangers.
+      if (command.close_detail === true) await closeReadOnlyDetail();
+      return {ok: true, data: {row: before, comparison, import_completion_protocol: 1,
+        metadata_completion_protocol: 4, metadata_detail_protocol: 1,
+        detail_released: command.close_detail === true}};
     }
     if (["prepare_claim", "submit_claim"].includes(command.action)) {
       const submitting = command.action === "submit_claim";
