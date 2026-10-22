@@ -1,11 +1,13 @@
 import copy
+import json
 from dataclasses import replace
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from unittest.mock import Mock, patch
 
-from core import Record, SafetyStop
+from core import Record, SafetyStop, digest
 from metadata_sources import KIND, MetadataClient, MetadataSkip, merge_metadata
 from metadata_pipeline import validate_batch, resolved
 
@@ -101,6 +103,106 @@ class MetadataSourceTests(unittest.TestCase):
             p=folder/'metadata.json'; data=json.loads(p.read_text(encoding='utf-8'));data['candidate']['doi']='10.1234/changed'
             p.write_text(json.dumps(data),encoding='utf-8')
             with self.assertRaises(SafetyStop): client.prepare(r)
+
+    def test_title_presentation_can_differ_but_words_numbers_and_doi_cannot(self):
+        r, cr, oa = example()
+        r = replace(r, title='Synthetic–verified “paper”.')
+        cr['title'] = ['Synthetic-verified <i>"paper"</i>']
+        oa['title'] = 'Synthetic-verified "paper"'
+        self.assertEqual(merge_metadata(r, cr, oa)['title'], 'Synthetic-verified "paper"')
+        for bad in ('Synthetic-verified "papers"', 'Synthetic-verified "paper" II', 'Synthetic unverified paper'):
+            with self.subTest(title=bad), self.assertRaises(MetadataSkip):
+                merge_metadata(replace(r, title=bad), cr, oa)
+
+    def test_title_search_uses_same_presentation_rule_without_taking_first_near_match(self):
+        r, cr, oa = example()
+        r = replace(r, doi='', title='Synthetic verified paper.')
+        with tempfile.TemporaryDirectory() as temp:
+            client = MetadataClient(temp)
+            near = copy.deepcopy(cr); near['title'] = ['Synthetic verified papers']
+            client.get = Mock(side_effect=[{'message': {'items': [near, cr]}}, oa])
+            candidate, _ = client.prepare(r)
+            self.assertEqual(candidate['doi'], cr['DOI'])
+            self.assertEqual(client.get.call_count, 2)
+
+    def test_empty_folder_from_interruption_is_recoverable_without_overwriting_evidence(self):
+        r, cr, oa = example()
+        with tempfile.TemporaryDirectory() as temp:
+            client = MetadataClient(temp)
+            folder = Path(temp) / digest({'record': r.key, 'protocol': KIND})
+            folder.mkdir()
+            client.get = Mock(side_effect=[{'message': cr}, oa])
+            candidate, actual = client.prepare(r)
+            self.assertEqual(actual, folder)
+            self.assertEqual(json.loads((folder/'metadata.json').read_text(encoding='utf-8'))['candidate'], candidate)
+            self.assertEqual(list(folder.glob('.metadata-*.tmp')), [])
+
+    def test_interrupted_archive_never_publishes_partial_json_and_can_be_retried(self):
+        r, cr, oa = example()
+        with tempfile.TemporaryDirectory() as temp:
+            client = MetadataClient(temp); client.get = Mock(side_effect=[{'message': cr}, oa])
+            with patch('metadata_sources.json.dump', side_effect=OSError('disk fixture')):
+                with self.assertRaises(OSError): client.prepare(r)
+            folder = Path(temp) / digest({'record': r.key, 'protocol': KIND})
+            self.assertFalse((folder/'metadata.json').exists())
+            self.assertEqual(list(folder.glob('.metadata-*.tmp')), [])
+            client.get = Mock(side_effect=[{'message': cr}, oa])
+            self.assertTrue(client.prepare(r)[0]['sjtu'])
+
+    def test_corrupt_or_wrong_record_cache_is_preserved_without_network_or_upload(self):
+        r, cr, oa = example()
+        for raw in ('{"candidate":', json.dumps({'record_key': 'wrong'})):
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as temp:
+                client = MetadataClient(temp); client.get = Mock()
+                folder = Path(temp) / digest({'record': r.key, 'protocol': KIND})
+                folder.mkdir(); archive = folder/'metadata.json'; archive.write_text(raw, encoding='utf-8')
+                with self.assertRaisesRegex(SafetyStop, '缓存不完整或校验失败'): client.prepare(r)
+                self.assertEqual(archive.read_text(encoding='utf-8'), raw)
+                client.get.assert_not_called()
+
+    def test_racing_cache_is_revalidated_and_never_overwritten(self):
+        r, cr, oa = example()
+        with tempfile.TemporaryDirectory() as temp:
+            client = MetadataClient(temp); client.get = Mock(side_effect=[{'message': cr}, oa])
+            _, folder = client.prepare(r)
+            before = (folder/'metadata.json').read_bytes()
+            client.publish_cache(folder, {'record_key': 'not-this-paper'})
+            self.assertEqual((folder/'metadata.json').read_bytes(), before)
+            self.assertEqual(client.prepare(r)[0]['doi'], cr['DOI'])
+
+    def test_http_errors_name_service_and_rate_wait_without_becoming_absence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            client = MetadataClient(temp)
+            for status in (401, 403, 429, 500):
+                client.last_request = 0
+                error = HTTPError('https://api.openalex.org/works/test', status, 'SECRET BODY', {'Retry-After': '60'}, None)
+                with patch('metadata_sources.urlopen', side_effect=error), self.assertRaises(SafetyStop) as caught:
+                    client.get('https://api.openalex.org/works/test')
+                self.assertIn('OpenAlex', str(caught.exception))
+                self.assertIn('HTTP '+str(status), str(caught.exception))
+                self.assertNotIn('SECRET BODY', str(caught.exception))
+                if status == 429: self.assertIn('60 秒', str(caught.exception))
+            with patch('metadata_sources.urlopen', side_effect=HTTPError('url', 404, 'missing', {}, None)):
+                client.last_request = 0
+                self.assertIsNone(client.get('https://api.crossref.org/works/test'))
+
+    def test_timeout_explains_actual_service_and_does_not_automatically_retry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            client = MetadataClient(temp)
+            with patch('metadata_sources.urlopen', side_effect=URLError(TimeoutError())) as request:
+                with self.assertRaisesRegex(SafetyStop, 'Crossref 请求超时'):
+                    client.get('https://api.crossref.org/works/test')
+            request.assert_called_once()
+
+    def test_foreign_or_insecure_initial_endpoint_is_rejected_before_request(self):
+        with tempfile.TemporaryDirectory() as temp:
+            client = MetadataClient(temp)
+            for url in ('http://api.crossref.org/works/test', 'https://example.org/works',
+                        'https://api.openalex.org.attacker.invalid/works', 'https://user@api.openalex.org/works'):
+                with self.subTest(url=url), patch('metadata_sources.urlopen') as request:
+                    client.last_request = 0
+                    with self.assertRaises(SafetyStop): client.get(url)
+                    request.assert_not_called()
 
     def test_batch_counts_and_source_must_be_exact(self):
         r, cr, oa=example()

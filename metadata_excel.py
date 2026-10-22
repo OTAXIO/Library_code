@@ -7,6 +7,14 @@ import subprocess
 from core import SafetyStop, file_hash
 
 
+def _build_log(folder, message):
+    from run_diagnostics import safe_text
+    try:
+        (folder / "excel-build.log").write_text(safe_text(message) + "\n", encoding="utf-8")
+    except OSError:
+        pass  # Keep the original build error/result; never replay it for logging.
+
+
 def build_excel(folder, candidate):
     folder = Path(folder).resolve()
     output = folder / "paper.xlsx"
@@ -19,11 +27,16 @@ def build_excel(folder, candidate):
             raise SafetyStop("通用 Excel 生成运行库未配置；请配置 SA_NODE_EXECUTABLE 与 SA_ARTIFACT_NODE_MODULES。")
         try:
             completed = subprocess.run([node, str(Path(__file__).with_suffix('.mjs')), str(folder / "metadata.json"),
-                str(output), str(modules)], capture_output=True, text=True, timeout=90, encoding="utf-8")
-        except (OSError, subprocess.TimeoutExpired):
-            raise SafetyStop("通用 Excel 生成未完成，未上传。") from None
+                str(output), str(modules)], capture_output=True, text=True, timeout=90, encoding="utf-8", errors="replace")
+        except subprocess.TimeoutExpired as exc:
+            _build_log(folder, "Node 生成超过 90 秒：" + str(exc.stderr or ""))
+            raise SafetyStop("通用 Excel 生成超时（90 秒），未上传；诊断保存在同篇目录 excel-build.log。") from None
+        except OSError as exc:
+            _build_log(folder, type(exc).__name__ + ": " + str(exc))
+            raise SafetyStop("通用 Excel 运行库无法启动，未上传；诊断保存在同篇目录 excel-build.log。") from None
+        _build_log(folder, f"exit_code={completed.returncode}\n{completed.stdout}\n{completed.stderr}")
         if completed.returncode or not output.is_file():
-            raise SafetyStop("通用 Excel 生成失败，未上传；请检查表格运行库。")
+            raise SafetyStop("通用 Excel 生成失败，未上传；具体原因保存在同篇目录 excel-build.log。")
     from openpyxl import load_workbook
     book = load_workbook(output, read_only=True, data_only=False)
     try:

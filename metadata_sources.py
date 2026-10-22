@@ -7,13 +7,17 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
+import socket
+import ssl
+import tempfile
 import time
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from core import SafetyStop, digest
@@ -49,6 +53,15 @@ def text(value):
     return value
 
 
+def title_key(value):
+    """Ignore presentation only, never remove/replace words or fuzzy-match titles."""
+    value = norm(text(value)).translate(str.maketrans({
+        "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-", "\u2212": "-",
+        "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
+    }))
+    return re.sub(r"\s*-\s*", "-", value).rstrip(" .")
+
+
 def name_tokens(value):
     return sorted(re.findall(r"[^\W_]+", norm(value), re.UNICODE))
 
@@ -62,7 +75,8 @@ def merge_metadata(record, crossref, openalex):
     if not isinstance(titles, list) or len(titles) != 1 or not cd or cd != od:
         raise MetadataSkip("文献标识不一致")
     title = text(titles[0])
-    if norm(title) != norm(record.title) or norm(openalex.get("title")) != norm(title):
+    if (not title_key(title) or title_key(title) != title_key(record.title)
+            or title_key(openalex.get("title")) != title_key(title)):
         raise MetadataSkip("题名待核验")
     if record.doi and doi(record.doi) != cd:
         raise MetadataSkip("DOI不一致")
@@ -175,15 +189,21 @@ class MetadataClient:
         self.last_request = time.monotonic()
         if self.cancelled():
             raise SafetyStop("已请求暂停。")
+        parsed = urlsplit(url)
+        if (parsed.scheme != "https" or parsed.netloc not in ("api.crossref.org", "api.openalex.org")
+                or parsed.fragment):
+            raise SafetyStop("元数据请求地址不在允许的公开接口内。")
+        service = "Crossref" if parsed.hostname == "api.crossref.org" else "OpenAlex"
         try:
-            request = Request(url, headers={"User-Agent": "SA-Library-Assistant/0.4.32 (metadata verification)",
+            request = Request(url, headers={"User-Agent": "SA-Library-Assistant/0.4.33 (metadata verification)",
                                            "Accept": "application/json"})
             with urlopen(request, timeout=25) as response:
-                if response.url.split('/')[2] not in ("api.crossref.org", "api.openalex.org"):
+                redirected = urlsplit(response.url)
+                if redirected.scheme != "https" or redirected.netloc != parsed.netloc:
                     raise SafetyStop("元数据接口重定向异常。")
                 raw = response.read(4_000_001)
             if len(raw) > 4_000_000:
-                raise SafetyStop("元数据接口响应过大。")
+                raise SafetyStop(f"{service} 接口响应过大。")
             data = json.loads(raw)
             if isinstance(data, str):  # Observed OpenAlex JSON-string envelope.
                 data = json.loads(data)
@@ -193,19 +213,79 @@ class MetadataClient:
         except HTTPError as exc:
             if exc.code == 404:
                 return None
-            raise SafetyStop(f"元数据接口 HTTP {exc.code}；整批暂停，未标记后续任务。") from None
+            hint = ""
+            if exc.code in (401, 403):
+                hint = "访问权限未确认，不是文献未收录。"
+            elif exc.code == 429:
+                hint = "请求限流，请稍后续试；不会自动重复请求。"
+                retry = str(exc.headers.get("Retry-After", "")) if exc.headers else ""
+                if retry.isdigit() and len(retry) <= 6:
+                    hint += f"服务要求至少等待 {retry} 秒。"
+            elif exc.code >= 500:
+                hint = "服务暂时异常，不是文献未收录。"
+            raise SafetyStop(f"{service} 接口 HTTP {exc.code}；{hint}整批暂停，未标记后续任务。") from None
         except (URLError, TimeoutError, OSError, ValueError) as exc:
-            raise SafetyStop(f"元数据接口未确认成功（{type(exc).__name__}），未判为未收录。") from None
+            reason = exc.reason if isinstance(exc, URLError) else exc
+            if isinstance(reason, (TimeoutError, socket.timeout)):
+                hint = "请求超时（25 秒）"
+            elif isinstance(reason, ssl.SSLCertVerificationError):
+                hint = "TLS 证书校验失败（未关闭验证）"
+            elif isinstance(reason, socket.gaierror):
+                hint = "域名解析失败"
+            elif isinstance(exc, ValueError):
+                hint = "响应不是有效的 JSON 对象"
+            else:
+                hint = "连接或响应失败"
+            raise SafetyStop(f"{service} {hint}（{type(exc).__name__}），未判为未收录。") from None
+
+    def read_cache(self, folder, record):
+        archive = folder / "metadata.json"
+        if folder.is_symlink() or archive.is_symlink():
+            raise SafetyStop("元数据缓存包含链接，未读取或替换。")
+        try:
+            cached = json.loads(archive.read_text(encoding="utf-8"))
+            if not isinstance(cached, dict) or cached.get("record_key") != record.key:
+                raise ValueError("record key mismatch")
+            candidate = merge_metadata(record, cached["crossref"], cached["openalex"])
+            if candidate != cached["candidate"]:
+                raise ValueError("candidate mismatch")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise SafetyStop("元数据缓存不完整或校验失败，已保留原文件；未重新上传。") from exc
+        return candidate, folder
+
+    def publish_cache(self, folder, payload):
+        """Atomic, exclusive publication; a crash cannot leave partial JSON."""
+        if folder.is_symlink() or not folder.resolve().is_relative_to(self.root.resolve()):
+            raise SafetyStop("元数据归档目录异常，未保存。")
+        folder.mkdir(exist_ok=True)  # Recover a directory left empty by an interrupted fetch.
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=folder,
+                                             prefix=".metadata-", suffix=".tmp", delete=False) as stream:
+                temporary = Path(stream.name)
+                json.dump(payload, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                if os.name == "nt":
+                    # Windows rename is atomic and fails when the target exists.
+                    # It also works on installations that prohibit hard links.
+                    os.rename(temporary, folder / "metadata.json")
+                else:
+                    os.link(temporary, folder / "metadata.json")
+            except FileExistsError:
+                pass  # prepare() revalidates the winner against this same record below.
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def prepare(self, record):
         key = digest({"record": record.key, "protocol": KIND})
         folder = self.root / key
+        if folder.is_symlink():
+            raise SafetyStop("元数据缓存目录为链接，未读取或替换。")
         if (folder / "metadata.json").exists():
-            cached = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
-            candidate = merge_metadata(record, cached["crossref"], cached["openalex"])
-            if candidate != cached["candidate"]:
-                raise SafetyStop("元数据缓存校验失败，未自动替换。")
-            return candidate, folder
+            return self.read_cache(folder, record)
         identifier = doi(record.doi)
         if identifier:
             response = self.get("https://api.crossref.org/works/" + quote(identifier, safe=""))
@@ -218,7 +298,7 @@ class MetadataClient:
             if not isinstance(rows, list):
                 raise SafetyStop("Crossref 检索响应未确认，未判为零结果。")
             exact = [v for v in rows if isinstance(v, dict) and isinstance(v.get("title"), list)
-                     and len(v["title"]) == 1 and norm(text(v["title"][0])) == norm(record.title)]
+                     and len(v["title"]) == 1 and title_key(v["title"][0]) == title_key(record.title)]
             if len(exact) != 1:
                 raise MetadataSkip("题名未唯一匹配" if exact else "Crossref未查询到")
             cr = exact[0]
@@ -228,10 +308,7 @@ class MetadataClient:
         if oa is None:
             raise MetadataSkip("OpenAlex未查询到")
         candidate = merge_metadata(record, cr, oa)
-        folder.mkdir(exist_ok=False)
         payload = {"record_key": record.key, "fetched_utc": datetime.now(timezone.utc).isoformat(),
                    "crossref": cr, "openalex": oa, "candidate": candidate}
-        # Exclusive private archive. Credentials and cookies are never requested.
-        with (folder / "metadata.json").open("x", encoding="utf-8") as stream:
-            json.dump(payload, stream, ensure_ascii=False, indent=2)
-        return candidate, folder
+        self.publish_cache(folder, payload)
+        return self.read_cache(folder, record)

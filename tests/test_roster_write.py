@@ -1,5 +1,6 @@
 """Synthetic XLSX fixtures only; never change the user's list.xlsx."""
 import tempfile
+import os
 import unittest
 import zipfile
 from pathlib import Path
@@ -351,6 +352,43 @@ class RosterWriteTests(unittest.TestCase):
         roster.assert_unchanged()
         self.assertEqual(list(self.path.parent.glob('.list-write-*')), [])
         self.assertFalse(self.path.with_name('.list.xlsx.assistant.lock').exists())
+
+    def test_transient_windows_sharing_denial_retries_only_the_local_replace(self):
+        roster = read_roster(self.path)
+        actual_replace = os.replace
+        denied = PermissionError('synthetic sharing denial'); denied.winerror = 32
+        calls = []
+        def replace(source, target):
+            calls.append((source, target))
+            if len(calls) == 1: raise denied
+            return actual_replace(source, target)
+        with patch('roster_write.os.replace', side_effect=replace), patch('roster_write.time.sleep'):
+            result = mark_complete(roster, roster.records[0])
+        self.assertTrue(result.roster.records[0].done)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], calls[1])
+
+    def test_original_change_during_sharing_denial_prevents_retry_overwrite(self):
+        roster = read_roster(self.path)
+        denied = PermissionError('synthetic sharing denial'); denied.winerror = 32
+        changed = self.path.read_bytes() + b'external fixture edit'
+        def replace(source, target):
+            self.path.write_bytes(changed)
+            raise denied
+        with patch('roster_write.os.replace', side_effect=replace) as commit, patch('roster_write.time.sleep'):
+            with self.assertRaisesRegex(SafetyStop, '名单文件已改变'):
+                mark_complete(roster, roster.records[0])
+        commit.assert_called_once()
+        self.assertEqual(self.path.read_bytes(), changed)
+
+    def test_persistent_windows_denial_is_bounded_and_keeps_original(self):
+        roster = read_roster(self.path)
+        denied = PermissionError('synthetic sharing denial'); denied.winerror = 5
+        with patch('roster_write.os.replace', side_effect=denied) as commit, patch('roster_write.time.sleep'):
+            with self.assertRaises(SafetyStop): mark_complete(roster, roster.records[0])
+        self.assertEqual(commit.call_count, 3)
+        roster.assert_unchanged()
+        self.assertEqual(list(self.path.parent.glob('.list-write-*')), [])
 
     def test_backup_failure_leaves_original(self):
         roster = read_roster(self.path)

@@ -20,6 +20,10 @@ class TaskResult:
     roster: object
     messages: dict
     summary: str
+    halted: bool = False
+    reason: str = ""
+    cancelled: bool = False
+    report_path: str = ""
 
 
 def supported_claim(record):
@@ -126,6 +130,10 @@ class WorkflowService:
         return TaskResult(saved.roster, {record.sa_id: text}, text)
 
     def locate_import(self, roster, record, owner, scope, bridge, stop, progress):
+        return self._diagnosed("wos-locate", scope, [record], bridge, progress,
+            lambda observed, updates: self._locate_import(roster, record, owner, scope, observed, stop, updates))
+
+    def _locate_import(self, roster, record, owner, scope, bridge, stop, progress):
         if self.select_manual(roster, owner, scope, record.sa_id) != record:
             raise SafetyStop("所选论文与当前名单不一致，未定位。")
         if not bridge or not bridge.online or stop.is_set():
@@ -138,7 +146,7 @@ class WorkflowService:
         verify_sa(record, row)
         if row["markStatus"] != "待处理" or match_count(row) != 0:
             # Reuse exact existing-match/processed-row sync, never locate WOS.
-            return self.run(roster, [record], "import", scope, bridge, stop, progress, manual_export=True)
+            return self._run(roster, [record], "import", scope, bridge, stop, progress, manual_export=True)
         imports = ImportStore(self.base / "runtime" / "wos-imports")
         if imports.get(record):
             text = "此篇已有入库断点。请点“接回 TXT 并入库”只读续验；不重新导出或重复上传。"
@@ -158,7 +166,7 @@ class WorkflowService:
             current = bridge.call("status", {"sa_id": record.sa_id}, timeout=75).get("row")
             verify_sa(record, current)
             if current["markStatus"] != "待处理" or match_count(current) != 0:
-                return self.run(roster, [record], "import", scope, bridge, stop, progress, manual_export=True)
+                return self._run(roster, [record], "import", scope, bridge, stop, progress, manual_export=True)
             if stop.is_set():
                 raise SafetyStop("已请求暂停；未标记跳过或提交入库。") from exc
             short = brief_skip_note(note)
@@ -170,6 +178,32 @@ class WorkflowService:
         return TaskResult(roster, {record.sa_id: text}, text)
 
     def run(self, roster, records, mode, scope, bridge, stop, progress, *, manual_export=False, metadata_import=False):
+        records = list(records)
+        workflow = ("metadata-import" if metadata_import else "wos-manual-import" if manual_export else
+                    "wos-import" if mode == "import" else mode)
+        return self._diagnosed(workflow, scope, records, bridge, progress,
+            lambda observed, updates: self._run(roster, records, mode, scope, observed, stop, updates,
+                manual_export=manual_export, metadata_import=metadata_import))
+
+    def _diagnosed(self, workflow, scope, records, bridge, progress, execute):
+        from run_diagnostics import RunDiagnostics, TracedBridge
+        diagnostic = RunDiagnostics(self.base, workflow, scope, records, self.operation_log, progress, bridge)
+        self.last_report_path = ""
+        try:
+            result = execute(TracedBridge(bridge, diagnostic) if bridge is not None else None, diagnostic.progress)
+        except Exception as exc:
+            diagnostic.failed(exc)
+            if diagnostic.saved:
+                self.last_report_path = str(diagnostic.path)
+            raise
+        diagnostic.finish(result)
+        if diagnostic.saved:
+            result.report_path = self.last_report_path = str(diagnostic.path)
+            if result.halted:
+                result.summary += "\n诊断：runtime/run-reports/" + diagnostic.path.name
+        return result
+
+    def _run(self, roster, records, mode, scope, bridge, stop, progress, *, manual_export=False, metadata_import=False):
         if type(metadata_import) is not bool or metadata_import and (mode != "import" or manual_export):
             raise SafetyStop("跨来源 Excel 模式仅用于零匹配导入，不能与 WOS 手动模式混用。")
         if type(manual_export) is not bool or manual_export and (mode != "import" or len(records) != 1):
@@ -219,4 +253,5 @@ class WorkflowService:
             skipped = sum(e["status"] == "skip" for e in result.outcomes)
             summary = f"完成 {completed} · 原已处理 {synced} · 跳过 {skipped} · 未执行/待续验 {result.remaining}。"
             summary += result.reason or "本轮结束，网页与名单已同步。"
-        return TaskResult(result.roster, messages, summary)
+        return TaskResult(result.roster, messages, summary, halted=bool(result.halted),
+                          reason=getattr(result, "reason", ""), cancelled=bool(getattr(result, "cancelled", False)))

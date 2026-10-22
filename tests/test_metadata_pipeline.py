@@ -169,6 +169,29 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.backend.calls,['status'])
         self.client.get.assert_not_called()
 
+    def test_boolean_protocol_is_not_a_version_number(self):
+        original = self.backend.call
+        def call(action, payload, timeout=90):
+            answer = original(action, payload, timeout)
+            if action == 'status': answer['metadata_detail_protocol'] = True
+            return answer
+        self.backend.call = call
+        result = self.run_once()
+        self.assertTrue(result.halted)
+        self.assertEqual(self.backend.calls, ['status'])
+        self.client.get.assert_not_called()
+
+    def test_boolean_excel_protocol_cannot_start_upload(self):
+        original = self.backend.call
+        def call(action, payload, timeout=90):
+            answer = original(action, payload, timeout)
+            if action == 'import_excel_probe': answer['metadata_excel_protocol'] = True
+            return answer
+        self.backend.call = call
+        result = self.run_once()
+        self.assertTrue(result.halted)
+        self.assertNotIn('import_excel_upload', self.backend.calls)
+
     def test_unconfirmed_detail_release_never_claims_or_completes(self):
         original=self.backend.call
         def call(action,payload,timeout=90):

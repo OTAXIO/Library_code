@@ -63,7 +63,7 @@ class ServiceTests(unittest.TestCase):
                                  skipped={}, halted=False, cancelled=False)
         with patch("workflow_service.run_claim_batch", return_value=result) as run:
             saved = self.service.run(self.roster, selected, "claim", "pending", bridge, threading.Event(), Mock())
-        self.assertIs(run.call_args.args[2], bridge)
+        self.assertIs(run.call_args.args[2].transport, bridge)
         self.assertIn("完成 1", saved.summary)
 
     def test_offline_or_tampered_queue_cannot_dispatch(self):

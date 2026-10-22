@@ -16,7 +16,7 @@ from ui_theme import P, install_theme, style_text
 from workflow_service import WorkflowService
 
 BASE = Path(__file__).resolve().parent
-VERSION = "0.4.32"
+VERSION = "0.4.33"
 SA_URL = "http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list"
 SCOPES = {"待处理": "pending", "重试跳过项": "skipped", "已完成": "done"}
 
@@ -293,7 +293,14 @@ class App:
                                                  {"metadata_import": True} if metadata else {}))
                 self.events.put(("result", result))
             except Exception as exc:
-                text = str(exc) if isinstance(exc, SafetyStop) else f"操作异常（{type(exc).__name__}）；请核验网页，不重复提交。"
+                from run_diagnostics import safe_text
+                token = getattr(bridge, "token", "")
+                text = safe_text(exc, (token,) if isinstance(token, str) else ())
+                if not isinstance(exc, SafetyStop):
+                    text = f"操作异常（{type(exc).__name__}）：{text}；请核验网页，不重复提交。"
+                report = getattr(self.service, "last_report_path", "")
+                if isinstance(report, str) and report:
+                    text += "\n诊断：runtime/run-reports/" + Path(report).name
                 self.events.put(("error", text))
         threading.Thread(target=work, daemon=True).start()
 
@@ -352,8 +359,9 @@ class App:
         frame = ttk.Frame(window, padding=16)
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="1. 在 SA 比对结果页打开扩展，粘贴配对码并连接。\n"
-                  "2. 自动导入另需绑定 WOS 文献页和后台导入页。\n"
-                  "三个网页保持打开。认领只需要第一步。", wraplength=425).pack(anchor="w", pady=(0, 12))
+                  "2. Excel 导入：另绑定后台导入页，不需要 WOS。\n"
+                  "3. WOS 导入：另绑定 WOS 页和后台导入页。\n"
+                  "保留所需工作页；认领只需要第一步。", wraplength=425).pack(anchor="w", pady=(0, 12))
         token = tk.StringVar(value=self.bridge.token)
         token_entry = ttk.Entry(frame, textvariable=token, state="readonly")
         token_entry.pack(fill="x")

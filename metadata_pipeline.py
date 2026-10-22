@@ -201,7 +201,7 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                     # Retire ONLY that exact record, without uploading, claiming,
                     # closing the SA task or rewriting its skip/note.
                     fresh = call("status", {})
-                    if fresh.get("metadata_detail_protocol") != 1:
+                    if type(fresh.get("metadata_detail_protocol")) is not int or fresh["metadata_detail_protocol"] != 1:
                         raise SafetyStop("请重载 0.4.31 扩展后续验；旧版只读窗口未自动丢弃。")
                     verify_sa(record, fresh.get("row"))
                     verify_import_match(fresh["row"], state)
@@ -244,7 +244,8 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                 continue
             verify_sa(record, row)
             verify_import_match(row, state)
-            if fresh.get("metadata_completion_protocol") != 4 or fresh.get("metadata_detail_protocol") != 1:
+            if (type(fresh.get("metadata_completion_protocol")) is not int or fresh["metadata_completion_protocol"] != 4
+                    or type(fresh.get("metadata_detail_protocol")) is not int or fresh["metadata_detail_protocol"] != 1):
                 raise SafetyStop("请重载 0.4.31 扩展并重新绑定 SA 和导入页；旧协议未执行上传或重提。")
             if not state:
                 try:
@@ -292,7 +293,9 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                 if model_name not in ("期刊论文", "会议论文"):
                     raise SafetyStop("元数据模型未知，未上传。")
                 probe = call("import_excel_probe", {"model_name": model_name})
-                if probe.get("metadata_excel_protocol") != 1 or probe.get("source") != "人工提交" or not probe.get("model_id"):
+                if (type(probe.get("metadata_excel_protocol")) is not int or probe["metadata_excel_protocol"] != 1
+                        or probe.get("source") != "人工提交" or not isinstance(probe.get("model_id"), str)
+                        or not probe["model_id"].strip()):
                     raise SafetyStop("通用 Excel 导入协议未确认。")
                 state["model_id"] = probe["model_id"]
                 if probe.get("model_name", model_name) != model_name:

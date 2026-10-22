@@ -40,6 +40,14 @@ class OperationLogTests(unittest.TestCase):
             self.log.record("定位", "已执行")
         self.assertEqual(self.path.read_text(encoding="utf-8"), "old unparseable evidence")
 
+    def test_details_are_optional_and_retention_still_counts_operations(self):
+        for index in range(102):
+            self.log.record("status", "已暂停", "fixture", detail="reason\n" + str(index), run_id="fixture-run")
+        entries = self.log.read()
+        self.assertEqual(len(entries), 100)
+        self.assertEqual(entries[0]["detail"], "reason\n2")
+        self.assertEqual(entries[-1]["run_id"], "fixture-run")
+
     def test_failed_replace_preserves_previous_log(self):
         self.log.record("定位", "已执行")
         previous = self.path.read_bytes()

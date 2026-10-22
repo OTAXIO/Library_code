@@ -132,11 +132,16 @@ def verify_sa(record, row, facts=True):
         raise SafetyStop("后台 SA 编号不一致。")
     if row.get("markStatus") not in ("待处理", "已处理"):
         raise SafetyStop("后台处理状态未知。")
-    if facts and (norm(row.get("titleValue")) != norm(record.title) or
-            "doiValue" not in row or doi(row["doiValue"]) != doi(record.doi) or
-            "wosValue" not in row or wos(row["wosValue"]) != wos(record.wos) or
-            record.staff_id and row.get("gh") != record.staff_id):
-        raise SafetyStop("后台 SA 题名、标识或人员编号与名单不一致。")
+    if facts:
+        different = []
+        for label, differs in (("题名", norm(row.get("titleValue")) != norm(record.title)),
+                ("DOI", "doiValue" not in row or doi(row["doiValue"]) != doi(record.doi)),
+                ("WOS号", "wosValue" not in row or wos(row["wosValue"]) != wos(record.wos)),
+                ("人员编号", bool(record.staff_id) and row.get("gh") != record.staff_id)):
+            if differs:
+                different.append(label)
+        if different:
+            raise SafetyStop("后台 SA 与名单不一致：" + "、".join(different) + "。未继续导入或修改。")
 
 
 def resolved_item(answer, candidate):

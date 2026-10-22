@@ -11,6 +11,7 @@ import copy
 import posixpath
 import re
 import tempfile
+import time
 import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -68,6 +69,29 @@ def write_lock(path):
         yield
     finally:
         lock.unlink(missing_ok=True)
+
+
+def _commit_verified(temporary, roster, verified_sha256):
+    """Retry only a denied local atomic rename, never a browser write.
+
+Windows scanners/readers can briefly deny replacement. Each bounded attempt
+rechecks BOTH files and the Excel lock; changed originals must never be replaced.
+"""
+    for attempt, delay in enumerate((0, 0.05, 0.15)):
+        if delay:
+            time.sleep(delay)
+        roster.assert_unchanged()
+        if roster.path.with_name("~$" + roster.path.name).exists():
+            raise SafetyStop("Excel 已打开名单，未提交回写；请保存关闭后重读。")
+        if (temporary.parent.resolve() != roster.path.parent.resolve() or temporary.is_symlink()
+                or file_hash(temporary) != verified_sha256):
+            raise SafetyStop("已核验的临时名单发生变化，原名单未修改。")
+        try:
+            os.replace(temporary, roster.path)
+            return
+        except PermissionError as exc:
+            if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 2:
+                raise
 
 
 def worksheet_member(archive, name):
@@ -323,7 +347,7 @@ def record_data_sources(roster, records=(), source="WOS", backup_dir=None):
                 raise SafetyStop("名单又被 Excel 打开，暂停回写。")
             with temporary.open("rb+") as stream:
                 os.fsync(stream.fileno())
-            os.replace(temporary, path)
+            _commit_verified(temporary, roster, verified.sha256)
             temporary = None
             verified.path = path
             verified.mtime_ns = path.stat().st_mtime_ns
@@ -426,7 +450,7 @@ def _mark_values(roster, updates, backup_dir=None, notes=None, *, preserve_notes
                 raise SafetyStop("名单又被 Excel 打开，暂停回写。")
             with temporary.open("rb+") as stream:
                 os.fsync(stream.fileno())
-            os.replace(temporary, path)
+            _commit_verified(temporary, roster, verified.sha256)
             temporary = None
             verified.path = path
             verified.mtime_ns = path.stat().st_mtime_ns
@@ -503,7 +527,7 @@ def migrate_status_column(roster):
                 raise SafetyStop('名单已被 Excel 打开，迁移未提交。')
             with temporary.open('rb+') as stream:
                 os.fsync(stream.fileno())
-            os.replace(temporary,path)
+            _commit_verified(temporary, roster, verified.sha256)
             temporary=None
             return read_roster(path)
     except PermissionError as exc:

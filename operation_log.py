@@ -29,11 +29,19 @@ class OperationLog:
             raise ValueError("log.txt 格式不兼容，已保留原文件。")
         return data["operations"]
 
-    def record(self, action, result, sa_id=""):
+    def record(self, action, result, sa_id="", *, detail="", run_id=""):
         if not isinstance(action, str) or not action.strip() or result not in {"已执行", "已跳过", "已暂停"}:
             raise ValueError("操作日志字段无效。")
         entry = {"time": datetime.now().astimezone().isoformat(timespec="seconds"),
                  "action": action.strip(), "sa_id": str(sa_id or ""), "result": result}
+        if detail:
+            if not isinstance(detail, str):
+                raise ValueError("操作日志说明须为文本。")
+            entry["detail"] = detail[:2000]
+        if run_id:
+            if not isinstance(run_id, str):
+                raise ValueError("运行编号须为文本。")
+            entry["run_id"] = run_id[:100]
         with self.lock:
             entries = (self.read() + [entry])[-self.LIMIT:]
             self.path.parent.mkdir(parents=True, exist_ok=True)
