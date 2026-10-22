@@ -252,6 +252,19 @@ class WorkflowService:
             synced = sum(e["status"] == "synced" for e in result.outcomes)
             skipped = sum(e["status"] == "skip" for e in result.outcomes)
             summary = f"完成 {completed} · 原已处理 {synced} · 跳过 {skipped} · 未执行/待续验 {result.remaining}。"
-            summary += result.reason or "本轮结束，网页与名单已同步。"
+            if result.reason:
+                summary += result.reason
+            elif skipped:
+                reasons = {}
+                for item in result.outcomes:
+                    if item["status"] == "skip":
+                        note = str(item["message"])
+                        reasons[note] = reasons.get(note, 0) + 1
+                shown = "；".join(f"{note[:100]}（{count}条）" for note, count in list(reasons.items())[:3])
+                summary += "本轮结束。跳过原因：" + shown
+                if len(reasons) > 3:
+                    summary += "；其余见逐条结果和诊断。"
+            else:
+                summary += "本轮结束；完成记录已核验并回写名单。"
         return TaskResult(result.roster, messages, summary, halted=bool(result.halted),
                           reason=getattr(result, "reason", ""), cancelled=bool(getattr(result, "cancelled", False)))

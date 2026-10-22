@@ -1,5 +1,6 @@
 """Copy the local pairing code; never log or persist authentication secrets."""
 import sys
+import time
 
 
 def copy_pairing_code(window, value):
@@ -47,8 +48,13 @@ def copy_pairing_code(window, value):
             ctypes.memmove(pointer, content, len(content))
         finally:
             kernel.GlobalUnlock(handle)
-        if not user.OpenClipboard(window.winfo_id()):
-            raise ctypes.WinError(ctypes.get_last_error())
+        for attempt in range(5):
+            if user.OpenClipboard(window.winfo_id()):
+                break
+            error = ctypes.get_last_error()
+            if error != 5 or attempt == 4:
+                raise ctypes.WinError(error)
+            time.sleep(0.04)  # Only acquiring the clipboard; never retry a transfer.
         opened = True
         if not user.EmptyClipboard() or not user.SetClipboardData(13, handle):
             raise ctypes.WinError(ctypes.get_last_error())

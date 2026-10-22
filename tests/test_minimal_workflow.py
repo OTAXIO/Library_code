@@ -66,6 +66,18 @@ class ServiceTests(unittest.TestCase):
         self.assertIs(run.call_args.args[2].transport, bridge)
         self.assertIn("完成 1", saved.summary)
 
+    def test_skip_only_import_explains_reason_without_claiming_website_sync(self):
+        bridge = Mock(online=True)
+        selected = self.service.select(self.roster, "import", "谭勋策", 1, "pending")
+        result = SimpleNamespace(roster=self.roster, remaining=0, halted=False, reason='',
+            outcomes=[{'sa_id': selected[0].sa_id, 'status': 'skip', 'message': '未确认交大署名'}])
+        with patch('metadata_pipeline.run_metadata_batch', return_value=result):
+            saved = self.service.run(self.roster, selected, 'import', 'pending', bridge,
+                                     threading.Event(), Mock(), metadata_import=True)
+        self.assertIn('跳过原因：未确认交大署名', saved.summary)
+        self.assertNotIn('网页与名单已同步', saved.summary)
+        self.assertIn('完成 0', saved.summary)
+
     def test_offline_or_tampered_queue_cannot_dispatch(self):
         for selected, online in (([self.roster.records[5]], True), ([self.roster.records[0]], False)):
             with patch("workflow_service.run_claim_batch") as run, self.assertRaises(SafetyStop):

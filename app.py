@@ -373,10 +373,12 @@ class App:
         def copy():
             try:
                 copy_pairing_code(window, token.get())
-            except Exception:
+            except Exception as exc:
+                from run_diagnostics import safe_text
                 token_entry.focus_set()
                 select_token()
-                self.status.set("剪贴板暂不可用，配对码已全选；未假报复制成功。")
+                detail = safe_text(exc, (token.get(),))
+                self.status.set("复制失败：" + detail + "。若为拒绝访问，请从正常桌面启动助手；不要反复配对。")
                 return
             self.status.set("配对码已复制，请在 SA 比对页扩展中粘贴。")
         def reset():

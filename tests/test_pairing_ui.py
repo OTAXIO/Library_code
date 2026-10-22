@@ -20,7 +20,8 @@ class PairingCopyTests(unittest.TestCase):
         with patch("pairing_ui.sys.platform", "win32"), patch("ctypes.WinDLL", create=True,
                 side_effect=[self.user, self.kernel]), patch("ctypes.memmove") as memory, \
                 patch("ctypes.get_last_error", create=True, return_value=5), \
-                patch("ctypes.WinError", create=True, side_effect=lambda _: OSError("synthetic clipboard failure")):
+                patch("ctypes.WinError", create=True, side_effect=lambda _: OSError("synthetic clipboard failure")), \
+                patch("pairing_ui.time.sleep"):
             copy_pairing_code(self.window, "synthetic-local-code")
         return memory
 
@@ -42,6 +43,15 @@ class PairingCopyTests(unittest.TestCase):
         self.user.EmptyClipboard.assert_not_called()
         self.user.CloseClipboard.assert_not_called()
         self.kernel.GlobalFree.assert_called_once_with(456)
+        self.assertEqual(self.user.OpenClipboard.call_count, 5)
+
+    def test_busy_acquisition_can_recover_but_unicode_transfer_occurs_once(self):
+        self.user.OpenClipboard.side_effect = [0, 0, 1]
+        self.invoke()
+        self.assertEqual(self.user.OpenClipboard.call_count, 3)
+        self.user.EmptyClipboard.assert_called_once()
+        self.user.SetClipboardData.assert_called_once_with(13, 456)
+        self.user.CloseClipboard.assert_called_once()
 
     def test_transfer_failure_never_reports_success_or_leaks_buffer(self):
         self.user.SetClipboardData.return_value = 0
