@@ -11,14 +11,16 @@ import re
 from pathlib import Path
 
 from approval import verify_claim_result
+from automation import wos
 from claim import sa_claim_source
 from claim_batch import automatic_claim_selection
 from core import SafetyStop, digest, file_hash
 from metadata_excel import build_excel
-from metadata_sources import KIND, SOURCE, MetadataClient, MetadataSkip, doi, norm
+from metadata_identity import title_key
+from metadata_sources import KIND, SOURCE, MetadataClient, MetadataSkip, doi
 from roster_write import mark_skipped_many, mark_skipped_without_note, reconcile_processed, record_data_sources
 from wos_policy import NonZeroMatchSkip, require_no_author_review
-from zero_match import OWNER, BatchResult, WorkflowStore, verify_import_match, verify_paper_comparison, verify_sa
+from zero_match import OWNER, BatchResult, WorkflowStore, library_items, verify_import_match, verify_sa
 
 
 class MetadataReview(MetadataSkip):
@@ -29,8 +31,12 @@ class MetadataDuplicateReview(MetadataSkip):
     """An exact, fully counted pushed duplicate; never a new admission or closure."""
 
 
-def claim_state(comparison, record):
+def claim_state(comparison, record, reason=None):
     """Read explicit site role flags; never assign/infer an author or unit role."""
+    if not isinstance(comparison, list) or any(not isinstance(row, dict) for row in comparison):
+        raise SafetyStop("已入库，作者详情结构待核验；未自动更改。")
+    if reason is not None and not isinstance(reason, str):
+        raise SafetyStop("已入库，作者待处理原因结构待核验；未自动更改。")
     def field(label, side):
         rows = [row for row in comparison if row.get("label") == label]
         if len(rows) != 1 or not isinstance(rows[0].get(side), str):
@@ -39,10 +45,20 @@ def claim_state(comparison, record):
     _, staff = sa_claim_source(comparison)
     if not record.staff_id or staff != record.staff_id:
         raise SafetyStop("已入库，作者编号待核验。")
+    # Legacy author details expose a staff number; do not ignore a conflicting
+    # number just because role flags agree. The modern role card intentionally
+    # has no staff field, so its absence is not invented into a disagreement.
+    authors = [field("作者信息", side) for side in ("sa", "library")]
+    for author in authors:
+        labels = re.findall(r"工号\s*[：:]", author)
+        if labels and (len(labels) != 1 or
+                re.findall(r"工号\s*[：:]\s*([0-9]+)(?=\s|$)", author) != [staff]):
+            raise SafetyStop("已入库，作者详情人员编号不唯一或不一致；未自动更改。")
     for label in ("是否第一作者", "是否通讯作者"):
-        flags = [re.findall(re.escape(label) + r"\s*[：:]\s*([是否])(?=\s|$)", field("作者信息", side))
-                 for side in ("sa", "library")]
-        if any(len(value) != 1 for value in flags):
+        flag_label = re.escape(label) + r"\s*[：:]"
+        flags = [re.findall(flag_label + r"\s*([是否])(?=\s|$)", author) for author in authors]
+        if (any(len(value) != 1 for value in flags) or
+                any(len(re.findall(flag_label, author)) != 1 for author in authors)):
             raise SafetyStop("已入库，作者角色结构待核验；未自动更改。")
         if flags[0] != flags[1]:
             raise MetadataReview(label.removeprefix("是否") + "待核验")
@@ -54,6 +70,17 @@ def claim_state(comparison, record):
     state = field("认领状态", "library")
     if state not in ("已认领", "未认领", "无人认领", "未被认领"):
         raise SafetyStop("已入库，认领状态待核验。")
+    # A cached reason can outlive linking/claiming. Only these exact two-role
+    # reasons are resolved by the explicit, person-bound comparison above.
+    # Co-first authorship, order and institutional issues remain review-only.
+    resolved_reasons = {"第一作者不一致", "是否第一作者不一致", "通讯作者不一致",
+                        "是否通讯作者不一致", "通信作者不一致"}
+    remaining = ";".join(part.strip() for part in re.split(r"[;；]", reason or "")
+                         if part.strip() not in resolved_reasons)
+    try:
+        require_no_author_review(remaining)
+    except SafetyStop:
+        raise MetadataReview("作者角色待核验") from None
     return state == "已认领"
 
 
@@ -98,20 +125,47 @@ def verified_pushed_duplicate(batch, record, previous, *, model_id):
     return str(batch["increase"]) == "0" and sum(int(batch[key]) for key in keys[1:]) == 1
 
 
+def _verified_title_key(value):
+    """Malformed native/archive evidence is a pause, not a per-paper skip."""
+    try:
+        return title_key(value)
+    except MetadataSkip:
+        raise SafetyStop("题名结构待核验；未修改完成或跳过状态。") from None
+
+
 def resolved(answer, candidate):
-    if not isinstance(answer, dict) or answer.get("verified") is not True or not isinstance(answer.get("items"), list):
-        raise SafetyStop("本库只读检索未确认成功。")
-    items = answer["items"]
+    items = library_items(answer)
     if len(items) > 1:
         raise MetadataSkip("本库多条待核验")
     if not items:
         return None
     item = items[0]
     if (not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].isdigit()
-            or len(item["id"]) > 40 or norm(item.get("title")) != norm(candidate["title"])
+            or len(item["id"]) > 40 or _verified_title_key(item.get("title")) != _verified_title_key(candidate["title"])
             or doi(item.get("doi")) != candidate["doi"]):
         raise SafetyStop("本库 DOI/题名/平台号与元数据不一致。")
     return item
+
+
+def verify_metadata_comparison(comparison, candidate, record):
+    """Use the same presentation-only title identity as metadata discovery.
+
+    WOS keeps its independent comparison rules. The original comparison is
+    never rewritten, and every identifier and title word must still agree.
+    """
+    if not isinstance(comparison, list):
+        raise SafetyStop("缺少关联后的比对详情。")
+    for label, expected, source, normalizer in (
+            ("题名", candidate["title"], record.title, _verified_title_key),
+            ("DOI", candidate["doi"], record.doi, doi),
+            ("WOS记录号", candidate["wos"], record.wos, wos)):
+        fields = [field for field in comparison if isinstance(field, dict) and field.get("label") == label]
+        if (len(fields) != 1 or not isinstance(fields[0].get("library"), str)
+                or normalizer(fields[0]["library"]) != normalizer(expected)):
+            raise SafetyStop("关联后的本库详情未确认：" + label)
+        if (not isinstance(fields[0].get("sa"), str)
+                or normalizer(fields[0]["sa"]) != normalizer(source)):
+            raise SafetyStop("关联后的 SA 详情与名单不一致：" + label)
 
 
 def check_cross_workflow(base, record):
@@ -214,7 +268,7 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                     verify_import_match(released["row"], state)
                     if str(released["row"].get("matchCount")) != "1":
                         raise SafetyStop("收起只读详情时原关联改变，未继续后续任务。")
-                    verify_paper_comparison(released.get("comparison"), state["candidate"], record)
+                    verify_metadata_comparison(released.get("comparison"), state["candidate"], record)
                 result.outcomes.append({"sa_id": record.sa_id, "status": "already_skipped", "message": "已跳过或完成，未重复执行"})
                 result.remaining -= 1
                 continue
@@ -249,11 +303,18 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
             if (type(fresh.get("metadata_completion_protocol")) is not int or fresh["metadata_completion_protocol"] != 4
                     or type(fresh.get("metadata_detail_protocol")) is not int or fresh["metadata_detail_protocol"] != 1):
                 raise SafetyStop("请重载 0.4.31 扩展并重新绑定 SA 和导入页；旧协议未执行上传或重提。")
-            if not state:
+            # A prepared archive is not a permission to ignore changes in the
+            # live task. Recheck role issues before the first external write
+            # on every resume; already-written intents use their own readback.
+            if state.get("phase") in (None, "prepared"):
+                if any(value is not None and not isinstance(value, str)
+                       for value in (record.reason, row.get("reason"))):
+                    raise SafetyStop("后台待处理原因结构待核验，未上传或修改跳过状态。")
                 try:
                     require_no_author_review(record.reason, row.get("reason"))
                 except SafetyStop:
                     raise MetadataSkip("作者角色待核验") from None
+            if not state:
                 progress(f"核验 Crossref 与 OpenAlex · {record.title}")
                 candidate, folder = client.prepare(record)
                 checkpoint()
@@ -398,16 +459,12 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
             row = fresh.get("row"); verify_sa(record, row)
             if str(row.get("matchCount")) != "1" or str(row.get("itemId", "")).lstrip(',') != item["id"]:
                 raise SafetyStop("关联未回读为本条唯一平台号。")
-            verify_paper_comparison(fresh.get("comparison"), candidate, record)
+            verify_metadata_comparison(fresh.get("comparison"), candidate, record)
             # Linking a newly imported paper changes a zero-match task into an
             # author-mismatch task. Import success alone must not close it.
             if state["phase"] == "claim_intent":
                 raise SafetyStop("上次作者认领回执未确认；保留入库断点，不重复认领或直接结案。")
-            try:
-                require_no_author_review(row.get("reason"))
-            except SafetyStop:
-                raise MetadataReview("作者角色待核验") from None
-            claimed = claim_state(fresh["comparison"], record)
+            claimed = claim_state(fresh["comparison"], record, row.get("reason"))
             if not claimed:
                 if state["phase"] in ("claimed", "complete_intent", "done"):
                     raise SafetyStop("已认领断点与网页不一致，未重复认领。")
@@ -422,14 +479,10 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                 fresh = call("search", {})
                 row = fresh.get("row"); verify_sa(record, row)
                 verify_import_match(row, state)
-                verify_paper_comparison(fresh.get("comparison"), candidate, record)
+                verify_metadata_comparison(fresh.get("comparison"), candidate, record)
                 if str(row.get("matchCount")) != "1" or str(row.get("itemId", "")).lstrip(',') != item["id"]:
                     raise SafetyStop("认领后平台关联改变，未结案。")
-                try:
-                    require_no_author_review(row.get("reason"))
-                except SafetyStop:
-                    raise MetadataReview("作者角色待核验") from None
-                if not claim_state(fresh["comparison"], record):
+                if not claim_state(fresh["comparison"], record, row.get("reason")):
                     raise SafetyStop("作者认领未回读成功，未结案。")
             if row.get("markStatus") not in ("待处理", "已处理") or row.get("remark", "") not in ("", "已入库"):
                 raise SafetyStop("结案前状态或人工备注改变，未覆盖。")

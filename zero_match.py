@@ -144,10 +144,18 @@ def verify_sa(record, row, facts=True):
             raise SafetyStop("后台 SA 与名单不一致：" + "、".join(different) + "。未继续导入或修改。")
 
 
-def resolved_item(answer, candidate):
+def library_items(answer):
+    """Only invocation-owned native reads can prove library absence."""
+    if (not isinstance(answer, dict) or type(answer.get("library_resolution_protocol")) is not int
+            or answer["library_resolution_protocol"] != 2):
+        raise SafetyStop("请重载 0.4.36 扩展：旧版查重不能排除页面初始化竞态，未上传。")
     if not isinstance(answer, dict) or answer.get("verified") is not True or not isinstance(answer.get("items"), list):
         raise SafetyStop("未取得完整的本库只读检索证据。")
-    items = answer["items"]
+    return answer["items"]
+
+
+def resolved_item(answer, candidate):
+    items = library_items(answer)
     if len(items) > 1:
         raise SafetyStop("本库同一文献存在多个平台条目，先人工合并；不自动选择。")
     if not items:
@@ -346,6 +354,67 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
         workflow.save(record, {**state, "phase": "done"})
         record_operation("已入库网页结案及名单回写", "已执行", record.sa_id)
 
+    def verify_owned_processed(record, row, state, import_state):
+        """An active journal cannot be satisfied by somebody else's closure."""
+        phase = state.get("phase")
+        if phase not in ("complete_intent", "done", "non_sjtu_complete_intent", "non_sjtu_done"):
+            raise SafetyStop("此条存在未确认的上传、关联或认领断点，但后台已处理；须只读核验原操作，名单未标完成。")
+        verify_sa(record, row)
+        candidate = state.get("candidate")
+        if not isinstance(candidate, dict):
+            raise SafetyStop("上次结案缺少原始文献证据，名单未标完成。")
+        if phase in ("non_sjtu_complete_intent", "non_sjtu_done"):
+            if (import_state or state.get("note") != "非交大" or row.get("remark") != "非交大"
+                    or str(row.get("matchCount")) != "0" or str(row.get("itemId", "")).lstrip(",")):
+                raise SafetyStop("非交大结案回读与原意图不一致，未覆盖名单或重复提交。")
+            download.store.bytes(state)
+            try:
+                identity(record, candidate)
+            except WOSPolicyStop as exc:
+                if exc.note != "非交大":
+                    raise SafetyStop("非交大原始证据不能确认，名单未标完成。") from exc
+            else:
+                raise SafetyStop("非交大原始证据不能确认，名单未标完成。")
+            return row, "non_sjtu_done"
+        note, item_id = state.get("note"), state.get("item_id")
+        if (not isinstance(note, str) or not note or row.get("remark") != note
+                or not isinstance(item_id, str) or not re.fullmatch(r"\d{1,40}", item_id)
+                or str(row.get("matchCount")) != "1"
+                or str(row.get("itemId", "")).lstrip(",") != item_id):
+            raise SafetyStop("上次结案的备注、匹配或平台号回读不一致，名单未标完成；不重复提交。")
+        imports.bytes(state)
+        if import_state:
+            if (import_state.get("phase") != "pushed" or import_state.get("candidate") != candidate
+                    or note != COMPLETION_NOTE):
+                raise SafetyStop("上次结案的入库批次未确认推送完成，名单未标完成。")
+            batch_id = (import_state.get("batch") or {}).get("id")
+            if not isinstance(batch_id, str) or not batch_id:
+                raise SafetyStop("上次结案缺少精确入库批次编号，名单未标完成。")
+            checked = call("import_check", {"sa_id": record.sa_id, "candidate": candidate,
+                "instructions": "SA补充-" + record.sa_id, "batch_id": batch_id, "expect_pushed": True})
+            if checked.get("verified") is not True:
+                raise SafetyStop("上次结案的成功入库批次未回读，名单未标完成。")
+            validate_import_batch(checked.get("batch"), "SA补充-" + record.sa_id, batch_id, require_pushed=True)
+        elif note == COMPLETION_NOTE:
+            raise SafetyStop("上次已入库结案缺少成功导入批次，名单未标完成。")
+        fresh = call("search", {"sa_id": record.sa_id})
+        after = fresh.get("row")
+        verify_sa(record, after)
+        if (after.get("markStatus") != "已处理" or after.get("remark") != note
+                or str(after.get("matchCount")) != "1"
+                or str(after.get("itemId", "")).lstrip(",") != item_id):
+            raise SafetyStop("只读续验时结案状态已改变，名单未标完成。")
+        verify_paper_comparison(fresh.get("comparison"), candidate, record)
+        if not import_state:
+            try:
+                require_no_author_review(after.get("reason"))
+                verify_comparison(fresh.get("comparison"), candidate, record)
+            except SafetyStop as exc:
+                # A paper-level review cannot turn an uncertain completion
+                # intent into a fresh skipped task or discard its journal.
+                raise SafetyStop("上次结案的作者核验不能确认，保留原断点：" + str(exc)) from exc
+        return after, "done"
+
     # One genuine export can serve identical owned rows; each SA closure is
     # still separately verified. Never reuse across contradictory identifiers.
     files = {}
@@ -373,18 +442,27 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
             # Already-processed rows are mirrored by their exact SA ID, even
             # if a colleague corrected their metadata after this list export.
             verify_sa(record, row, facts=False)
+            # Read our journals BEFORE the generic processed-state shortcut.
+            # Otherwise an unrelated/manual closure can conceal an unknown
+            # upload, link or claim intent and falsely mark this job complete.
+            state = workflow.get(record)
+            import_state = imports.get(record)
+            recovered_phase = None
+            if row.get("markStatus") == "已处理" and (state or import_state):
+                stage = "只读续验已提交结案"
+                row, recovered_phase = verify_owned_processed(record, row, state, import_state)
             synced = reconcile_processed(result.roster, record, row)
             if synced:
                 result.roster = synced.roster
+                if recovered_phase:
+                    workflow.save(record, {**state, "phase": recovered_phase})
                 record_operation("同步后台原已处理状态及备注", "已执行", record.sa_id)
                 result.outcomes.append({"sa_id": record.sa_id, "title": record.title, "status": "synced", "message": "后台原已处理，已同步名单；没有重复导入。"})
                 result.remaining -= 1
                 continue
             verify_sa(record, row)
-            state = workflow.get(record)
             if state.get("phase") in ("non_sjtu_complete_intent", "non_sjtu_done"):
                 raise SafetyStop("上次非交大结案尚未回读为已处理；只读续验，不重复提交或导入。")
-            import_state = imports.get(record)
             verify_import_match(row, state)
             if not import_state or import_state.get("phase") != "pushed":
                 require_no_author_review(record.reason, row.get("reason"))

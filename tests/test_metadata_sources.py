@@ -216,9 +216,13 @@ class MetadataSourceTests(unittest.TestCase):
     def test_resolve_requires_complete_unique_exact_doi(self):
         r,cr,oa=example(); c=merge_metadata(r,cr,oa)
         item={'id':'1234567890123456789','title':c['title'],'doi':c['doi'],'wos':''}
-        self.assertEqual(resolved({'verified':True,'items':[item]},c),item)
-        with self.assertRaises(SafetyStop): resolved({'verified':False,'items':[]},c)
-        with self.assertRaises(MetadataSkip): resolved({'verified':True,'items':[item,item]},c)
+        proof={'verified':True,'library_resolution_protocol':2,'items':[item]}
+        self.assertEqual(resolved(proof,c),item)
+        with self.assertRaises(SafetyStop): resolved({**proof,'verified':False,'items':[]},c)
+        with self.assertRaises(MetadataSkip): resolved({**proof,'items':[item,item]},c)
+        for version in (None,1,True,'2',2.0):
+            with self.subTest(version=version), self.assertRaises(SafetyStop):
+                resolved({**proof,'library_resolution_protocol':version},c)
 
 
 if __name__=='__main__': unittest.main()

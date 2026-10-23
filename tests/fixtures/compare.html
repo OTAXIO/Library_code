@@ -66,9 +66,19 @@ const detail = {currentSaLzkId:"",dialogLoading:false,compareData:[],saLzkCompar
       this.itemData={id:row.itemId.replace(/^,/,''),metadata:{doi:testConfig.libraryDoi??'10.1234/test'}};
       this.displayFields=[{label:'DOI',key:'doi',altKeys:['doi']},{label:'WOS记录号',key:'wosId',altKeys:['wos']}];
       this.currentRows=this.compareData.filter(value=>value.label!=='WOS记录号').map(value=>{
-        if(value.label==='认领状态')return {label:value.label,compareLeftValue:card(['姓名','工号'],['测试员',testConfig.wrongModernStaff??'00001']),
-          compareRightValue:'<div class="claim-info__status-line"><span class="claim-info__status">'+
-            (testConfig.claim??(claimedUsers[1]?'已认领':'未认领'))+'</span><button data-action="claim">认领</button></div>'};
+        if(value.label==='认领状态'){
+          const state=testConfig.claim??(claimedUsers[1]?'已认领':'未认领');
+          let identity='';
+          if(state==='已认领'){
+            const labels=testConfig.missingClaimStaff?['姓名']:['姓名','工号'];
+            const values=testConfig.missingClaimStaff?['测试员']:['测试员',testConfig.libraryClaimStaff??'00001'];
+            if(testConfig.duplicateClaimStaff){labels.push('工号');values.push('00001');}
+            identity=card(labels,values);
+          }
+          return {label:value.label,compareLeftValue:card(['姓名','工号'],['测试员',testConfig.wrongModernStaff??'00001']),
+            compareRightValue:'<div class="claim-info__status-line"><span class="claim-info__status">'+state+
+              '</span><button data-action="claim">认领</button></div>'+identity};
+        }
         if(value.label==='作者信息')return {label:value.label,
           compareLeftValue:card(['署名','第一作者','通讯作者'],['测试员','否','否']),
           compareRightValue:card(['署名','第一作者','通讯作者'],['Demo','否',testConfig.unknownModernRole??'否'])};

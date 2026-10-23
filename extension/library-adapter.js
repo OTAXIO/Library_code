@@ -28,9 +28,25 @@ async function resolveLibraryRecord(command) {
     if(location.hash.split('?')[0]!=="#/collectItem/batchManage")fail("请先返回绑定的导入管理页");
     const c=command.candidate;
     const metadata=command.action==='import_excel_resolve'&&c?.kind==='crossref-openalex-v1';
-    if((command.action!=="import_resolve"&&!metadata)||!c||typeof c.title!=="string"||!c.title||
+    if((command.action!=="import_resolve"&&!metadata)||!c||typeof c.title!=="string"||!norm(c.title)||
        (metadata ? c.wos!==''||!/^10\.\d{4,9}\/\S+$/.test(c.doi)||c.source!=='Crossref+OpenAlex' : !/^WOS:\d{15}$/.test(c.wos))||typeof c.doi!=="string"||c.sjtu!==true||
        !/^[a-f0-9]{64}$/.test(c.sha256))fail("缺少真实 TXT 文献证据");
+    const metadataTitle=value=>{
+      if(typeof value!=='string'||value.length>16000)fail('元数据题名格式不兼容');
+      const box=document.createElement('textarea');
+      box.innerHTML=value.replace(/<[^>]+>/g,'');
+      const text=box.value;
+      if(/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(text))fail('元数据题名含无效字符');
+      const key=norm(text).replace(/[\u2010-\u2014\u2212]/g,'-')
+        .replace(/[\u2018\u2019]/g,"'").replace(/[\u201c\u201d]/g,'"')
+        .replace(/\s*-\s*/g,'-').replace(/[ .]+$/g,'');
+      if(!key)fail('元数据题名为空');
+      return key;
+    };
+    // Match the public-metadata identity policy: presentation only, never
+    // fuzzy titles or changed words/digits. WOS retains its existing policy.
+    const titleKey=metadata?metadataTitle:norm;
+    const expectedTitle=titleKey(c.title);
     const origin=one(components().filter(v=>v.$options?.name==='BatchManage'&&v.$refs?.wosDataText&&v.$refs?.batchPushModal),'批次管理组件');
     if(Object.values(origin.$refs).some(v=>v?.drawer||v?.dialogVisible))fail("存在上传或推送窗口，不能切换检索页");
     router=origin.$router;if(typeof router?.push!=="function")fail("本库页面路由结构不兼容");
@@ -38,21 +54,38 @@ async function resolveLibraryRecord(command) {
     await wait(()=>location.hash.split('?')[0]==='#/item/entryManage'&&
       components().some(v=>v.$options?.name==='EntryManage'&&v.$refs?.itemDetail&&v.$options?.components?.ItemEdit));
     const vm=one(components().filter(v=>v.$options?.name==='EntryManage'&&v.$refs?.itemDetail&&v.$options?.components?.ItemEdit&&visible(v.$el)),'数据管理查询组件');
-    if(!vm.page||typeof vm.getData!=="function"||!Array.isArray(vm.tableData))fail("本库查询结构不兼容");
-    await wait(()=>!vm.loading);
+    const nativeRead=vm.$options?.methods?.getData;
+    if(!vm.page||typeof nativeRead!=="function"||!Array.isArray(vm.tableData))fail("本库查询结构不兼容");
     const page={current:1,size:100};
     const read=async key=>{
+      const label=key.doi?'DOI':'题名';
       const query={containsChild:true,emptyYear:false,...key};
       vm.page={...page};vm.queryForm={...query};vm.queryFormShow=true;
-      // The live method catches HTTP errors. Invalidate the old total before
-      // querying so its empty error list cannot masquerade as a proven zero.
-      vm.total=null;
-      const old=vm.tableData;vm.getData({...page},{...query});
-      await wait(()=>!vm.loading&&vm.tableData!==old);
-      if(vm.total===null||typeof vm.total==='boolean'||!/^\d+$/.test(String(vm.total))||
-        !Number.isInteger(Number(vm.total))||Number(vm.total)>100||vm.tableData.length!==Number(vm.total))
-        fail("本库查询未确认成功、结果不完整或过多，不能判定缺失");
-      return [...vm.tableData];
+      // EntryManage.getModels() starts its own asynchronous getData() after
+      // navigation. Other initialization methods also change vm.loading.
+      // Neither a new visible array nor !vm.loading identifies OUR response:
+      // they can even turn an existing paper into a false zero. Invoke the
+      // observed unbound native read on a private result holder and await its
+      // Promise. Native HTTP/encryption/session handling remains untouched.
+      const own={loading:false,total:null,tableData:[]};
+      let finished=false,rejected=false,pending;
+      try {pending=nativeRead.call(own,{...page},{...query});}
+      catch {fail('本库'+label+'查询失败，不能判定缺失');}
+      if(!pending||typeof pending.then!=='function')fail('本库原生查询不支持完成确认，未继续上传');
+      Promise.resolve(pending).then(()=>{finished=true;},()=>{rejected=true;finished=true;});
+      await wait(()=>finished);
+      if(rejected)fail('本库'+label+'查询失败，不能判定缺失');
+      // The live method catches failed HTTP/business responses itself. A new
+      // private holder keeps its null sentinel on that path, independently of
+      // unrelated successful requests or stale visible page counts.
+      if(own.loading!==false||!['number','string'].includes(typeof own.total)||
+        !/^\d+$/.test(String(own.total))||!Number.isSafeInteger(Number(own.total)))
+        fail('本库'+label+'查询未确认成功（未返回有效总数），不能判定缺失');
+      const total=Number(own.total);
+      if(total>page.size)fail('本库'+label+'查询记录过多（'+total+' 条），需人工查重');
+      if(!Array.isArray(own.tableData)||own.tableData.length!==total)
+        fail('本库'+label+'查询结果不完整，不能判定缺失');
+      return [...own.tableData];
     };
     // DOI absence alone is not proof of a missing paper: an existing entry
     // can lack DOI. Always cross-check the full title before any new upload.
@@ -62,14 +95,28 @@ async function resolveLibraryRecord(command) {
     const items=[];
     const seen=new Set();
     for(const row of rows){
+      // A changed response schema is not evidence of an absent paper. In
+      // particular, silently treating string metadata or missing titles as
+      // empty would turn an unrecognised existing entry into a new upload.
+      if(!row||typeof row!=='object'||Array.isArray(row)||!row.metadata||
+         typeof row.metadata!=='object'||Array.isArray(row.metadata)||
+         !Array.isArray(row.metadata.title)||row.metadata.title.length!==1||
+         typeof row.metadata.title[0]!=='string'||!norm(row.metadata.title[0]))
+        fail('本库查询记录结构不兼容，不能判定缺失');
+      for(const key of ['doi','wosId']){
+        const value=row.metadata[key];
+        if(value!==undefined&&(!Array.isArray(value)||value.length>1||value.some(v=>typeof v!=='string')))
+          fail('本库查询标识结构不兼容，不能判定缺失');
+      }
       const title=scalar(row.metadata,'title'), foundDoi=doi(scalar(row.metadata,'doi'));
+      const foundTitle=titleKey(title);
       const ut=scalar(row.metadata,'wosId').trim().toUpperCase().replace(/^WOS:/,'');
       // A matching query alone is not proof. A contradictory same-ID record
       // makes automatic resolution unsafe, not an excuse to upload a duplicate.
       const sameId=Boolean(!metadata&&ut===c.wos.slice(4))||Boolean(c.doi&&foundDoi===c.doi);
-      if(sameId&&(norm(title)!==norm(c.title)||(c.doi&&foundDoi!==c.doi)||!metadata&&ut!==c.wos.slice(4)))
+      if(sameId&&(foundTitle!==expectedTitle||(c.doi&&foundDoi!==c.doi)||!metadata&&ut!==c.wos.slice(4)))
         fail("本库相同标识的记录与 TXT 存在冲突，禁止重复导入");
-      if(norm(title)===norm(c.title)&&!sameId)fail("本库同题名记录标识不同或缺失，需人工查重");
+      if(foundTitle===expectedTitle&&!sameId)fail("本库同题名记录标识不同或缺失，需人工查重");
       if(sameId){
         if(typeof row.id!=='string'||!/^\d{1,40}$/.test(row.id))fail("平台唯一号不是精确数字文本");
         if(seen.has(row.id))continue;
@@ -77,11 +124,18 @@ async function resolveLibraryRecord(command) {
         items.push({id:row.id,title,doi:foundDoi,wos:ut?'WOS:'+ut:''});
       }
     }
-    return {ok:true,data:{verified:true,items}};
+    return {ok:true,data:{verified:true,library_resolution_protocol:2,items}};
   }catch(error){return {ok:false,error:'[本库只读核验暂停] '+error.message};}
   finally {
     if(switched&&router){
-      try {await router.push('/collectItem/batchManage');await wait(()=>location.hash.split('?')[0]==='#/collectItem/batchManage');}
+      try {
+        await router.push('/collectItem/batchManage');
+        // A completed restoration is still a success when the query exhausted
+        // its deadline. Do not replace the real query error with a false
+        // "please return manually" warning after the route already returned.
+        if(location.hash.split('?')[0]!=='#/collectItem/batchManage')
+          await wait(()=>location.hash.split('?')[0]==='#/collectItem/batchManage');
+      }
       catch {return {ok:false,error:'[本库只读核验暂停] 未能返回导入管理页，请人工返回；未自动上传'};}
     }
   }

@@ -121,7 +121,7 @@ const clone=value=>JSON.parse(JSON.stringify(value));
     const capability=await expectOK('import_capabilities',{sa_id:'demo-001'});
     assert.equal(capability.zero_match_protocol,1);
     const absent=await expectOK('import_resolve',{sa_id:'demo-001',candidate:normal.candidate});
-    assert.deepEqual(absent,{verified:true,items:[]});
+    assert.deepEqual(absent,{verified:true,library_resolution_protocol:2,items:[]});
     assert.equal(new URL(imports.url()).hash,'#/collectItem/batchManage');
     assert.deepEqual(service.writes,{upload:0,import:0,push:0});
     console.log('PASS real extension capability and library resolution prove absence before upload without any writes');

@@ -163,7 +163,7 @@ class MetadataClient:
             raise SafetyStop("元数据请求地址不在允许的公开接口内。")
         service = "Crossref" if parsed.hostname == "api.crossref.org" else "OpenAlex"
         try:
-            request = Request(url, headers={"User-Agent": "SA-Library-Assistant/0.4.35 (metadata verification)",
+            request = Request(url, headers={"User-Agent": "SA-Library-Assistant/0.4.36 (metadata verification)",
                                            "Accept": "application/json"})
             opener = curl_open if self.transport == 'windows-curl' else urlopen
             with opener(request, timeout=25) as response:

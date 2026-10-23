@@ -48,6 +48,7 @@ const library={$options:{name:'EntryManage',components:{ItemEdit:{}}},$el:docume
   async getData(page,query){this.loading=true;this.tableData=[];
     try {const data=await request('library',query);this.tableData=data.items;this.total=data.total;}
     finally {this.loading=false;}}};
+library.$options.methods={getData:library.getData};
 vm.$router={async push(path){location.hash='#'+path;document.getElementById('app').__vue__=path==='/item/entryManage'?library:vm;}};
 document.getElementById('app').__vue__=vm;
 </script></body></html>

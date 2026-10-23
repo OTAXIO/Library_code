@@ -5,6 +5,7 @@ or use --control-file with RUN/STATUS/PAUSE/QUIT.
 No BrowserSkill, browser driver, credential store or WOS automation is imported.
 """
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import queue
@@ -23,11 +24,32 @@ from metadata_pipeline import run_metadata_batch
 from operation_log import OperationLog
 from pairing_ui import copy_pairing_code
 
+
+def code_fingerprint(base):
+    """A stopped acceptance must restart before executing changed source code."""
+    paths = set(base.glob('*.py'))
+    paths.update((base/'extension').glob('*.js'))
+    paths.add(base/'extension/manifest.json')
+    paths.add(base/'maintenance/metadata_acceptance.py')
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        digest.update(path.relative_to(base).as_posix().encode('utf-8'))
+        digest.update(b'\0')
+        digest.update(path.read_bytes())
+        digest.update(b'\0')
+    return digest.hexdigest()
+
+
+def control_stamp(path):
+    return path.stat().st_mtime_ns if path and path.exists() else None
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sa-ids',nargs='+',required=True)
     parser.add_argument('--control-file',type=Path)
     args=parser.parse_args()
+    loaded_code=code_fingerprint(BASE)
     if not 1<=len(args.sa_ids)<=5 or len(set(args.sa_ids))!=len(args.sa_ids):
         raise SafetyStop('只允许 1–5 条不同任务。')
     roster=read_roster(BASE/'list.xlsx')
@@ -69,16 +91,14 @@ def main():
         for line in sys.stdin:commands.put(line.strip())
     threading.Thread(target=receive,daemon=True).start()
     busy=False
-    control_stamp=None
+    # A RUN left by the previous process is not a new authorization to run.
+    last_control_stamp=control_stamp(args.control_file)
     def run():
         try:
             current=read_roster(BASE/'list.xlsx'); selected=select(current)
             log=OperationLog(BASE/'log.txt')
             before=current.sha256
-            import importlib
-            import metadata_pipeline
-            importlib.reload(metadata_pipeline)
-            result=metadata_pipeline.run_metadata_batch(BASE,current,selected,bridge,stop,events.put,log.record)
+            result=run_metadata_batch(BASE,current,selected,bridge,stop,events.put,log.record)
             verified={}
             for item in result.outcomes:
                 if item['status']=='done':
@@ -97,16 +117,19 @@ def main():
             message=str(exc) if isinstance(exc,SafetyStop) else f'验收异常 {type(exc).__name__}；未自动重复操作。'
             print(json.dumps({'error':message},ensure_ascii=False),flush=True);events.put(('finish',message))
     def pump():
-        nonlocal busy,control_stamp
+        nonlocal busy,last_control_stamp
         if args.control_file and args.control_file.exists():
             stamp=args.control_file.stat().st_mtime_ns
-            if stamp!=control_stamp:
-                control_stamp=stamp
+            if stamp!=last_control_stamp:
+                last_control_stamp=stamp
                 command=args.control_file.read_text(encoding='utf-8').strip()
                 if command in ('RUN','STATUS','PAUSE','QUIT'):commands.put(command)
         while not commands.empty():
             command=commands.get_nowait()
             if command=='RUN' and not busy:
+                if code_fingerprint(BASE)!=loaded_code:
+                    status.set('验收代码已更新，请重新启动本窗口；原配对码可复用，未执行任务。')
+                    print('SOURCE_CHANGED_RESTART_REQUIRED',flush=True);continue
                 if not bridge.online:print('NOT_CONNECTED',flush=True);continue
                 busy=True;stop.clear();threading.Thread(target=run,daemon=True).start()
             elif command=='STATUS':print(json.dumps({'online':bridge.online,'busy':busy}),flush=True)

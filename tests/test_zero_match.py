@@ -11,7 +11,7 @@ from automation import ImportStore
 from core import HEADERS, SafetyStop, file_hash, read_roster
 from tests.test_automation import sample
 from tests.test_roster_write import make_roster
-from zero_match import WorkflowStore, run_batch, select_records, resolved_item
+from zero_match import WorkflowStore, run_batch, select_records, resolved_item, library_items
 
 
 class Backend:
@@ -47,7 +47,7 @@ class Backend:
             return {"row": copy.deepcopy(row), "comparison": fields, "non_sjtu_completion_protocol": 1,
                     "import_completion_protocol": 1}
         if action == "import_resolve":
-            return {"verified": True, "items": copy.deepcopy(self.items)}
+            return {"verified": True, "library_resolution_protocol": 2, "items": copy.deepcopy(self.items)}
         if action == 'prepare_claim':
             current = self.call('search', payload)
             prepared = {'staff_id': row['gh'], 'sa_text': payload['sa_text'],
@@ -774,9 +774,116 @@ class ZeroMatchTests(unittest.TestCase):
         self.sa.lose = "complete"
         self.assertTrue(self.run_flow(1).halted)
         self.assertFalse(self.roster.records[0].done)
+        previous = len(self.sa.calls)
         result = self.run_flow(1)
         self.assertTrue(result.roster.records[0].done)
         self.assertEqual(self.sa.calls.count("complete"), 1)
+        self.assertEqual(self.sa.calls[previous:], ['status', 'import_check', 'search'])
+        self.assertEqual(self.workflow.get(result.roster.records[0])['phase'], 'done')
+
+    def test_processed_state_cannot_mask_unconfirmed_link_or_claim_intents(self):
+        record = self.roster.records[0]
+        self.sa.rows[record.sa_id].update(markStatus='已处理', remark='其他人工处理')
+        for phase in ('downloaded', 'link_intent', 'linked', 'claim_intent', 'claimed'):
+            with self.subTest(phase=phase):
+                self.workflow.save(record, {'phase': phase, 'item_id': '123'})
+                previous = len(self.sa.calls)
+                result = self.run_flow(1)
+                self.assertTrue(result.halted)
+                self.assertIn('未确认', result.reason)
+                self.assertFalse(result.roster.records[0].done)
+                self.assertFalse(result.roster.records[0].skipped)
+                self.assertEqual(self.workflow.get(record)['phase'], phase)
+                self.assertEqual(self.sa.calls[previous:], ['status'])
+
+    def test_lost_link_followed_by_processed_does_not_falsely_complete(self):
+        original = self.sa.call
+        def lose_link(action, payload, timeout=75):
+            answer = original(action, payload, timeout)
+            if action == 'link':
+                self.sa.rows[payload['sa_id']]['markStatus'] = '已处理'
+                raise SafetyStop('关联回执丢失，其他操作已结案')
+            return answer
+        with patch.object(self.sa, 'call', side_effect=lose_link):
+            self.assertTrue(self.run_flow(1).halted)
+        previous = len(self.sa.calls)
+        result = self.run_flow(1)
+        self.assertTrue(result.halted)
+        self.assertFalse(result.roster.records[0].done)
+        self.assertFalse(result.roster.records[0].skipped)
+        self.assertEqual(self.workflow.get(self.roster.records[0])['phase'], 'link_intent')
+        self.assertEqual(self.sa.calls[previous:], ['status'])
+        self.assertEqual(self.sa.calls.count('import_submit'), 1)
+
+    def test_processed_state_with_only_import_journal_does_not_mark_complete(self):
+        record = self.roster.records[0]
+        self.imports.save(record, {'phase': 'import_intent'})
+        self.sa.rows[record.sa_id].update(markStatus='已处理', remark='人工核验')
+        result = self.run_flow(1)
+        self.assertTrue(result.halted)
+        self.assertFalse(result.roster.records[0].done)
+        self.assertEqual(self.imports.get(record)['phase'], 'import_intent')
+        self.assertEqual(self.sa.calls, ['status'])
+
+    def test_lost_completion_ack_requires_exact_note_item_and_paper(self):
+        self.sa.lose = 'complete'
+        self.assertTrue(self.run_flow(1).halted)
+        record = self.roster.records[0]
+        original_row = copy.deepcopy(self.sa.rows[record.sa_id])
+        for change in ({'remark': '其他人工结论'}, {'itemId': '999'}, {'matchCount': 2},
+                       {'titleValue': 'Changed paper'}, {'doiValue': '10.1234/another'}):
+            with self.subTest(change=change):
+                self.sa.rows[record.sa_id] = {**original_row, **change}
+                previous = len(self.sa.calls)
+                result = self.run_flow(1)
+                self.assertTrue(result.halted)
+                self.assertFalse(result.roster.records[0].done)
+                self.assertFalse(result.roster.records[0].skipped)
+                self.assertEqual(self.workflow.get(record)['phase'], 'complete_intent')
+                self.assertEqual(self.sa.calls[previous:], ['status'])
+        self.assertEqual(self.sa.calls.count('complete'), 1)
+
+    def test_lost_completion_ack_requires_original_successful_batch(self):
+        self.sa.lose = 'complete'
+        self.assertTrue(self.run_flow(1).halted)
+        original = self.sa.call
+        def invalid_batch(action, payload, timeout=75):
+            answer = original(action, payload, timeout)
+            if action == 'import_check':
+                answer['batch']['actual'] = 0
+            return answer
+        with patch.object(self.sa, 'call', side_effect=invalid_batch):
+            result = self.run_flow(1)
+        self.assertTrue(result.halted)
+        self.assertFalse(result.roster.records[0].done)
+        self.assertFalse(result.roster.records[0].skipped)
+        self.assertEqual(self.workflow.get(self.roster.records[0])['phase'], 'complete_intent')
+        self.assertEqual(self.sa.calls.count('complete'), 1)
+
+    def test_existing_paper_lost_completion_ack_rechecks_roles_without_reimport(self):
+        self.existing_paper()
+        self.sa.lose = 'complete'
+        self.assertTrue(self.run_flow(1).halted)
+        self.sa.comparison_override['认领状态'] = {'library': '未认领'}
+        result = self.run_flow(1)
+        self.assertTrue(result.halted)
+        self.assertFalse(result.roster.records[0].done)
+        self.assertFalse(result.roster.records[0].skipped)
+        self.assertEqual(self.workflow.get(self.roster.records[0])['phase'], 'complete_intent')
+        self.assertEqual(self.sa.calls.count('complete'), 1)
+        self.assertNotIn('import_upload', self.sa.calls)
+
+    def test_non_sjtu_lost_ack_does_not_accept_a_different_processed_note(self):
+        self.non_sjtu()
+        self.sa.lose = 'complete'
+        self.assertTrue(self.run_flow(1).halted)
+        self.sa.rows[self.roster.records[0].sa_id]['remark'] = '其他人工结论'
+        result = self.run_flow(1)
+        self.assertTrue(result.halted)
+        self.assertFalse(result.roster.records[0].done)
+        self.assertFalse(result.roster.records[0].skipped)
+        self.assertEqual(self.workflow.get(self.roster.records[0])['phase'], 'non_sjtu_complete_intent')
+        self.assertEqual(self.sa.calls.count('complete'), 1)
 
     def test_unconfirmed_complete_intent_does_not_resubmit(self):
         original = self.sa.call
@@ -853,7 +960,34 @@ class ZeroMatchTests(unittest.TestCase):
         for changed in ({"id": 1234567890123456789}, {"wos": "WOS:999999999999999"}):
             item = {"id": "123", **{k: c[k] for k in ("title", "doi", "wos")}, **changed}
             with self.assertRaises(SafetyStop):
-                resolved_item({"verified": True, "items": [item]}, c)
+                resolved_item({"verified": True, "library_resolution_protocol": 2, "items": [item]}, c)
+
+    def test_lookup_requires_exact_current_protocol_and_explicit_verified_evidence(self):
+        proof = {"verified": True, "library_resolution_protocol": 2, "items": []}
+        self.assertEqual(library_items(proof), [])
+        invalid = [None, [], {}, {"verified": True, "items": []}]
+        invalid += [{**proof, "library_resolution_protocol": value}
+                    for value in (None, False, True, 0, 1, 3, 2.0, "2", [2])]
+        invalid += [{**proof, "verified": value} for value in (False, None, 1, "true")]
+        invalid += [{**proof, "items": value} for value in (None, {}, (), "[]")]
+        for response in invalid:
+            with self.subTest(response=response), self.assertRaises(SafetyStop):
+                library_items(response)
+
+    def test_old_lookup_protocol_halts_batch_without_upload_or_marking_skip(self):
+        original = self.sa.call
+        def old_extension(action, payload, timeout=75):
+            answer = original(action, payload, timeout)
+            if action == 'import_resolve':
+                answer.pop('library_resolution_protocol')
+            return answer
+        with patch.object(self.sa, 'call', side_effect=old_extension):
+            result = self.run_flow(2)
+        self.assertTrue(result.halted)
+        self.assertIn('旧版查重', result.reason)
+        for action in ('import_upload', 'import_submit', 'import_push', 'link', 'submit_claim', 'complete'):
+            self.assertNotIn(action, self.sa.calls)
+        self.assertTrue(all(not row.done and not row.skipped for row in result.roster.records))
 
     def test_stale_sa_comparison_blocks_completion_even_if_list_snapshot_is_unchanged(self):
         self.sa.comparison_override['DOI'] = {'sa': '10.1234/different'}

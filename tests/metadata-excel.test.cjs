@@ -204,7 +204,55 @@ const base=()=>({id:'metadata-test',expires:Date.now()+60000,sa_id:'demo-001',in
    }
    console.log('PASS already-processed intake annotation '+scenario);
   }
-  for(const scenario of ['valid','wrongModernSa','wrongModernStaff','unknownModernRole']){
+  const titleCases=[
+   {name:'all Unicode dashes',sa:'Synthetic\u2010paper\u2011A\u2012B\u2013C\u2014D\u2212E',title:'Synthetic-paper-A-B-C-D-E'},
+   {name:'smart quotes',sa:'Synthetic \u201cquotation\u201d and \u2018paper\u2019',title:'Synthetic "quotation" and \'paper\''},
+   {name:'hyphen spacing and trailing period',sa:'Synthetic - paper.  ',title:'Synthetic-paper'},
+   {name:'HTML and entities',sa:'Synthetic <i>\u201cpaper\u201d</i> &amp; A.',title:'Synthetic "paper" & A',
+    library:'Synthetic <b>"paper"</b> &amp; A'},
+   {name:'fullwidth and case',sa:'Ｓynthetic Ｐaper',title:'synthetic paper'},
+   {name:'changed word',sa:'Synthetic papers',title:'Synthetic paper',valid:false},
+   {name:'changed number',sa:'Synthetic paper 2',title:'Synthetic paper 3',valid:false},
+   {name:'missing internal punctuation',sa:'Synthetic: paper',title:'Synthetic paper',valid:false},
+   {name:'changed library word',sa:'Synthetic paper',title:'Synthetic paper',library:'Synthetic papers',valid:false},
+   {name:'control character',sa:'Synthetic\u0001 paper',title:'Synthetic paper',valid:false},
+   {name:'empty normalized title',sa:'.',title:'.',valid:false},
+   {name:'detail changed after preview',sa:'Synthetic-paper',title:'Synthetic-paper',afterPreview:'Synthetic\u2013paper',valid:false},
+   {name:'WOS still uses strict title',sa:'Synthetic\u2013paper',title:'Synthetic-paper',wos:true,valid:false}
+  ];
+  for(const test of titleCases){
+   await page.goto('about:blank');await page.goto('http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list');
+   await page.evaluate(test=>{
+    Object.assign(synthetic,{titleValue:test.sa,doiValue:'10.1234/test',wosValue:test.wos?'WOS:000123456789012':''});
+    Object.assign(testConfig,{modern:!test.wos,unitInfo:true,saDoi:'10.1234/test',libraryDoi:'10.1234/test',
+      saWos:synthetic.wosValue,libraryWos:synthetic.wosValue,claim:'已认领',
+      saTitle:test.sa,libraryTitle:test.library??test.title});
+    const show=vm.showItemId;
+    vm.showItemId=function(row){show.call(this,row);
+      for(const value of detail.currentRows||detail.compareData)if(value.label==='题名'){
+        value.compareLeftValue=testConfig.saTitle;value.compareRightValue=testConfig.libraryTitle;
+      }
+    };
+   },test);
+   const read=await page.evaluate(runSACommand,{...base(),action:'search'});
+   assert.equal(read.ok,true,test.name+JSON.stringify(read));
+   const batch={id:'batch-metadata',modelId:'article',instructions:'SA补充-demo-001',source:test.wos?'WOS':'人工提交',
+    status:2,total:1,actual:1,fail:0,increase:1,duplicateSkip:0,duplicateIncreaseUpdate:0,duplicateOverallCoverage:0};
+   const proof={candidate:{...candidate,title:test.title,wos:test.wos?'WOS:000123456789012':''},
+     batch,item_id:'1234567890123456789',xlsx_sha256:'b'.repeat(64)};
+   if(test.afterPreview)await page.evaluate(title=>testConfig.libraryTitle=title,test.afterPreview);
+   const result=await page.evaluate(runSACommand,{...base(),action:'complete',expected:read.data.row,
+    expected_comparison:read.data.comparison,reviewed:true,owner:'谭勋策',note:'已入库',
+    ...(test.wos?{imported_evidence:proof}:{metadata_imported_evidence:proof})});
+   const valid=test.valid!==false;
+   assert.equal(result.ok,valid,test.name+JSON.stringify(result));
+   assert.equal(await page.evaluate(()=>writeCount),valid?1:0,test.name+' writes');
+   assert.equal(await page.evaluate(()=>claimWrites),0);
+   if(valid){assert.equal(result.data.row.remark,'已入库');assert.equal(result.data.row.markStatus,'已处理');}
+   console.log('PASS metadata title policy '+test.name);
+  }
+  for(const scenario of ['valid','wrongModernSa','wrongModernStaff','unknownModernRole',
+                         'missingClaimStaff','wrongClaimStaff','duplicateClaimStaff']){
    await page.goto('about:blank');await page.goto('http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list');
    await page.evaluate(scenario=>{
     Object.assign(synthetic,{doiValue:'10.1234/test',wosValue:''});
@@ -212,9 +260,15 @@ const base=()=>({id:'metadata-test',expires:Date.now()+60000,sa_id:'demo-001',in
     if(scenario==='wrongModernSa')testConfig.wrongModernSa='another-row';
     if(scenario==='wrongModernStaff')testConfig.wrongModernStaff='00002';
     if(scenario==='unknownModernRole')testConfig.unknownModernRole='未知';
+    if(['missingClaimStaff','wrongClaimStaff','duplicateClaimStaff'].includes(scenario)){
+      testConfig.claim='已认领';
+      if(scenario==='wrongClaimStaff')testConfig.libraryClaimStaff='00002';
+      else testConfig[scenario]=true;
+    }
    },scenario);
    const read=await page.evaluate(runSACommand,{...base(),action:'search'});
    assert.equal(read.ok,scenario==='valid',scenario+JSON.stringify(read));
+   if(scenario!=='valid')assert.equal(await page.evaluate(()=>writeCount),0,scenario+' must not write');
    if(scenario==='valid'){
     assert.equal(read.data.metadata_completion_protocol,4);
     const field=label=>read.data.comparison.find(row=>row.label===label);

@@ -349,6 +349,14 @@ async function runSACommand(command) {
           template.innerHTML = String(right ?? "");
           const states = [...template.content.querySelectorAll(".claim-info__status")].map(el => el.textContent.trim());
           if (states.length !== 1 || !["已认领", "未认领"].includes(states[0])) stop("新版本库认领状态未唯一确认");
+          // The current site's loadClaimData produces 已认领 only for the
+          // scholar found by this SA's gh and renders that person's wno here.
+          // Confirm the actual card, not just the status word or name aliases.
+          if (states[0] === "已认领") {
+            const [, claimedStaff] = card(right, ["姓名", "工号"]);
+            if (!/^[0-9]{1,40}$/.test(claimedStaff) || claimedStaff !== staff)
+              stop("本库已认领人员编号与 SA 不一致，不能结案");
+          }
           right = states[0]; // Do not concatenate the adjacent 认领 action button.
         } else if (modern && value.label === "作者信息") {
           const role = html => {
@@ -552,6 +560,22 @@ async function runSACommand(command) {
       if(metadata&&command.imported_evidence)stop("结案证明来源冲突");
       const proof = metadata?command.metadata_imported_evidence:command.imported_evidence, c = proof?.candidate, b = proof?.batch;
       const norm = value => String(value ?? "").normalize("NFKC").toLowerCase().replace(/\s+/g," ").trim();
+      // Only public-metadata titles use the same presentation policy as
+      // metadata_identity.title_key. No words, digits or internal punctuation
+      // are discarded; WOS and all unrelated actions retain strict matching.
+      const metadataTitle = value => {
+        if (typeof value !== "string" || value.length > 16000) stop("入库题名格式待核验");
+        const decoded = document.createElement("textarea");
+        decoded.innerHTML = value.replace(/<[^>]+>/g, "");
+        const text = decoded.value;
+        if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(text)) stop("入库题名格式待核验");
+        const key = norm(text).replace(/[\u2010-\u2014\u2212]/g, "-")
+          .replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"')
+          .replace(/\s*-\s*/g, "-").replace(/[ .]+$/g, "");
+        if (!key) stop("入库题名为空，未结案");
+        return key;
+      };
+      const titleKey = metadata ? metadataTitle : norm;
       const doi = value => norm(value).replace(/^(?:https?:\/\/doi\.org\/|doi:)\s*/,"");
       const wos = value => {const v=String(value??"").trim().toUpperCase();return v&&!v.startsWith("WOS:")?"WOS:"+v:v;};
       if (command.action !== "complete" || command.owner !== "谭勋策" || Number(row.matchCount) !== 1 ||
@@ -571,7 +595,7 @@ async function runSACommand(command) {
             !["string","number"].includes(typeof b[key]) || String(b[key])!==value))
         stop("缺少成功单篇入库、推送及平台关联证据，不能提交已入库结案");
       const d=doi(row.doiValue), u=wos(row.wosValue);
-      if ((!metadata&&!d&&!u) || metadata&&u || norm(row.titleValue)!==norm(c.title) || d&&d!==doi(c.doi) || u&&u!==c.wos ||
+      if ((!metadata&&!d&&!u) || metadata&&u || titleKey(row.titleValue)!==titleKey(c.title) || d&&d!==doi(c.doi) || u&&u!==c.wos ||
           row.remark && row.remark!==note) stop("入库文献与 SA 不符或已有其他备注，未结案");
       const comparison=await showDetail();
       const field=(rows,label,side)=>{
@@ -598,7 +622,7 @@ async function runSACommand(command) {
         if (units.some(value=>!["是","否"].includes(value))||units[0]!==units[1])
           stop("第一单位未一致确认，未结案");
       }
-      for(const [label,key,normalize] of [["题名","title",norm],["DOI","doi",doi],["WOS记录号","wos",wos]]) {
+      for(const [label,key,normalize] of [["题名","title",titleKey],["DOI","doi",doi],["WOS记录号","wos",wos]]) {
         if(normalize(field(comparison,label,"library"))!==normalize(c[key]))stop("入库后的本库文献不一致："+label);
         const saValue=key==="title"?row.titleValue:key==="doi"?row.doiValue:row.wosValue;
         if(normalize(field(comparison,label,"sa"))!==normalize(saValue))stop("入库后的 SA 文献不一致："+label);
