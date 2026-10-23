@@ -182,6 +182,7 @@ class DiscoveryTests(unittest.TestCase):
 
     def test_tls_and_connection_failures_name_inner_type_without_exposing_error_payload(self):
         from urllib.error import URLError
+        self.client.transport = 'urllib'
         for inner, expected in ((ssl.SSLEOFError(8, 'PRIVATE_PROXY_DETAIL'), 'TLS 连接'),
                                 (ConnectionResetError(10054, 'PRIVATE_PROXY_DETAIL'), '连接被重置'),
                                 (ConnectionRefusedError(10061, 'PRIVATE_PROXY_DETAIL'), '连接被拒绝')):

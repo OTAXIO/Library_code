@@ -172,7 +172,7 @@ class MetadataSourceTests(unittest.TestCase):
 
     def test_http_errors_name_service_and_rate_wait_without_becoming_absence(self):
         with tempfile.TemporaryDirectory() as temp:
-            client = MetadataClient(temp)
+            client = MetadataClient(temp, transport='urllib')
             for status in (401, 403, 429, 500):
                 client.last_request = 0
                 error = HTTPError('https://api.openalex.org/works/test', status, 'SECRET BODY', {'Retry-After': '60'}, None)
@@ -188,7 +188,7 @@ class MetadataSourceTests(unittest.TestCase):
 
     def test_timeout_explains_actual_service_and_does_not_automatically_retry(self):
         with tempfile.TemporaryDirectory() as temp:
-            client = MetadataClient(temp)
+            client = MetadataClient(temp, transport='urllib')
             with patch('metadata_sources.urlopen', side_effect=URLError(TimeoutError())) as request:
                 with self.assertRaisesRegex(SafetyStop, 'Crossref 请求超时'):
                     client.get('https://api.crossref.org/works/test')

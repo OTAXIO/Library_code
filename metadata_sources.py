@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 
 from core import SafetyStop, digest
 from metadata_discovery import MetadataDiscovery
+from metadata_transport import curl_open, windows_curl
 # Re-export the existing public names so callers/tests and archived workflows
 # retain their interface; discovery and verification share exactly one policy.
 from metadata_identity import MetadataSkip, norm, doi, text, title_key, name_tokens
@@ -138,11 +139,14 @@ def merge_metadata(record, crossref, openalex):
 
 
 class MetadataClient:
-    def __init__(self, root, cancelled=lambda: False, progress=lambda _: None):
+    def __init__(self, root, cancelled=lambda: False, progress=lambda _: None, transport='auto'):
+        if transport not in ('auto', 'urllib', 'windows-curl'):
+            raise SafetyStop('未知的公开元数据 HTTPS 通道。')
         self.root, self.cancelled = Path(root), cancelled
         self.root.mkdir(parents=True, exist_ok=True)
         self.last_request = 0.0
         self.discovery = MetadataDiscovery(lambda url: self.get(url), cancelled, progress)
+        self.transport = ('windows-curl' if windows_curl() else 'urllib') if transport == 'auto' else transport
 
     def get(self, url):
         # A public GET is safe, but never retry 429/5xx aggressively or call it zero.
@@ -159,9 +163,10 @@ class MetadataClient:
             raise SafetyStop("元数据请求地址不在允许的公开接口内。")
         service = "Crossref" if parsed.hostname == "api.crossref.org" else "OpenAlex"
         try:
-            request = Request(url, headers={"User-Agent": "SA-Library-Assistant/0.4.34 (metadata verification)",
+            request = Request(url, headers={"User-Agent": "SA-Library-Assistant/0.4.35 (metadata verification)",
                                            "Accept": "application/json"})
-            with urlopen(request, timeout=25) as response:
+            opener = curl_open if self.transport == 'windows-curl' else urlopen
+            with opener(request, timeout=25) as response:
                 redirected = urlsplit(response.url)
                 if redirected.scheme != "https" or redirected.netloc != parsed.netloc:
                     raise SafetyStop("元数据接口重定向异常。")

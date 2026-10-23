@@ -2,6 +2,12 @@
 
 桌面只提供自动认领、自动导入两个业务入口。生产程序通过已配对的 SA 扩展操作现有工作页；Browser Skill 只供开发者现场检查，不是程序依赖。
 
+## 0.4.35：Windows 公开接口 TLS
+
+`metadata_transport.py` 隔离公开 GET 的 HTTPS 传输。Windows 且系统 `System32/curl.exe` 存在时，`MetadataClient` 的 auto 模式选择原生通道；非 Windows/无客户端保留 urllib，测试及独立诊断也可显式选择原通道。一次查询只用一个通道，不在失败时盲目回退或重试。
+
+只接受两个固定公开主机、HTTPS、无片段的 GET。原生程序禁用 curlrc，不跟随重定向、不加载浏览器配置或凭据、不关闭证书验证。请求限时、响应大小、实际来源及返回状态均检查，404 才可进入原源内无记录处理；TLS、限流及非法 JSON 仍暂停。已观察到 Windows 原生客户端能解析实际两源 JSON，而同一 OpenAlex URL 的 Python TLS 报 SSLEOFError；不据此推断具体 VPN/ISP 因果。
+
 | 模块 | 责任 |
 | --- | --- |
 | `app.py` | 展示范围、条数和进度，不判断论文身份或提交网页写入 |
