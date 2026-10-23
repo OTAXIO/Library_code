@@ -27,10 +27,21 @@ async function resolveLibraryRecord(command) {
     check();
     if(location.hash.split('?')[0]!=="#/collectItem/batchManage")fail("请先返回绑定的导入管理页");
     const c=command.candidate;
-    const metadata=command.action==='import_excel_resolve'&&c?.kind==='crossref-openalex-v1';
+    const primary=c?.kind==='publisher-verified-v1';
+    const publisherSource=()=>{
+      if(!primary||!/^[a-f0-9]{64}$/.test(c.primary_evidence_sha256??'')||c.fields?.['相关网址']!==c.primary_url)return false;
+      return c.source==='ICLR官方论文集'&&/^https:\/\/proceedings\.iclr\.cc\/paper_files\/paper\/\d{4}\/hash\/[a-f0-9]{32}-Abstract-Conference\.html$/.test(c.primary_url)||
+        c.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(c.primary_url);
+    };
+    const metadata=command.action==='import_excel_resolve'&&(primary||c?.kind==='crossref-openalex-v1');
     if((command.action!=="import_resolve"&&!metadata)||!c||typeof c.title!=="string"||!norm(c.title)||
-       (metadata ? c.wos!==''||!/^10\.\d{4,9}\/\S+$/.test(c.doi)||c.source!=='Crossref+OpenAlex' : !/^WOS:\d{15}$/.test(c.wos))||typeof c.doi!=="string"||c.sjtu!==true||
+       (metadata ? c.wos!==''||(primary?!publisherSource()||c.doi!==''&&!/^10\.\d{4,9}\/\S+$/.test(c.doi):!/^10\.\d{4,9}\/\S+$/.test(c.doi)||c.source!=='Crossref+OpenAlex') : !/^WOS:\d{15}$/.test(c.wos))||typeof c.doi!=="string"||c.sjtu!==true||
        !/^[a-f0-9]{64}$/.test(c.sha256))fail("缺少真实 TXT 文献证据");
+    const primaryFields=command.primary_fields;
+    if(primary&&(!primaryFields||['相关网址','年份','会议名称'].some(label=>
+      typeof primaryFields[label]!=='string'||!primaryFields[label]||!c.fields?.[label])||
+      new Set(Object.values(primaryFields)).size!==3||!Array.isArray(c.author_names)||!c.author_names.length))
+      fail('官方来源原生身份字段未确认，未检索或上传');
     const metadataTitle=value=>{
       if(typeof value!=='string'||value.length>16000)fail('元数据题名格式不兼容');
       const box=document.createElement('textarea');
@@ -113,7 +124,28 @@ async function resolveLibraryRecord(command) {
       const ut=scalar(row.metadata,'wosId').trim().toUpperCase().replace(/^WOS:/,'');
       // A matching query alone is not proof. A contradictory same-ID record
       // makes automatic resolution unsafe, not an excuse to upload a duplicate.
-      const sameId=Boolean(!metadata&&ut===c.wos.slice(4))||Boolean(c.doi&&foundDoi===c.doi);
+      let primaryIdentity;
+      if(primary&&foundTitle===expectedTitle){
+        const authors=row.metadata.author;
+        if(!Array.isArray(authors)||authors.length!==c.author_names.length||
+          authors.some((author,i)=>norm(typeof author==='string'?author:author?.fullname)!==norm(c.author_names[i])))
+          fail('本库同题名作者顺序不同或缺失，需人工查重');
+        const url=scalar(row.metadata,primaryFields['相关网址']);
+        // Native batch preview stores the imported year as text, but the
+        // public EntryManage index normalizes it to [2026]. Only this observed
+        // four-digit scalar may be canonicalized; never coerce booleans,
+        // arrays, fractional years or identity fields generically.
+        const rawYear=row.metadata[primaryFields['年份']];
+        const year=Array.isArray(rawYear)&&rawYear.length===1&&(
+          typeof rawYear[0]==='string'&&/^\d{4}$/.test(rawYear[0])||
+          typeof rawYear[0]==='number'&&Number.isInteger(rawYear[0])&&rawYear[0]>=1000&&rawYear[0]<=9999)
+          ?String(rawYear[0]):'';
+        const venue=scalar(row.metadata,primaryFields['会议名称']);
+        if(url!==c.primary_url||year!==c.fields['年份']||venue!==c.fields['会议名称']||foundDoi!==c.doi)
+          fail('本库同题名官方网址、年份、会议或 DOI 不同/缺失，需人工查重');
+        primaryIdentity={url,year,venue,authors:[...c.author_names]};
+      }
+      const sameId=Boolean(!metadata&&ut===c.wos.slice(4))||Boolean(c.doi&&foundDoi===c.doi)||Boolean(primaryIdentity);
       if(sameId&&(foundTitle!==expectedTitle||(c.doi&&foundDoi!==c.doi)||!metadata&&ut!==c.wos.slice(4)))
         fail("本库相同标识的记录与 TXT 存在冲突，禁止重复导入");
       if(foundTitle===expectedTitle&&!sameId)fail("本库同题名记录标识不同或缺失，需人工查重");
@@ -121,7 +153,7 @@ async function resolveLibraryRecord(command) {
         if(typeof row.id!=='string'||!/^\d{1,40}$/.test(row.id))fail("平台唯一号不是精确数字文本");
         if(seen.has(row.id))continue;
         seen.add(row.id);
-        items.push({id:row.id,title,doi:foundDoi,wos:ut?'WOS:'+ut:''});
+        items.push({id:row.id,title,doi:foundDoi,wos:ut?'WOS:'+ut:'',...(primary?{primary_identity:primaryIdentity}:{})});
       }
     }
     return {ok:true,data:{verified:true,library_resolution_protocol:2,items}};

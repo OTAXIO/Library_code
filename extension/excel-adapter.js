@@ -97,8 +97,12 @@ async function runExcelCommand(command) {
     }
     if(!['import_excel_upload','import_excel_upload_status','import_excel_submit'].includes(command.action))fail('未知 Excel 操作');
     const c=command.candidate;
-    if(!c||c.kind!=='crossref-openalex-v1'||c.source!=='Crossref+OpenAlex'||c.sjtu!==true||c.wos!==''||
-       !/^10\.\d{4,9}\/\S+$/.test(c.doi)||!c.title||!Array.isArray(c.author_names)||!c.author_names.length||
+    const primary=c?.kind==='publisher-verified-v1'&&/^[a-f0-9]{64}$/.test(c.primary_evidence_sha256??'')&&
+      c.fields?.['相关网址']===c.primary_url&&(
+      c.source==='ICLR官方论文集'&&/^https:\/\/proceedings\.iclr\.cc\/paper_files\/paper\/\d{4}\/hash\/[a-f0-9]{32}-Abstract-Conference\.html$/.test(c.primary_url)||
+      c.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(c.primary_url));
+    if(!c||(!primary&&(c.kind!=='crossref-openalex-v1'||c.source!=='Crossref+OpenAlex'))||c.sjtu!==true||c.wos!==''||
+       (primary?c.doi!==''&&!/^10\.\d{4,9}\/\S+$/.test(c.doi):!/^10\.\d{4,9}\/\S+$/.test(c.doi))||!c.title||!Array.isArray(c.author_names)||!c.author_names.length||
        !/^[a-f0-9]{64}$/.test(c.sha256)||!/^[a-f0-9]{64}$/.test(command.xlsx_sha256)||
        !/^[\w-]{1,160}$/.test(command.sa_id)||command.instructions!=='SA补充-'+command.sa_id)
       fail('缺少完整单篇元数据及 Excel 哈希证明');

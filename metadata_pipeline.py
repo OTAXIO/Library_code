@@ -18,6 +18,7 @@ from core import SafetyStop, digest, file_hash
 from metadata_excel import build_excel
 from metadata_identity import title_key
 from metadata_sources import KIND, SOURCE, MetadataClient, MetadataSkip, doi
+from primary_metadata import KIND as PRIMARY_KIND, trusted_page
 from roster_write import mark_skipped_many, mark_skipped_without_note, reconcile_processed, record_data_sources
 from wos_policy import NonZeroMatchSkip, require_no_author_review
 from zero_match import OWNER, BatchResult, WorkflowStore, library_items, verify_import_match, verify_sa
@@ -144,6 +145,11 @@ def resolved(answer, candidate):
             or len(item["id"]) > 40 or _verified_title_key(item.get("title")) != _verified_title_key(candidate["title"])
             or doi(item.get("doi")) != candidate["doi"]):
         raise SafetyStop("本库 DOI/题名/平台号与元数据不一致。")
+    if candidate.get('kind') == PRIMARY_KIND:
+        expected = {'url': candidate['primary_url'], 'year': candidate['fields']['年份'],
+                    'venue': candidate['fields']['会议名称'], 'authors': candidate['author_names']}
+        if item.get('primary_identity') != expected:
+            raise SafetyStop('本库官方网址、作者顺序、会议或年份不一致；未关联或结案。')
     return item
 
 
@@ -203,9 +209,11 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
             raise SafetyStop("已请求暂停；未执行项目保持原样。")
     def call(action, payload):
         checkpoint()
-        progress(f"Crossref＋OpenAlex · {position}/{len(records)} · {action} · {record.sa_id}")
+        progress(f"元数据入库 · {position}/{len(records)} · {action} · {record.sa_id}")
         if action.startswith('import_excel_') and state.get('model_id'):
             payload = {**payload, 'model_id': state['model_id']}
+        if action.startswith('import_excel_') and state.get('primary_fields'):
+            payload = {**payload, 'primary_fields': state['primary_fields']}
         if action == "search":
             payload = {**payload, "close_detail": True}
         value = bridge.call(action, {"sa_id": record.sa_id, **payload}, timeout=90)
@@ -315,7 +323,7 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                 except SafetyStop:
                     raise MetadataSkip("作者角色待核验") from None
             if not state:
-                progress(f"核验 Crossref 与 OpenAlex · {record.title}")
+                progress(f"核验原始元数据与来源 · {record.title}")
                 candidate, folder = client.prepare(record)
                 checkpoint()
                 path, checksum = excel_builder(folder, candidate)
@@ -324,18 +332,24 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                 store.save(record, state)
             candidate = state["candidate"]
             path = Path(state["path"])
-            if (candidate.get("kind") != KIND or candidate.get("source") != SOURCE or not candidate.get("sjtu")
+            primary = candidate.get('kind') == PRIMARY_KIND
+            if primary and (type(fresh.get('publisher_metadata_protocol')) is not int
+                            or fresh['publisher_metadata_protocol'] != 1):
+                raise SafetyStop('请加载支持官方论文集的扩展 0.4.37；未上传或重复导入。')
+            source_ok = (candidate.get('source') == trusted_page(candidate.get('primary_url')) if primary
+                         else candidate.get('kind') == KIND and candidate.get('source') == SOURCE)
+            if (not source_ok or not candidate.get("sjtu")
                     or digest({k: v for k, v in candidate.items() if k != "sha256"}) != candidate.get("sha256")
                     or path.is_symlink() or not path.resolve().is_relative_to(root) or not path.is_file()
                     or file_hash(path) != state["xlsx_sha256"]):
                 raise SafetyStop("归档 Excel 或元数据哈希校验失败，未上传。")
-            # Rebuild the evidence from both archived raw responses on every resume.
-            cache = json.loads((path.parent / "metadata.json").read_text(encoding="utf-8"))
-            from metadata_sources import merge_metadata
-            if cache.get("record_key") != record.key or merge_metadata(record, cache["crossref"], cache["openalex"]) != candidate:
+            # The same production cache reader reparses either the two API
+            # responses or the official HTML + original PDF, including hashes.
+            verified_candidate, _ = MetadataClient(root / 'papers', stop.is_set).read_cache(path.parent, record)
+            if verified_candidate != candidate:
                 raise SafetyStop("归档来源与本条名单不一致。")
             payload = {"candidate": candidate, "instructions": state["instructions"]}
-            result.roster = record_data_sources(result.roster, [record], SOURCE).roster
+            result.roster = record_data_sources(result.roster, [record], candidate['source']).roster
             record = next(r for r in result.roster.records if r.sa_id == record.sa_id)
             if state["phase"] == "duplicate_review":
                 # Explicit retry is read-only. The original batch and all its
@@ -347,7 +361,7 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                 state["batch"] = checked["batch"]; store.save(record, state)
                 raise MetadataDuplicateReview("本库重复待核验")
             if state["phase"] == "prepared":
-                item = resolved(call("import_excel_resolve", payload), candidate)
+                item = None if primary else resolved(call("import_excel_resolve", payload), candidate)
                 if item:
                     # This mode never claims an already-existing article or
                     # asserts that it imported one. Leave author cases for claim mode.
@@ -372,6 +386,18 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                 if any(str(field.get("required")).lower() in ("1", "true") and not candidate["fields"].get(field.get("label"))
                        for field in fields):
                     raise MetadataSkip("导入必填字段缺失")
+                if primary:
+                    mapping = {}
+                    for label in ('相关网址', '年份', '会议名称'):
+                        native = [f.get('field') for f in fields if f.get('label') == label]
+                        if len(native) != 1 or not isinstance(native[0], str) or not native[0]:
+                            raise SafetyStop('官方来源原生身份字段未确认，未上传。')
+                        mapping[label] = native[0]
+                    if len(set(mapping.values())) != 3:
+                        raise SafetyStop('官方来源原生身份字段重叠，未上传。')
+                    state['primary_fields'] = mapping
+                    if resolved(call('import_excel_resolve', payload), candidate):
+                        raise MetadataSkip('本库已有文献')
                 batches = call("import_excel_scan", payload).get("batches")
                 if batches != []:
                     raise SafetyStop("已有同说明批次，未重复上传；请核验历史批次。")
@@ -451,7 +477,7 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                     raise SafetyStop("上次关联未回读成功，不重复提交。")
                 state.update(phase="link_intent", item_id=item["id"]); store.save(record, state)
                 proof = call("link", {"expected": row, "reviewed": True,
-                    "note": "已核验Crossref及OpenAlex与本库同一文献", "item_id": item["id"]})
+                    "note": "已核验" + candidate['source'] + "与本库同一文献", "item_id": item["id"]})
                 if proof.get("verified") is not True:
                     raise SafetyStop("平台关联未确认。")
                 state["phase"] = "linked"; store.save(record, state)

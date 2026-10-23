@@ -114,7 +114,7 @@ async function runSACommand(command) {
       const row = snap(await fresh());
       guardSurface();
       return {ok: true, data: {row, non_sjtu_completion_protocol: 1, import_completion_protocol: 1,
-        metadata_completion_protocol: 4, metadata_detail_protocol: 1}};
+        metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 1}};
     }
     const drawer = vm.$refs?.compareDetailDrawer;
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");
@@ -377,7 +377,7 @@ async function runSACommand(command) {
       // guards refuse editors, claim selections, target changes and strangers.
       if (command.close_detail === true) await closeReadOnlyDetail();
       return {ok: true, data: {row: before, comparison, import_completion_protocol: 1,
-        metadata_completion_protocol: 4, metadata_detail_protocol: 1,
+        metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 1,
         detail_released: command.close_detail === true}};
     }
     if (["prepare_claim", "submit_claim"].includes(command.action)) {
@@ -578,14 +578,18 @@ async function runSACommand(command) {
       const titleKey = metadata ? metadataTitle : norm;
       const doi = value => norm(value).replace(/^(?:https?:\/\/doi\.org\/|doi:)\s*/,"");
       const wos = value => {const v=String(value??"").trim().toUpperCase();return v&&!v.startsWith("WOS:")?"WOS:"+v:v;};
+      const primary=c?.kind==='publisher-verified-v1'&&/^[a-f0-9]{64}$/.test(c.primary_evidence_sha256??'')&&
+        c.fields?.['相关网址']===c.primary_url&&(
+        c.source==='ICLR官方论文集'&&/^https:\/\/proceedings\.iclr\.cc\/paper_files\/paper\/\d{4}\/hash\/[a-f0-9]{32}-Abstract-Conference\.html$/.test(c.primary_url)||
+        c.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(c.primary_url));
       if (command.action !== "complete" || command.owner !== "谭勋策" || Number(row.matchCount) !== 1 ||
           !proof || !/^\d{1,40}$/.test(proof.item_id??"") ||
           String(row.itemId??"").replace(/^,/,"") !== proof.item_id || !c ||
           ["title","doi","wos","sha256","affiliation","authors"].some(key=>typeof c[key]!=="string") ||
           !c.title.trim() || !c.authors.trim() || c.doi && !/^10\.\d{4,9}\/\S+$/.test(doi(c.doi)) ||
-          !/^[a-f0-9]{64}$/.test(c.sha256) || (metadata ? c.kind!=='crossref-openalex-v1'||c.source!=='Crossref+OpenAlex'||
-            c.sjtu!==true||c.wos!==''||!c.doi||!/^https:\/\/api\.crossref\.org\/works\//.test(c.crossref_url??'')||
-            !/^https:\/\/openalex\.org\/W\d+$/.test(c.openalex_url??'')||!Array.isArray(c.author_names)||
+          !/^[a-f0-9]{64}$/.test(c.sha256) || (metadata ? (!primary&&(c.kind!=='crossref-openalex-v1'||c.source!=='Crossref+OpenAlex'||
+            !c.doi||!/^https:\/\/api\.crossref\.org\/works\//.test(c.crossref_url??'')||!/^https:\/\/openalex\.org\/W\d+$/.test(c.openalex_url??'')))||
+            c.sjtu!==true||c.wos!==''||!Array.isArray(c.author_names)||
             !c.author_names.length||c.author_names.join(';')!==c.authors||!Array.isArray(c.addresses)||
             c.addresses.join(';')!==c.affiliation||!/^[a-f0-9]{64}$/.test(proof.xlsx_sha256??'') : !/^WOS:\d{15}$/.test(c.wos)) ||
           !/\bShanghai\s+(?:Jiao\s*Tong|Jiaotong)\s+Univ(?:ersity)?\b|上海交通大学/i.test(c.affiliation) ||

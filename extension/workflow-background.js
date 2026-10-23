@@ -165,7 +165,7 @@ async function dispatchWorkflow(command,pair) {
         return execute(runExcelCommand,command);
       }
       if(!['import_excel_scan','import_excel_check','import_excel_push'].includes(command.action))throw Error('未知 Excel 命令');
-      if(command.candidate?.kind!=='crossref-openalex-v1')throw Error('缺少跨来源元数据证明');
+      if(!['crossref-openalex-v1','publisher-verified-v1'].includes(command.candidate?.kind))throw Error('缺少跨来源元数据证明');
       return execute(runImportCommand,{...command,action:command.action.replace('import_excel_','import_')});
     }
     if(command.action==="import_upload"){

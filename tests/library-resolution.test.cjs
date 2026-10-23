@@ -7,6 +7,13 @@ const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const origin='http://admin.ir.lib.sjtu.edu.cn';
 const candidate={title:'Synthetic paper',doi:'10.1234/test',wos:'WOS:000123456789012',sjtu:true,sha256:'a'.repeat(64)};
 const metadataCandidate={...candidate,kind:'crossref-openalex-v1',source:'Crossref+OpenAlex',wos:''};
+const primaryUrl='https://proceedings.mlr.press/v306/test26a.html';
+const primaryCandidate={...metadataCandidate,kind:'publisher-verified-v1',source:'PMLR官方论文集',doi:'',
+  primary_url:primaryUrl,primary_evidence_sha256:'b'.repeat(64),author_names:['Alice Test'],
+  fields:{'相关网址':primaryUrl,'年份':'2026','会议名称':'International Conference on Machine Learning'}};
+const primaryFields={'相关网址':'url','年份':'year','会议名称':'conferenceName'};
+const primaryItem={id:'1234567890123456789',metadata:{title:[candidate.title],doi:[],wosId:[],
+  url:[primaryUrl],year:['2026'],conferenceName:[primaryCandidate.fields['会议名称']],author:[{fullname:'Alice Test'}]}};
 const item={id:'1234567890123456789',metadata:{title:[candidate.title],doi:[candidate.doi],wosId:[candidate.wos]}};
 const fixture=`<div id="app">Disposable library fixture</div><script>
 window.config={rows:[],failure:false,incomplete:false};window.reads=[];window.routes=[];
@@ -81,6 +88,24 @@ root.__vue__=batch;
       {name:'metadata lookup cannot contain a fabricated WOS identifier',candidate:{...metadataCandidate,wos:candidate.wos},action:'import_excel_resolve',rows:[],ok:false,error:/文献证据/,expectedReads:0},
       {name:'whitespace candidate title is not usable evidence',candidate:{...candidate,title:'  '},rows:[],ok:false,error:/文献证据/,expectedReads:0},
       {name:'unresolved native query expires without querying the title or uploading',rows:[],neverFinishes:true,shortDeadline:true,ok:false,error:/未完成/},
+      {name:'official no-DOI lookup verifies native URL year venue and full author order',candidate:primaryCandidate,
+        action:'import_excel_resolve',primary_fields:primaryFields,rows:[primaryItem],ok:true,count:1},
+      {name:'official no-DOI empty full-title lookup proves absence',candidate:primaryCandidate,
+        action:'import_excel_resolve',primary_fields:primaryFields,rows:[],ok:true,count:0},
+      {name:'native index numeric year agrees with original textual batch preview',candidate:primaryCandidate,
+        action:'import_excel_resolve',primary_fields:primaryFields,rows:[{...primaryItem,metadata:{...primaryItem.metadata,year:[2026]}}],ok:true,count:1},
+      ...[true,null,2026.5,[2026],{value:2026},' 2026','2026.0'].map(value=>({
+        name:'invalid native year remains review-only '+JSON.stringify(value),candidate:primaryCandidate,
+        action:'import_excel_resolve',primary_fields:primaryFields,
+        rows:[{...primaryItem,metadata:{...primaryItem.metadata,year:[value]}}],ok:false,error:/人工查重/})),
+      {name:'official same-title URL mismatch never permits duplicate upload',candidate:primaryCandidate,
+        action:'import_excel_resolve',primary_fields:primaryFields,rows:[{...primaryItem,metadata:{...primaryItem.metadata,url:['https://other.example/paper']}}],ok:false,error:/人工查重/},
+      {name:'official same-title author order mismatch needs review',candidate:primaryCandidate,
+        action:'import_excel_resolve',primary_fields:primaryFields,rows:[{...primaryItem,metadata:{...primaryItem.metadata,author:[{fullname:'Bob Other'}]}}],ok:false,error:/人工查重/},
+      {name:'official source rejects unverified model field codes',candidate:primaryCandidate,
+        action:'import_excel_resolve',rows:[],ok:false,error:/身份字段/,expectedReads:0},
+      {name:'official source rejects website masquerading as publisher',candidate:{...primaryCandidate,primary_url:primaryUrl+'.evil'},
+        action:'import_excel_resolve',primary_fields:primaryFields,rows:[],ok:false,error:/文献证据/,expectedReads:0},
     ];
     for(const c of cases){
       await page.goto(origin+'/#/collectItem/batchManage');
@@ -93,15 +118,15 @@ root.__vue__=batch;
         if(config.boundMethod)library.$options.methods.getData=getData.bind(library);
       },c);
       const queryCandidate=c.candidate||candidate;
-      const result=await page.evaluate(resolveLibraryRecord,{action:c.action||'import_resolve',sa_id:'demo-001',candidate:queryCandidate,expires:Date.now()+(c.shortDeadline?6800:30000)});
+      const result=await page.evaluate(resolveLibraryRecord,{action:c.action||'import_resolve',sa_id:'demo-001',candidate:queryCandidate,primary_fields:c.primary_fields,expires:Date.now()+(c.shortDeadline?6800:30000)});
       assert.equal(result.ok,c.ok,JSON.stringify(result)+' '+c.name);
       if(c.ok){assert.equal(result.data.library_resolution_protocol,2);assert.equal(result.data.items.length,c.count);if(c.count)assert.equal(result.data.items[0].id,item.id);}
       else assert.match(result.error,c.error);
       assert.equal(new URL(page.url()).hash,'#/collectItem/batchManage',c.name);
       const reads=await page.evaluate(()=>window.reads);
       if(c.expectedReads!==undefined)assert.equal(reads.length,c.expectedReads,c.name);
-      if(reads.length)assert.equal(reads[0].doi,queryCandidate.doi,c.name);
-      if(c.ok)assert.equal(reads[1].title,queryCandidate.title,c.name);
+      if(reads.length&&queryCandidate.doi)assert.equal(reads[0].doi,queryCandidate.doi,c.name);
+      if(c.ok)assert.equal(reads[queryCandidate.doi?1:0].title,queryCandidate.title,c.name);
       console.log('PASS '+c.name);
     }
     await page.goto(origin+'/#/collectItem/batchManage');

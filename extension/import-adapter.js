@@ -29,7 +29,8 @@ async function runImportCommand(command) {
     const vms=descendants([...document.querySelectorAll("*")].map(el=>el.__vue__).filter(Boolean));
     // Several unrelated components also use the name BatchManage; require refs.
     const vm=one(vms.filter(v=>v.$options?.name==="BatchManage" && v.$refs?.wosDataText && v.$refs?.batchPushModal),"导入管理页");
-    const excel=command.candidate?.kind==='crossref-openalex-v1';
+    const primary=command.candidate?.kind==='publisher-verified-v1';
+    const excel=primary||command.candidate?.kind==='crossref-openalex-v1';
     const source=excel?'人工提交':'WOS';
     const drawer=excel?vm.$refs.batch:vm.$refs.wosDataText, push=vm.$refs.batchPushModal, view=vm.$refs.batchViewModal;
     if (!vm.page || !Array.isArray(vm.tableData) || typeof vm.getData!=="function" || !view ||
@@ -40,8 +41,11 @@ async function runImportCommand(command) {
     if (typeof command.sa_id!=="string" || !/^[\w-]{1,160}$/.test(command.sa_id) ||
         command.instructions!=="SA补充-"+command.sa_id) fail("导入说明必须严格绑定当前名单 ID");
     const candidate=command.candidate;
-    if (!candidate || !candidate.title || (excel ? candidate.wos!==''||candidate.source!=='Crossref+OpenAlex'||
-        !/^10\.\d{4,9}\/\S+$/.test(candidate.doi)||!Array.isArray(candidate.author_names)||!candidate.author_names.length : !/^WOS:\d{15}$/.test(candidate.wos)) || candidate.sjtu!==true ||
+    const publisherSource=primary&&/^[a-f0-9]{64}$/.test(candidate.primary_evidence_sha256??'')&&candidate.fields?.['相关网址']===candidate.primary_url&&(
+      candidate.source==='ICLR官方论文集'&&/^https:\/\/proceedings\.iclr\.cc\/paper_files\/paper\/\d{4}\/hash\/[a-f0-9]{32}-Abstract-Conference\.html$/.test(candidate.primary_url)||
+      candidate.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(candidate.primary_url));
+    if (!candidate || !candidate.title || (excel ? candidate.wos!==''||(primary?!publisherSource||candidate.doi!==''&&!/^10\.\d{4,9}\/\S+$/.test(candidate.doi):candidate.source!=='Crossref+OpenAlex'||
+        !/^10\.\d{4,9}\/\S+$/.test(candidate.doi))||!Array.isArray(candidate.author_names)||!candidate.author_names.length : !/^WOS:\d{15}$/.test(candidate.wos)) || candidate.sjtu!==true ||
         !/^[a-f0-9]{64}$/.test(candidate.sha256)) fail("缺少已核验的单篇 WOS 证据");
     for (const child of Object.values(vm.$refs)) {
       if (child?.drawer && !(child.__saImport?.sa_id===command.sa_id && [drawer,push,view].includes(child)))
@@ -135,6 +139,12 @@ async function runImportCommand(command) {
         if(!Array.isArray(meta?.authorInstitution)||!meta.authorInstitution.length||
            !/Shanghai\s+(?:Jiao\s*Tong|Jiaotong)\s+Univ(?:ersity)?|上海交通大学/i.test(JSON.stringify(meta.authorInstitution)))
           fail("Excel 导入后未回读到交大署名单位，未推送");
+        if(primary){
+          const fields=command.primary_fields;
+          if(!fields||new Set(Object.values(fields)).size!==3||['相关网址','年份','会议名称'].some(label=>
+            typeof fields[label]!=='string'||!fields[label]||!candidate.fields[label]||scalar(fields[label])!==candidate.fields[label]))
+            fail('正式论文导入后的官方网址、会议、年份未确认，未推送');
+        }
       }
       const ownViewPanels=descendants(view).filter(v=>v.$options?.name==='ElDrawer').map(v=>v.$refs?.drawer||v.$el);
       view.drawer=false; await vm.$nextTick();

@@ -9,7 +9,9 @@ const require = createRequire(path.join(moduleRoot, '__sa_artifact_runtime.cjs')
 const {Workbook, SpreadsheetFile} = await import(pathToFileURL(require.resolve('@oai/artifact-tool')).href);
 const payload = JSON.parse(await fs.readFile(input, 'utf8'));
 const c = payload.candidate;
-if (c?.kind !== 'crossref-openalex-v1' || !c.sjtu || !c.fields || !c.doi) throw Error('Unverified metadata');
+const primary = c?.kind === 'publisher-verified-v1' && /^[a-f0-9]{64}$/.test(c.primary_evidence_sha256??'') &&
+  c.fields?.['相关网址'] === c.primary_url && ['ICLR官方论文集','PMLR官方论文集'].includes(c.source);
+if ((!primary && (c?.kind !== 'crossref-openalex-v1' || !c.doi)) || !c.sjtu || !c.fields) throw Error('Unverified metadata');
 const headers = Object.keys(c.fields), values = headers.map(k => c.fields[k]);
 if (headers.length < 7 || values.some(v => typeof v !== 'string')) throw Error('Invalid flat data');
 const wb = Workbook.create(), sheet = wb.worksheets.add('论文数据');

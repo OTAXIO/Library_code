@@ -224,7 +224,11 @@ class MetadataClient:
             cached = json.loads(archive.read_text(encoding="utf-8"))
             if not isinstance(cached, dict) or cached.get("record_key") != record.key:
                 raise ValueError("record key mismatch")
-            candidate = merge_metadata(record, cached["crossref"], cached["openalex"])
+            if cached.get('candidate', {}).get('kind') == 'publisher-verified-v1':
+                from primary_metadata import rebuild_primary
+                candidate = rebuild_primary(record, folder, cached['primary'])
+            else:
+                candidate = merge_metadata(record, cached["crossref"], cached["openalex"])
             if candidate != cached["candidate"]:
                 raise ValueError("candidate mismatch")
         except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -258,6 +262,10 @@ class MetadataClient:
                 temporary.unlink(missing_ok=True)
 
     def prepare(self, record):
+        from primary_metadata import prepare_primary
+        reviewed = prepare_primary(self, record)
+        if reviewed is not None:
+            return reviewed
         key = digest({"record": record.key, "protocol": KIND})
         folder = self.root / key
         if folder.is_symlink():

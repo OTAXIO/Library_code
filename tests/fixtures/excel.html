@@ -44,7 +44,8 @@ const push={modelFieldsList:[{fieldName:'title'}],duplicateQueryTypes:[{value:'p
 const view={drawer:false,loading:false,tableData:[],page:{total:0},
  showDrawer(id){const row=batches.find(b=>b.id===id),c=row.paper;this.id=id;this.drawer=true;
  this.tableData=[{metadata:{title:[c.title],doi:[c.doi],author:c.author_names.map(fullname=>({fullname})),
- authorInstitution:c.addresses.map(address=>({address}))}}];this.page.total=1;}};
+ authorInstitution:c.addresses.map(address=>({address})),url:[c.fields?.['相关网址']||''],
+ year:[c.fields?.['年份']||''],conferenceName:[c.fields?.['会议名称']||'']}}];this.page.total=1;}};
 const vm={$options:{name:'BatchManage'},$refs:{batch:drawer,wosDataText:{},batchPushModal:push,batchViewModal:view},
  $children:[drawer,push,view],$nextTick:()=>Promise.resolve(),page:{currentPage:1,pageSize:100,total:0},tableData:[],loading:false,
  getData(page,size){this.loading=false;this.page.total=batches.length;this.tableData=batches.slice((page-1)*size,page*size).map(b=>({...b}));},
