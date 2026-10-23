@@ -5,7 +5,6 @@ All successful responses are archived before an import can be prepared.
 """
 from __future__ import annotations
 
-import html
 import json
 import os
 import re
@@ -13,57 +12,21 @@ import socket
 import ssl
 import tempfile
 import time
-import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
 from core import SafetyStop, digest
+from metadata_discovery import MetadataDiscovery
+# Re-export the existing public names so callers/tests and archived workflows
+# retain their interface; discovery and verification share exactly one policy.
+from metadata_identity import MetadataSkip, norm, doi, text, title_key, name_tokens
 
 SOURCE = "Crossref+OpenAlex"
 KIND = "crossref-openalex-v1"
 SJTU = re.compile(r"\bShanghai\s+(?:Jiao\s*Tong|Jiaotong)\s+Univ(?:ersity)?\b|上海交通大学", re.I)
-
-
-class MetadataSkip(SafetyStop):
-    def __init__(self, note):
-        super().__init__(note)
-        self.note = note
-
-
-def norm(value):
-    return " ".join(unicodedata.normalize("NFKC", str(value or "")).casefold().split())
-
-
-def doi(value):
-    value = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", norm(value))
-    if value and not re.fullmatch(r"10\.\d{4,9}/[^\s?#]+", value):
-        raise MetadataSkip("DOI待核验")
-    return value
-
-
-def text(value):
-    if not isinstance(value, str) or len(value) > 16000:
-        raise MetadataSkip("元数据格式待核验")
-    value = html.unescape(re.sub(r"<[^>]+>", "", value)).strip()
-    if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", value):
-        raise MetadataSkip("元数据格式待核验")
-    return value
-
-
-def title_key(value):
-    """Ignore presentation only, never remove/replace words or fuzzy-match titles."""
-    value = norm(text(value)).translate(str.maketrans({
-        "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-", "\u2212": "-",
-        "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
-    }))
-    return re.sub(r"\s*-\s*", "-", value).rstrip(" .")
-
-
-def name_tokens(value):
-    return sorted(re.findall(r"[^\W_]+", norm(value), re.UNICODE))
 
 
 def merge_metadata(record, crossref, openalex):
@@ -175,10 +138,11 @@ def merge_metadata(record, crossref, openalex):
 
 
 class MetadataClient:
-    def __init__(self, root, cancelled=lambda: False):
+    def __init__(self, root, cancelled=lambda: False, progress=lambda _: None):
         self.root, self.cancelled = Path(root), cancelled
         self.root.mkdir(parents=True, exist_ok=True)
         self.last_request = 0.0
+        self.discovery = MetadataDiscovery(lambda url: self.get(url), cancelled, progress)
 
     def get(self, url):
         # A public GET is safe, but never retry 429/5xx aggressively or call it zero.
@@ -195,7 +159,7 @@ class MetadataClient:
             raise SafetyStop("元数据请求地址不在允许的公开接口内。")
         service = "Crossref" if parsed.hostname == "api.crossref.org" else "OpenAlex"
         try:
-            request = Request(url, headers={"User-Agent": "SA-Library-Assistant/0.4.33 (metadata verification)",
+            request = Request(url, headers={"User-Agent": "SA-Library-Assistant/0.4.34 (metadata verification)",
                                            "Accept": "application/json"})
             with urlopen(request, timeout=25) as response:
                 redirected = urlsplit(response.url)
@@ -230,13 +194,22 @@ class MetadataClient:
                 hint = "请求超时（25 秒）"
             elif isinstance(reason, ssl.SSLCertVerificationError):
                 hint = "TLS 证书校验失败（未关闭验证）"
+            elif isinstance(reason, ssl.SSLError):
+                hint = "TLS 连接中断或握手失败（未关闭验证）"
             elif isinstance(reason, socket.gaierror):
                 hint = "域名解析失败"
+            elif isinstance(reason, ConnectionRefusedError):
+                hint = "连接被拒绝"
+            elif isinstance(reason, ConnectionResetError):
+                hint = "连接被重置"
             elif isinstance(exc, ValueError):
                 hint = "响应不是有效的 JSON 对象"
             else:
                 hint = "连接或响应失败"
-            raise SafetyStop(f"{service} {hint}（{type(exc).__name__}），未判为未收录。") from None
+            kind = type(exc).__name__
+            if reason is not exc:
+                kind += '/' + type(reason).__name__
+            raise SafetyStop(f"{service} {hint}（{kind}），未判为未收录。") from None
 
     def read_cache(self, folder, record):
         archive = folder / "metadata.json"
@@ -286,29 +259,40 @@ class MetadataClient:
             raise SafetyStop("元数据缓存目录为链接，未读取或替换。")
         if (folder / "metadata.json").exists():
             return self.read_cache(folder, record)
-        identifier = doi(record.doi)
-        if identifier:
-            response = self.get("https://api.crossref.org/works/" + quote(identifier, safe=""))
-            if response is None:
-                raise MetadataSkip("Crossref未查询到")
-            cr = response.get("message")
-        else:
-            response = self.get("https://api.crossref.org/works?" + urlencode({"query.title": record.title, "rows": 10}))
-            rows = response.get("message", {}).get("items") if response else None
-            if not isinstance(rows, list):
-                raise SafetyStop("Crossref 检索响应未确认，未判为零结果。")
-            exact = [v for v in rows if isinstance(v, dict) and isinstance(v.get("title"), list)
-                     and len(v["title"]) == 1 and title_key(v["title"][0]) == title_key(record.title)]
-            if len(exact) != 1:
-                raise MetadataSkip("题名未唯一匹配" if exact else "Crossref未查询到")
-            cr = exact[0]
-        if not isinstance(cr, dict) or not doi(cr.get("DOI")):
-            raise SafetyStop("Crossref DOI 响应结构异常。")
-        oa = self.get("https://api.openalex.org/works/https://doi.org/" + quote(doi(cr["DOI"]), safe="/"))
-        if oa is None:
-            raise MetadataSkip("OpenAlex未查询到")
-        candidate = merge_metadata(record, cr, oa)
-        payload = {"record_key": record.key, "fetched_utc": datetime.now(timezone.utc).isoformat(),
-                   "crossref": cr, "openalex": oa, "candidate": candidate}
+        try:
+            cr, oa = self.discovery.discover(record)
+            candidate = merge_metadata(record, cr, oa)
+        except SafetyStop as exc:
+            if not isinstance(exc, MetadataSkip):
+                self.discovery.discard_current()
+            self.save_lookup(folder, record, str(exc))
+            raise
+        payload = {"record_key": record.key,
+                   "fetched_utc": min(step['fetched_utc'] for step in self.discovery.steps),
+                   "archived_utc": datetime.now(timezone.utc).isoformat(),
+                   "crossref": cr, "openalex": oa, "candidate": candidate, "lookup": self.discovery.steps}
         self.publish_cache(folder, payload)
         return self.read_cache(folder, record)
+
+    def save_lookup(self, folder, record, reason):
+        """Best-effort private candidate evidence; never masks the original stop."""
+        temporary = None
+        try:
+            if folder.is_symlink() or not folder.resolve().is_relative_to(self.root.resolve()):
+                return
+            folder.mkdir(exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=folder,
+                    prefix='.lookup-', suffix='.tmp', delete=False) as stream:
+                temporary = Path(stream.name)
+                json.dump({'record_key': record.key, 'reason': reason, 'steps': self.discovery.steps}, stream, ensure_ascii=False, indent=2)
+                stream.flush(); os.fsync(stream.fileno())
+            target = folder / ('lookup-' + datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S-%f') + '.json')
+            os.rename(temporary, target)
+        except (OSError, ValueError, TypeError):
+            pass
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass

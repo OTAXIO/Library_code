@@ -56,6 +56,13 @@ async function runImportCommand(command) {
       if(row.source!==source || row.instructions!==command.instructions)fail("批次来源或说明不一致");
       return result;
     };
+    let scannedCount=0;
+    const batchTotal = () => {
+      const value=vm.page.total;
+      if(!['number','string'].includes(typeof value)||!/^\d+$/.test(String(value))||
+          !Number.isSafeInteger(Number(value)))fail('批次数量未知，不能证明批次不存在');
+      return Number(value);
+    };
     const query = async page => {
       await wait(()=>!vm.loading,"等待批次列表");
       const old=vm.tableData;
@@ -63,7 +70,8 @@ async function runImportCommand(command) {
       vm.queryForm={source,batchNumber:"",batchName:"",startTime:"",endTime:""}; vm.queryFormShow=true;
       vm.getData(page,100,{...vm.queryForm});
       await wait(()=>!vm.loading && vm.tableData!==old,"刷新批次列表");
-      if(!Number.isInteger(Number(vm.page.total)) || Number(vm.page.total)<0)fail("批次数量未知");
+      batchTotal();
+      if(!Array.isArray(vm.tableData)||vm.tableData.length>100)fail('批次分页结构异常，未继续');
     };
     class BatchScanChanged extends Error {
       constructor() { super("扫描期间批次总数持续变化，请等待后只读重查"); }
@@ -72,14 +80,15 @@ async function runImportCommand(command) {
       const result=[],seen=new Set(); let total;
       for(let p=1;p<=50;p++) {
         await query(p);
-        if(total!==undefined && total!==Number(vm.page.total))throw new BatchScanChanged();
-        total=Number(vm.page.total);
+        if(total!==undefined && total!==batchTotal())throw new BatchScanChanged();
+        total=batchTotal();
         if(total>5000)fail("WOS 批次超过安全扫描上限，请人工查找目标批次");
         for(const row of vm.tableData){
+          if(!row||typeof row.id!=='string'||!row.id)fail('批次分页编号不是精确文本');
           if(seen.has(row.id))fail("批次分页重复，不能证明不存在同说明批次"); seen.add(row.id);
           if(row.instructions===command.instructions)result.push(snapshot(row));
         }
-        if(p*100>=total){if(seen.size!==total)fail("批次扫描不完整");return result;}
+        if(p*100>=total){if(seen.size!==total)fail("批次扫描不完整");scannedCount=seen.size;return result;}
       }
       fail("批次扫描未完成");
     };
@@ -95,8 +104,10 @@ async function runImportCommand(command) {
         }
       }
     };
-    const verify = async batch => {
+    const verify = async (batch,uniqueDescription=true) => {
       snapshot(batch);
+      if(command.model_id!==undefined && (typeof command.model_id!=='string'||!command.model_id||batch.modelId!==command.model_id))
+        fail('批次模型与原入库断点不一致，未推送或结案');
       for(const key of ["total","actual","fail","status"])
         if(!/^\d+$/.test(String(batch[key])))fail("批次计数/状态未知，不能推送");
       // 'actual' is the post-push count; an imported, unpushed batch can be zero.
@@ -129,7 +140,7 @@ async function runImportCommand(command) {
       view.drawer=false; await vm.$nextTick();
       await wait(()=>view.__saImport?.sa_id===command.sa_id&&view.drawer===false&&ownViewPanels.every(p=>!visible(p)),
         '关闭本条只读批次窗口',10000);
-      if(excel&&drawer.drawer&&drawer.__saImport?.sa_id===command.sa_id&&drawer.__saImport?.submitted){
+      if(excel&&uniqueDescription&&drawer.drawer&&drawer.__saImport?.sa_id===command.sa_id&&drawer.__saImport?.submitted){
         // Close only our successfully verified wizard, never an unrelated drawer.
         const ownUploadPanels=descendants(drawer).filter(v=>v.$options?.name==='ElDrawer').map(v=>v.$refs?.drawer||v.$el);
         drawer.drawer=false;await vm.$nextTick();
@@ -140,14 +151,14 @@ async function runImportCommand(command) {
       // wizard retains active=2. Keep a distinct, read-only receipt for exactly
       // this closed form, but ONLY after actual successful push verification.
       // It authorizes native UI reset for the next paper, never a second import.
-      if(excel&&!drawer.drawer&&Number(batch.status)===2&&Number(batch.actual)===1&&
+      if(excel&&uniqueDescription&&!drawer.drawer&&Number(batch.status)===2&&Number(batch.actual)===1&&
           drawer.form?.instructions===command.instructions&&drawer.form.modelId===batch.modelId&&
           drawer.form.datasource==='人工提交'){
         drawer.__saCompleted={sa_id:command.sa_id,batch_id:batch.id,form:JSON.stringify(drawer.form)};
       }
       return batch;
     };
-    if(command.action==="import_scan")return {ok:true,data:{batches:await scan()}};
+    if(command.action==="import_scan")return {ok:true,data:{batches:await scan(),scanned_count:scannedCount}};
     if(command.action==="import_upload") {
       if(drawer.drawer || (drawer.__saImport?.sa_id===command.sa_id && drawer.__saImport?.uploaded))fail("上传窗口/上传记录已存在，禁止自动重复上传");
       if((await scan()).length)fail("已有相同说明批次，禁止再次导入");
@@ -193,17 +204,30 @@ async function runImportCommand(command) {
       return {ok:true,data:{submitted:true}}; // Deliberately NOT 'imported'.
     }
     let batches=await scan();
+    // Existing WOS callers serialize an absent previous ID as null or "".
+    // Those mean no saved ID, not permission to pick among multiple batches.
+    const savedIdPresent=command.batch_id!==undefined&&command.batch_id!==null&&command.batch_id!=='';
+    const exactReadback = () => command.action==='import_check' && savedIdPresent;
+    if(exactReadback() && (typeof command.batch_id!=='string'||!/^\w[\w-]{0,159}$/.test(command.batch_id)))
+      fail('原批次 ID 不是精确文本，未选择其他批次');
+    const targets = () => exactReadback()?batches.filter(b=>b.id===command.batch_id):batches;
     if(command.action==="import_check") {
       const deadline=Math.min(Date.now()+40000,command.expires-8000);
-      while(Date.now()<deadline && (batches.length===0 || (batches.length===1 &&
-        ((Number(batches[0].total)===0 && Number(batches[0].fail)===0) ||
-         (command.expect_pushed===true && Number(batches[0].status)===1 && Number(batches[0].fail)===0))))) {
+      while(Date.now()<deadline && (targets().length===0 || (targets().length===1 &&
+        ((Number(targets()[0].total)===0 && Number(targets()[0].fail)===0) ||
+         (command.expect_pushed===true && Number(targets()[0].status)===1 && Number(targets()[0].fail)===0))))) {
         await new Promise(r=>setTimeout(r,2000));check();batches=await scan();
       }
     }
-    const batch=one(batches,"对应说明的批次");
+    const matches=targets();
+    if(!matches.length)fail((exactReadback()?'未找到原批次 ID':'未找到本条导入批次')+
+      '（完整扫描 '+scannedCount+' 条，同说明 '+batches.length+' 条）；原提交结果不明，保留断点，未重传');
+    if(matches.length!==1)fail('找到 '+matches.length+' 个同说明批次，无法唯一确认原提交；保留断点，未选择第一条或重传');
+    // Only a read with a previously saved exact ID can distinguish an owned
+    // batch from other same-description rows. Push still requires uniqueness.
+    const batch=matches[0];
     if(command.batch_id && batch.id!==command.batch_id)fail("批次 ID 改变");
-    await verify(batch);
+    await verify(batch,batches.length===1);
     if(command.action==="import_check")return {ok:true,data:{verified:true,batch}};
     if(command.action==="import_push") {
       const expected=command.batch;

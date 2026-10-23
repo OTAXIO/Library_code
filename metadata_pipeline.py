@@ -141,7 +141,7 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
         raise SafetyStop("Excel 自动导入仅允许谭勋策名单中的零匹配任务。")
     root = Path(base).resolve() / "runtime/metadata-imports"
     store = WorkflowStore(root)
-    client = client or MetadataClient(root / "papers", stop.is_set)
+    client = client or MetadataClient(root / "papers", stop.is_set, progress)
     result = BatchResult(roster, remaining=len(records))
     def checkpoint():
         result.roster.assert_unchanged()
@@ -150,6 +150,8 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
     def call(action, payload):
         checkpoint()
         progress(f"Crossref＋OpenAlex · {position}/{len(records)} · {action} · {record.sa_id}")
+        if action.startswith('import_excel_') and state.get('model_id'):
+            payload = {**payload, 'model_id': state['model_id']}
         if action == "search":
             payload = {**payload, "close_detail": True}
         value = bridge.call(action, {"sa_id": record.sa_id, **payload}, timeout=90)
