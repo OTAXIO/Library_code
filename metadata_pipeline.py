@@ -20,6 +20,7 @@ from metadata_identity import title_key
 from metadata_sources import KIND, SOURCE, MetadataClient, MetadataSkip, doi
 from primary_metadata import KIND as PRIMARY_KIND, trusted_page
 from roster_write import mark_skipped_many, mark_skipped_without_note, reconcile_processed, record_data_sources
+from roster_annotations import highlight_new_admission
 from wos_policy import NonZeroMatchSkip, require_no_author_review
 from zero_match import OWNER, BatchResult, WorkflowStore, library_items, verify_import_match, verify_sa
 
@@ -246,6 +247,8 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
         try:
             checkpoint()
             if record.done or record.skipped and not retry_skipped:
+                if record.done:
+                    result.roster=highlight_new_admission(result.roster,record,state).roster
                 # Explicit acceptance/resume can contain a previous completed
                 # row followed by pending ones. Read its actual pushed batch
                 # once so the extension can safely retire a retained native
@@ -537,6 +540,7 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
             result.roster = reconcile_processed(result.roster, record, after).roster
             state.pop("deferred_reason", None)
             state["phase"] = "done"; store.save(record, state)
+            result.roster=highlight_new_admission(result.roster,record,state).roster
             result.outcomes.append({"sa_id": record.sa_id, "status": "done", "message": "已入库", "batch_id": state["batch"]["id"], "item_id": item["id"]})
             result.remaining -= 1
         except MetadataDuplicateReview as exc:

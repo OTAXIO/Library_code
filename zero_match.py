@@ -26,6 +26,7 @@ from wos_batch import ManualExportPending, WOSDownload, preflight
 from wos_policy import (WOSPolicyStop, NonZeroMatchSkip, match_count,
                         require_no_author_review, zero_result_note)
 from skip_notes import brief_skip_note
+from roster_annotations import highlight_new_admission
 
 OWNER = "谭勋策"
 COMPLETION_NOTE = "已入库"
@@ -237,6 +238,13 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
                    cancelled=stop.is_set)
     backend_ready = False
 
+    def highlight_done(record, completed):
+        imported=imports.get(record)
+        if (imported and imported.get('phase')=='pushed'
+                and imported.get('candidate')==completed.get('candidate')):
+            proof={**completed,'batch':imported.get('batch')}
+            result.roster=highlight_new_admission(result.roster,record,proof).roster
+
     def call(action, payload):
         result.roster.assert_unchanged()
         if stop.is_set():
@@ -352,6 +360,7 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
             raise SafetyStop("入库结案未确认，名单未标完成。")
         result.roster = synced.roster
         workflow.save(record, {**state, "phase": "done"})
+        highlight_done(record,{**state,'phase':'done'})
         record_operation("已入库网页结案及名单回写", "已执行", record.sa_id)
 
     def verify_owned_processed(record, row, state, import_state):
@@ -646,6 +655,7 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
             result.roster = synced.roster
             record_operation("回写完成批注及状态", "已执行", record.sa_id)
             workflow.save(record, {**state, "phase": "done"})
+            highlight_done(record,{**state,'phase':'done'})
             result.outcomes.append({"sa_id": record.sa_id, "title": record.title, "status": "done", "message": state["note"], **evidence})
             result.remaining -= 1
         except ManualExportPending as exc:

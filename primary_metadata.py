@@ -132,13 +132,13 @@ def rebuild_primary(record, folder, evidence):
         name = text(author['name']); byline = author.get('byline', '')
         if (not name or name_tokens(deposited) != name_tokens(name) or re.search(r'[;()\r\n]', name)
                 or not compact(byline).startswith(compact(name)) or compact(byline) not in original):
-            raise SafetyStop('正式论文作者与官方书目未逐一对应。')
+            raise MetadataSkip('姓名冲突')
         suffix = compact(byline)[len(compact(name)):]
         if not re.fullmatch(r'[1-9,⋆*†∗]+', suffix):
             raise SafetyStop('作者原文单位序号不明确。')
         indices = sorted({int(number) for number in re.findall(r'[1-9]', suffix)})
         if indices != author.get('affiliations') or any(number > len(addresses) for number in indices):
-            raise SafetyStop('作者单位映射未与原文上标一致。')
+            raise MetadataSkip('作者单位冲突')
         mappings.append(indices); author_names.append(name)
     for number, address in enumerate(addresses, 1):
         if (not isinstance(address, str) or not text(address) or re.search(r'[;\r\n]', address)

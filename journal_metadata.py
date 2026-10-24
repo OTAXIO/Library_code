@@ -75,7 +75,7 @@ def publisher_authors(raw, citation, source):
         parents={child:parent for parent in page.root.iter() for child in parent}
         for deposited,row in zip(names,rows):
             printed=content(row).split('(')[0].strip()
-            if name_tokens(printed)!=name_tokens(deposited):raise SafetyStop('Nature 作者顺序与书目不一致。')
+            if name_tokens(printed)!=name_tokens(deposited):raise MetadataSkip('姓名冲突')
             parent=parents[row]
             indices=[int(n) for n in re.findall(r'-Aff([1-9])(?=-|$)',parent.get('id',''))]
             if parent.tag!='li' or not parent.get('id','').startswith('auth-') or not indices:
@@ -96,7 +96,7 @@ def publisher_authors(raw, citation, source):
             first=next(iter(row),None)
             if first is None:raise SafetyStop('SciOpen 作者正文缺失。')
             printed=content(first)
-            if name_tokens(printed)!=name_tokens(deposited):raise SafetyStop('SciOpen 作者顺序与书目不一致。')
+            if name_tokens(printed)!=name_tokens(deposited):raise MetadataSkip('姓名冲突')
             supers=unique([n for n in row if n.tag=='sup'],'作者上标')
             suffix=content(supers)
             if not re.fullmatch(r'[1-9,§\s]+',suffix):raise SafetyStop('SciOpen 作者上标不明确。')
@@ -149,12 +149,12 @@ def rebuild_journal(record, folder, evidence):
     cr=deposited['message']
     if (doi(cr.get('DOI'))!=identifier or cr.get('type')!='journal-article' or cr.get('container-title')!=[journal]
             or not isinstance(cr.get('title'),list) or len(cr['title'])!=1 or title_key(cr['title'][0])!=title_key(title)):
-        raise SafetyStop('出版社与 Crossref 期刊书目不一致。')
+        raise MetadataSkip('书目信息冲突')
     authors,addresses,mappings=publisher_authors(html,citation,source)
     byline=cr.get('author')
     if (not isinstance(byline,list) or len(byline)!=len(authors) or any(not isinstance(a,dict) or
             name_tokens(text(a.get('given'))+' '+text(a.get('family')))!=name_tokens(name) for a,name in zip(byline,authors))):
-        raise SafetyStop('出版社与 Crossref 作者顺序不一致。')
+        raise MetadataSkip('作者顺序冲突')
     if len(set(map(norm,authors)))!=len(authors) or any(re.search(r'[;()\r\n]',name) for name in authors):
         raise MetadataSkip('出版社作者身份待核验')
     if not any(SJTU.search(a) for a in addresses):raise MetadataSkip('未确认交大署名')
@@ -164,7 +164,7 @@ def rebuild_journal(record, folder, evidence):
         if issued>date.today():raise ValueError()
     except (ValueError,TypeError):raise SafetyStop('出版社在线发表日期不明确。') from None
     if cr.get('published-online') and cr['published-online'].get('date-parts')!=[issued_parts]:
-        raise SafetyStop('出版社与 Crossref 在线日期不一致。')
+        raise MetadataSkip('发表日期冲突')
     if cr.get('published-print'):
         issue_parts=[int(p) for p in one('citation_publication_date').split('/')]
         declared=cr['published-print'].get('date-parts')
@@ -173,10 +173,10 @@ def rebuild_journal(record, folder, evidence):
     first=one('citation_firstpage');last=citation.get('citation_lastpage',[])
     pages=first+('-'+text(unique(last,'末页')) if last else '')
     if cr.get('page')!=pages or text(cr.get('volume'))!=one('citation_volume') or text(cr.get('issue'))!=one('citation_issue'):
-        raise SafetyStop('出版社与 Crossref 卷、期、页码不一致。')
+        raise MetadataSkip('卷期页码冲突')
     issn=one('citation_issn')
     if not re.fullmatch(r'\d{4}-\d{3}[\dX]',issn) or not isinstance(cr.get('ISSN'),list) or issn not in cr['ISSN']:
-        raise SafetyStop('出版社与 Crossref ISSN 不一致。')
+        raise MetadataSkip('ISSN冲突')
     if source=='SciOpen出版社':
         if 'source.pdf' not in raw or urls['source.pdf']!=one('citation_pdf_url'):
             raise SafetyStop('SciOpen 缺官方页面链接的正式 PDF。')
