@@ -89,6 +89,22 @@ def verify_claim_result(record, result, person, author):
         raise SafetyStop("已发出认领，但回读结果不一致。请核验网页，禁止直接重试。")
 
 
+def verified_claim_rejection(result, before, person, author):
+    """A typed backend rejection plus an independent unchanged native read."""
+    if result.get('rejected') is not True:
+        return None
+    error=result.get('rejection',{})
+    if (type(result.get('claim_response_protocol')) is not int or result['claim_response_protocol']!=1
+            or result.get('unchanged') is not True or result.get('row')!=before
+            or result.get('staff_id')!=person['wno'] or result.get('scholar_id')!=person['id']
+            or type(result.get('order')) is not type(author['order']) or result['order']!=author['order']
+            or type(error.get('status')) is not int or error['status'] not in (200,400)
+            or type(error.get('code')) is not int or not isinstance(error.get('message'),str)
+            or not error['message'].strip()):
+        raise SafetyStop('后台拒绝证据未完整核验，不重复认领。')
+    return error
+
+
 def auto_complete_claim(roster, record, bridge, before, comparison, proof, person, author,
                         confirmed=False, note=None):
     """Continue only the just-verified claim, never an uncertain retry."""

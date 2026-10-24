@@ -3,12 +3,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from approval import auto_complete_claim, claim_completion_note, complete_claim, verify_claim_result
+from approval import auto_complete_claim, claim_completion_note, complete_claim, verify_claim_result, verified_claim_rejection
 from automation import classify
 from claim import inspect_staff_claim, sa_claim_source
 from core import SafetyStop
 from bridge import BrowserRejected
 import re
+import unicodedata
+import json
+from pathlib import Path
+from datetime import datetime
+import uuid
 from remarks import CLAIMED, detail_value
 from roster_write import mark_skipped_many, reconcile_processed
 from skip_notes import brief_skip_note
@@ -34,7 +39,7 @@ class _ClaimInterrupted(SafetyStop):
 
 
 def automatic_claim_selection(record, before, comparison, result):
-    """Accept only the extension's one exact person + one exact author match."""
+    """Exact staff identity; a unique registered alias may differ in formatting."""
     if not isinstance(result, dict) or result.get("row") != before or result.get("comparison") != comparison:
         raise SafetyStop("人员查找前后条目或比对详情发生变化。")
     source, staff_id = sa_claim_source(comparison)
@@ -51,16 +56,25 @@ def automatic_claim_selection(record, before, comparison, result):
         raise SafetyStop("未查到唯一、完整的人员信息。")
     suggested = result.get("suggested_index")
     authors = prepared.get("authors")
-    if isinstance(suggested, bool) or not isinstance(suggested, int) or not isinstance(authors, list):
+    if isinstance(suggested, bool) or suggested is not None and not isinstance(suggested, int) or not isinstance(authors, list):
         raise SafetyStop("人员姓名与论文署名不能唯一对应。")
+    def alias_key(value):
+        # Do not derive initials, reorder names, transliterate or correct spelling.
+        value = ' '.join(unicodedata.normalize('NFKC', value).casefold().split())
+        return re.sub(r'\s*,\s*', ',', value)
+    aliases = {alias_key(name) for name in person['names']}
     matches = [author for author in authors if isinstance(author, dict) and
-               author.get("index") == suggested and author.get("eligible") is True and
+               type(author.get('index')) is int and author.get("eligible") is True and
                author.get("scholarId") == "" and isinstance(author.get("fullname"), str) and
-               author["fullname"].strip() in person["names"] and
+               alias_key(author["fullname"]) in aliases and
                not isinstance(author.get("order"), bool) and
                str(author.get("order", "")).isdigit() and int(author["order"]) > 0]
-    if len(matches) != 1:
+    if len(matches) != 1 or suggested is not None and matches[0]['index'] != suggested:
         raise SafetyStop("唯一建议署名不可认领或已存在认领关系。")
+    if suggested is None and matches[0]['fullname'].strip() in person['names']:
+        # A missing hint despite an exact literal match is inconsistent; this
+        # fallback is only for an observed, unique formatting difference.
+        raise SafetyStop("人员姓名与论文署名不能唯一对应。")
     return prepared, person, matches[0], source, staff_id
 
 
@@ -221,6 +235,11 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
             note("自动认领列表条目", "已跳过", sa_id)
             continue
 
+        if claim_state != CLAIMED and record.remark in {'认领回执待核','认领结案待核','认领接口400待核'}:
+            skipped[sa_id]=record.remark
+            note('旧认领写入结果未确认，仅回读，不重复提交','已跳过',sa_id)
+            continue
+
         # A pending author-mismatch row can already have a valid claim. Do not
         # duplicate the claim; verify the fresh detail and close it as 已认领.
         if claim_state == CLAIMED:
@@ -263,6 +282,15 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
         try:
             prepared_result = bridge.call("prepare_claim", payload)
             check_current()
+            if getattr(current_roster, 'path', None):
+                try:
+                    folder=Path(current_roster.path).resolve().parent/'runtime/claim-preflight'
+                    folder.mkdir(parents=True,exist_ok=True)
+                    filename=datetime.now().strftime('%Y%m%d-%H%M%S-')+uuid.uuid4().hex+'.json'
+                    (folder/filename).write_text(json.dumps({'sa_id':sa_id,
+                        'result':prepared_result},ensure_ascii=False,indent=2),encoding='utf-8')
+                except (OSError, TypeError, ValueError):
+                    progress('认领只读诊断未能保存；未据此重新查询或重提。')
         except _ClaimInterrupted as exc:
             return interrupted(exc)
         except Exception as exc:
@@ -300,6 +328,15 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
         note("自动认领提交意图", "已执行", sa_id)
         try:
             proof = bridge.call("submit_claim", submit)
+            rejected=verified_claim_rejection(proof,before,person,author)
+            if rejected:
+                message=rejected['message']
+                if rejected['code'] in (401,403,600) or re.search(r'登录|验证码|无.*权限|权限不足',message):
+                    halted=True;halt_reason='后台会话或认领权限未通过：'+message
+                    note(halt_reason,'已暂停',sa_id);break
+                skipped[sa_id]='后台拒绝认领'
+                note('后台明确拒绝认领：'+message,'已跳过',sa_id)
+                continue
             verify_claim_result(record, proof, person, author)
         except _ClaimInterrupted as exc:
             return interrupted(exc)

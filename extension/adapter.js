@@ -118,7 +118,8 @@ async function runSACommand(command) {
       guardSurface();
       return {ok: true, data: {row, non_sjtu_completion_protocol: 1, import_completion_protocol: 1,
         metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 1,
-        publisher_journal_protocol: 2, publisher_correspondent_protocol: 1}};
+        publisher_journal_protocol: 2, publisher_correspondent_protocol: 1,
+        native_claim_response_protocol:typeof vm.$http?.request==='function'?1:0}};
     }
     const drawer = vm.$refs?.compareDetailDrawer;
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");
@@ -399,6 +400,7 @@ async function runSACommand(command) {
       return {ok: true, data: {row: before, comparison, import_completion_protocol: 1,
         metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 1, publisher_journal_protocol: 2,
         staff_claim_protocol: 1, claim_identity: claimIdentity, publisher_correspondent_protocol: 1,
+        native_claim_response_protocol:typeof vm.$http?.request==='function'?1:0,
         detail_released: command.close_detail === true}};
     }
     if (command.action === "repair_correspondent") {
@@ -773,8 +775,47 @@ async function runSACommand(command) {
       if (reassignment) claim.__saReassignment = canonical(authorization);
       submitted = true;
       claim.__saAssistant = null; // Never silently close an uncertain write.
-      claim.handleClaim(selected); // Exactly one existing UI submit, never batch.
-      await wait(() => !claim.loading && claim.tableData !== beforeWrite, "认领结果回读");
+      if (typeof vm.$http?.request === 'function') {
+        // The site's native helper sends POST query parameters and swallows
+        // Axios errors. Keep those observed parameters, also supply the same
+        // typed JSON body, and let the EXISTING client apply its crypto/auth.
+        // Accept HTTP 400 into its normal response decoder: that decoder is
+        // skipped by the site's generic HTTP-error handler. Never read keys,
+        // session headers or credentials, and never resend this request.
+        const payload = {fullName:selected.fullname,itemId:claim.ids,
+          scholarId:selected.data.scholarId,order:selected.order};
+        let rejection = null;
+        try {
+          const response = await vm.$http.request({url:'/api/cspace-data/itemClaim/claimAuthor',
+            method:'post',params:{...payload},data:{...payload},
+            timeout:Math.max(1000,command.expires-Date.now()-5000),
+            validateStatus:status => status >= 200 && status < 300 || status === 400});
+          if (response?.data?.success !== true || !Number.isInteger(response.data.code)) throw response;
+        } catch (error) {
+          const data=error?.data;
+          if (data?.success !== false || !Number.isInteger(data.code) ||
+              ![200,400].includes(error.status) || typeof data.msg !== 'string' || !data.msg.trim())
+            stop('认领接口未返回可解析的业务回执，未自动重试');
+          rejection={status:error.status,code:data.code,message:data.msg.slice(0,500)};
+        }
+        guard();
+        const refreshed = claim.getItemDetail();
+        if (refreshed && typeof refreshed.then === 'function') await refreshed;
+        await wait(() => !claim.loading && claim.tableData !== beforeWrite, '读取实际作者关系');
+        guard();
+        if (rejection) {
+          // A rejection may advance the queue only after an independent native
+          // read proves every author/relationship stayed unchanged.
+          if (!equal(authorsSnapshot(), authors)) stop('后台拒绝但作者关系已变化，保留未知写入断点');
+          claim.__saAssistant=command.sa_id;
+          return {ok:true,data:{row:before,claimed:false,verified:false,rejected:true,
+            claim_response_protocol:1,unchanged:true,staff_id:staffId,scholar_id:person.id,
+            order:target.order,rejection}};
+        }
+      } else {
+        claim.handleClaim(selected); // Legacy site's same existing UI submit.
+        await wait(() => !claim.loading && claim.tableData !== beforeWrite, "认领结果回读");
+      }
       guard();
       const after = authorsSnapshot();
       if (verifyReassignment) verifyReassignment(person.id);

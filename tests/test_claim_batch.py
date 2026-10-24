@@ -94,6 +94,53 @@ class ClaimBatchTests(unittest.TestCase):
         self.assertTrue(next(item for item in result.roster.records
                              if item.sa_id == "demo-skip").skipped)
 
+    def test_unique_registered_alias_formatting_can_fill_an_absent_native_hint(self):
+        rec=record();search=found(rec);result=prepared(search)
+        result['prepared']['person']['names']=['Family, Given']
+        result['prepared']['authors'][0]['fullname']='Family,Given'
+        result['suggested_index']=None
+        selected=automatic_claim_selection(rec,search['row'],search['comparison'],result)
+        self.assertEqual(selected[2]['index'],0)
+        self.assertEqual(selected[1]['wno'],'00001')
+        for name in ('FAMILY, GIVEN','Ｆａｍｉｌｙ，Ｇｉｖｅｎ'):
+            result['prepared']['authors'][0]['fullname']=name
+            self.assertEqual(automatic_claim_selection(rec,search['row'],search['comparison'],result)[2]['index'],0)
+
+    def test_alias_formatting_never_guesses_initials_spelling_or_ambiguous_rows(self):
+        rec=record();search=found(rec);result=prepared(search)
+        result['prepared']['person']['names']=['Family, Given']
+        result['suggested_index']=None
+        for name in ('Family, G','Family, Givin','Given, Family'):
+            result['prepared']['authors'][0]['fullname']=name
+            with self.assertRaises(SafetyStop):automatic_claim_selection(rec,search['row'],search['comparison'],result)
+        result['prepared']['authors'][0]['fullname']='Family,Given'
+        second=copy.deepcopy(result['prepared']['authors'][0]);second.update(index=1,order=2,fullname='Family, Given')
+        result['prepared']['authors'].append(second)
+        with self.assertRaises(SafetyStop):automatic_claim_selection(rec,search['row'],search['comparison'],result)
+
+    def test_explicit_unchanged_backend_rejection_does_not_retry_or_stop_the_next_paper(self):
+        first,second=record('demo-rejected'),record('demo-next');roster=FakeRoster([first,second])
+        a,b=found(first),found(second);rejected={'row':a['row'],'rejected':True,'verified':False,
+            'claim_response_protocol':1,'unchanged':True,'staff_id':'00001','scholar_id':'scholar-1',
+            'order':1,'rejection':{'status':400,'code':400,'message':'Synthetic validation rejection'}}
+        proof={'row':b['row'],'verified':True,'claimed':True,'staff_id':'00001',
+               'scholar_id':'scholar-1','author':'Tester','order':1}
+        bridge=Mock();bridge.call.side_effect=[a,prepared(a),rejected,b,prepared(b),proof]
+        closed=FakeRoster([first,replace(second,done=True)])
+        with patch('claim_batch.auto_complete_claim',return_value=SimpleNamespace(completion=SimpleNamespace(roster=closed))):
+            result=run_claim_batch(roster,[first,second],bridge,skip_writer=persist_skips)
+        self.assertFalse(result.halted);self.assertEqual(result.completed_ids,(second.sa_id,))
+        self.assertEqual(result.skipped[first.sa_id],'后台拒绝认领')
+        self.assertEqual([c.args[0] for c in bridge.call.call_args_list].count('submit_claim'),2)
+
+    def test_unknown_old_claim_can_be_read_but_is_never_submitted_again(self):
+        for label in ('认领回执待核','认领结案待核','认领接口400待核'):
+            rec=record(skipped=True,remark=label);roster=FakeRoster([rec]);bridge=Mock()
+            bridge.call.return_value=found(rec)
+            result=run_claim_batch(roster,[rec],bridge,retry_skipped=True,skip_writer=persist_skips)
+            self.assertFalse(result.halted);self.assertEqual(result.skipped[rec.sa_id],label)
+            self.assertEqual([c.args[0] for c in bridge.call.call_args_list],['search'])
+
     def test_ambiguous_author_closes_owned_drawer_and_continues(self):
         first, second = record("demo-a"), record("demo-b")
         roster = FakeRoster([first, second])

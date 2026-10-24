@@ -30,7 +30,8 @@ EXACT = {
 SHORT = frozenset(EXACT.values()) | {"WOS控件未识别", "WOS检索超时", "WOS页面待核验",
     "WOS单篇页待核验", "WOS检索页待核验", "WOS登录/验证", "WOS结果待核验",
     "WOS导出待核验", "浏览器连接异常", "命令回执待核验", "待人工核验",
-    "题名待核验", "标识待核验", "下载待核验", "认领信息待核"}
+    "题名待核验", "标识待核验", "下载待核验", "认领信息待核", "后台拒绝认领",
+    "认领回执待核", "认领结案待核", "认领接口400待核"}
 
 
 def known_skip_note(note):
@@ -46,6 +47,10 @@ def known_skip_note(note):
         return EXACT[value]
     if value in SHORT:
         return value
+    if value.startswith('认领结果不确定，禁止继续或重试：'):
+        return '认领回执待核'
+    if value.startswith('认领成功，批注或结案未全部核验：'):
+        return '认领结案待核'
     if value.startswith("WOS 文献标识或归属证据待核验："):
         return "文献身份待核验"
     if value.startswith("人员或署名无法自动确认："):

@@ -10,7 +10,7 @@ import json
 import re
 from pathlib import Path
 
-from approval import verify_claim_result
+from approval import verify_claim_result, verified_claim_rejection
 from automation import wos
 from claim import sa_claim_source
 from claim_batch import automatic_claim_selection
@@ -531,6 +531,16 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                 prepared, person, author, _, _ = automatic_claim_selection(record, row, fresh["comparison"], found)
                 state.update(phase="claim_intent", claim={"person": person, "author": author}); store.save(record, state)
                 proof = call("submit_claim", {**params, "prepared": prepared, "author_index": author["index"], "confirmed": True})
+                rejected=verified_claim_rejection(proof,row,person,author)
+                if rejected:
+                    # This is not an unknown claim: retain its rejected receipt
+                    # and unchanged-read proof before returning to linked review.
+                    state.setdefault('claim_rejections',[]).append({'claim':state['claim'],'proof':proof})
+                    state['phase']='linked'; store.save(record,state)
+                    if rejected['code'] in (401,403,600) or re.search(r'登录|验证码|无.*权限|权限不足',rejected['message']):
+                        raise SafetyStop('后台会话或认领权限未通过：'+rejected['message'])
+                    audit('后台明确拒绝认领：'+rejected['message'],'已跳过',record.sa_id)
+                    raise MetadataReview('后台拒绝认领')
                 verify_claim_result(record, proof, person, author)
                 state["phase"] = "claimed"; store.save(record, state)
                 fresh = call("search", {})

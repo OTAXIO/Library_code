@@ -123,6 +123,9 @@ def main():
                     'status':'done','message':'按完整工号核验认领，网页与名单已认领批注结案'}],remaining=0,halted=False,reason='')
             elif args.claim_only:
                 from types import SimpleNamespace
+                capability=bridge.call('status',{'sa_id':selected[0].sa_id})
+                if type(capability.get('native_claim_response_protocol')) is not int or capability['native_claim_response_protocol']!=1:
+                    raise SafetyStop('请加载扩展 0.4.49 后继续原生认领回执验收；未提交认领。')
                 if len({r.skipped for r in selected if not r.done})>1:
                     raise SafetyStop('认领验收仅接受同一待处理或跳过范围。')
                 claim=run_claim_batch(current,selected,bridge,cancel=stop.is_set,progress=events.put,

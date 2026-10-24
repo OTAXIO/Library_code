@@ -310,6 +310,23 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.backend.calls.count('complete'),1)
         self.assertFalse(any(a.startswith('wos_') or 'claim' in a for a in self.backend.calls))
 
+    def test_explicit_unchanged_claim_rejection_preserves_import_without_unknown_claim_intent(self):
+        self.backend.claimed=False;original=self.backend.call
+        def call(action,payload,timeout=90):
+            if action=='submit_claim':
+                self.backend.calls.append(action)
+                return {'row':copy.deepcopy(self.backend.row),'rejected':True,'verified':False,
+                    'claim_response_protocol':1,'unchanged':True,'staff_id':'00001',
+                    'scholar_id':'person-one','order':1,'rejection':{'status':400,'code':400,
+                    'message':'Synthetic validation rejection'}}
+            return original(action,payload,timeout)
+        self.backend.call=call;result=self.run_once()
+        self.assertFalse(result.halted,result.reason);self.assertTrue(result.roster.records[0].skipped)
+        self.assertEqual(result.roster.records[0].remark,'后台拒绝认领')
+        state=WorkflowStore(self.base/'runtime/metadata-imports').get(self.record)
+        self.assertEqual(state['phase'],'linked');self.assertEqual(len(state['claim_rejections']),1)
+        self.assertNotIn('complete',self.backend.calls)
+
     def test_malformed_library_title_preserves_prepared_task_without_marking_skip(self):
         for index,malformed in enumerate((None,{},'x'*16001,'bad\x01title')):
             with self.subTest(kind=type(malformed).__name__,size=len(malformed) if isinstance(malformed,str) else None):
