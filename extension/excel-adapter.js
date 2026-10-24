@@ -97,10 +97,14 @@ async function runExcelCommand(command) {
     }
     if(!['import_excel_upload','import_excel_upload_status','import_excel_submit'].includes(command.action))fail('未知 Excel 操作');
     const c=command.candidate;
+    const journal=c?.document_type==='journal-article';
     const primary=c?.kind==='publisher-verified-v1'&&/^[a-f0-9]{64}$/.test(c.primary_evidence_sha256??'')&&
-      c.fields?.['相关网址']===c.primary_url&&(
-      c.source==='ICLR官方论文集'&&/^https:\/\/proceedings\.iclr\.cc\/paper_files\/paper\/\d{4}\/hash\/[a-f0-9]{32}-Abstract-Conference\.html$/.test(c.primary_url)||
-      c.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(c.primary_url));
+      c.fields?.[journal?'URL':'相关网址']===c.primary_url&&(
+      journal&&c.model_name==='期刊论文'&&/^10\.\d{4,9}\/\S+$/.test(c.doi)&&(
+        c.source==='Nature出版社'&&c.doi.startsWith('10.1038/')&&c.primary_url==='https://www.nature.com/articles/'+c.doi.slice(8)||
+        c.source==='SciOpen出版社'&&c.doi.startsWith('10.26599/')&&String(c.primary_url).toLowerCase()==='https://www.sciopen.com/article/'+c.doi)||
+      !journal&&c.source==='ICLR官方论文集'&&/^https:\/\/proceedings\.iclr\.cc\/paper_files\/paper\/\d{4}\/hash\/[a-f0-9]{32}-Abstract-Conference\.html$/.test(c.primary_url)||
+      !journal&&c.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(c.primary_url));
     if(!c||(!primary&&(c.kind!=='crossref-openalex-v1'||c.source!=='Crossref+OpenAlex'))||c.sjtu!==true||c.wos!==''||
        (primary?c.doi!==''&&!/^10\.\d{4,9}\/\S+$/.test(c.doi):!/^10\.\d{4,9}\/\S+$/.test(c.doi))||!c.title||!Array.isArray(c.author_names)||!c.author_names.length||
        !/^[a-f0-9]{64}$/.test(c.sha256)||!/^[a-f0-9]{64}$/.test(command.xlsx_sha256)||

@@ -114,7 +114,7 @@ async function runSACommand(command) {
       const row = snap(await fresh());
       guardSurface();
       return {ok: true, data: {row, non_sjtu_completion_protocol: 1, import_completion_protocol: 1,
-        metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 1}};
+        metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 1, publisher_journal_protocol: 2}};
     }
     const drawer = vm.$refs?.compareDetailDrawer;
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");
@@ -377,7 +377,7 @@ async function runSACommand(command) {
       // guards refuse editors, claim selections, target changes and strangers.
       if (command.close_detail === true) await closeReadOnlyDetail();
       return {ok: true, data: {row: before, comparison, import_completion_protocol: 1,
-        metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 1,
+        metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 1, publisher_journal_protocol: 2,
         detail_released: command.close_detail === true}};
     }
     if (["prepare_claim", "submit_claim"].includes(command.action)) {
@@ -578,10 +578,14 @@ async function runSACommand(command) {
       const titleKey = metadata ? metadataTitle : norm;
       const doi = value => norm(value).replace(/^(?:https?:\/\/doi\.org\/|doi:)\s*/,"");
       const wos = value => {const v=String(value??"").trim().toUpperCase();return v&&!v.startsWith("WOS:")?"WOS:"+v:v;};
+      const journal=c?.document_type==='journal-article';
       const primary=c?.kind==='publisher-verified-v1'&&/^[a-f0-9]{64}$/.test(c.primary_evidence_sha256??'')&&
-        c.fields?.['相关网址']===c.primary_url&&(
-        c.source==='ICLR官方论文集'&&/^https:\/\/proceedings\.iclr\.cc\/paper_files\/paper\/\d{4}\/hash\/[a-f0-9]{32}-Abstract-Conference\.html$/.test(c.primary_url)||
-        c.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(c.primary_url));
+        c.fields?.[journal?'URL':'相关网址']===c.primary_url&&(
+        journal&&c.model_name==='期刊论文'&&/^10\.\d{4,9}\/\S+$/.test(c.doi)&&(
+          c.source==='Nature出版社'&&c.doi.startsWith('10.1038/')&&c.primary_url==='https://www.nature.com/articles/'+c.doi.slice(8)||
+          c.source==='SciOpen出版社'&&c.doi.startsWith('10.26599/')&&String(c.primary_url).toLowerCase()==='https://www.sciopen.com/article/'+c.doi)||
+        !journal&&c.source==='ICLR官方论文集'&&/^https:\/\/proceedings\.iclr\.cc\/paper_files\/paper\/\d{4}\/hash\/[a-f0-9]{32}-Abstract-Conference\.html$/.test(c.primary_url)||
+        !journal&&c.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(c.primary_url));
       if (command.action !== "complete" || command.owner !== "谭勋策" || Number(row.matchCount) !== 1 ||
           !proof || !/^\d{1,40}$/.test(proof.item_id??"") ||
           String(row.itemId??"").replace(/^,/,"") !== proof.item_id || !c ||

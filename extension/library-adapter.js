@@ -28,8 +28,13 @@ async function resolveLibraryRecord(command) {
     if(location.hash.split('?')[0]!=="#/collectItem/batchManage")fail("请先返回绑定的导入管理页");
     const c=command.candidate;
     const primary=c?.kind==='publisher-verified-v1';
+    const journal=c?.document_type==='journal-article';
+    const urlLabel=journal?'URL':'相关网址',venueLabel=journal?'发表期刊':'会议名称';
     const publisherSource=()=>{
-      if(!primary||!/^[a-f0-9]{64}$/.test(c.primary_evidence_sha256??'')||c.fields?.['相关网址']!==c.primary_url)return false;
+      if(!primary||!/^[a-f0-9]{64}$/.test(c.primary_evidence_sha256??'')||c.fields?.[urlLabel]!==c.primary_url)return false;
+      if(journal)return c.model_name==='期刊论文'&&/^10\.\d{4,9}\/\S+$/.test(c.doi)&&(
+        c.source==='Nature出版社'&&c.primary_url==='https://www.nature.com/articles/'+c.doi.replace(/^10\.1038\//,'')&&c.doi.startsWith('10.1038/')||
+        c.source==='SciOpen出版社'&&String(c.primary_url).toLowerCase()==='https://www.sciopen.com/article/'+c.doi&&c.doi.startsWith('10.26599/'));
       return c.source==='ICLR官方论文集'&&/^https:\/\/proceedings\.iclr\.cc\/paper_files\/paper\/\d{4}\/hash\/[a-f0-9]{32}-Abstract-Conference\.html$/.test(c.primary_url)||
         c.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(c.primary_url);
     };
@@ -38,7 +43,7 @@ async function resolveLibraryRecord(command) {
        (metadata ? c.wos!==''||(primary?!publisherSource()||c.doi!==''&&!/^10\.\d{4,9}\/\S+$/.test(c.doi):!/^10\.\d{4,9}\/\S+$/.test(c.doi)||c.source!=='Crossref+OpenAlex') : !/^WOS:\d{15}$/.test(c.wos))||typeof c.doi!=="string"||c.sjtu!==true||
        !/^[a-f0-9]{64}$/.test(c.sha256))fail("缺少真实 TXT 文献证据");
     const primaryFields=command.primary_fields;
-    if(primary&&(!primaryFields||['相关网址','年份','会议名称'].some(label=>
+    if(primary&&(!primaryFields||[urlLabel,'年份',venueLabel].some(label=>
       typeof primaryFields[label]!=='string'||!primaryFields[label]||!c.fields?.[label])||
       new Set(Object.values(primaryFields)).size!==3||!Array.isArray(c.author_names)||!c.author_names.length))
       fail('官方来源原生身份字段未确认，未检索或上传');
@@ -130,7 +135,7 @@ async function resolveLibraryRecord(command) {
         if(!Array.isArray(authors)||authors.length!==c.author_names.length||
           authors.some((author,i)=>norm(typeof author==='string'?author:author?.fullname)!==norm(c.author_names[i])))
           fail('本库同题名作者顺序不同或缺失，需人工查重');
-        const url=scalar(row.metadata,primaryFields['相关网址']);
+        const url=scalar(row.metadata,primaryFields[urlLabel]);
         // Native batch preview stores the imported year as text, but the
         // public EntryManage index normalizes it to [2026]. Only this observed
         // four-digit scalar may be canonicalized; never coerce booleans,
@@ -140,9 +145,12 @@ async function resolveLibraryRecord(command) {
           typeof rawYear[0]==='string'&&/^\d{4}$/.test(rawYear[0])||
           typeof rawYear[0]==='number'&&Number.isInteger(rawYear[0])&&rawYear[0]>=1000&&rawYear[0]<=9999)
           ?String(rawYear[0]):'';
-        const venue=scalar(row.metadata,primaryFields['会议名称']);
-        if(url!==c.primary_url||year!==c.fields['年份']||venue!==c.fields['会议名称']||foundDoi!==c.doi)
-          fail('本库同题名官方网址、年份、会议或 DOI 不同/缺失，需人工查重');
+        const rawVenue=row.metadata[primaryFields[venueLabel]];
+        const venueValue=Array.isArray(rawVenue)&&rawVenue.length===1?rawVenue[0]:null;
+        const venue=journal&&venueValue&&typeof venueValue==='object'&&!Array.isArray(venueValue)
+          ?(typeof venueValue.name==='string'?venueValue.name:''):scalar(row.metadata,primaryFields[venueLabel]);
+        if(url!==c.primary_url||year!==c.fields['年份']||venue!==c.fields[venueLabel]||foundDoi!==c.doi)
+          fail('本库同题名官方网址、年份、期刊/会议或 DOI 不同/缺失，需人工查重');
         primaryIdentity={url,year,venue,authors:[...c.author_names]};
       }
       const sameId=Boolean(!metadata&&ut===c.wos.slice(4))||Boolean(c.doi&&foundDoi===c.doi)||Boolean(primaryIdentity);

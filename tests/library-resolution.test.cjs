@@ -14,6 +14,12 @@ const primaryCandidate={...metadataCandidate,kind:'publisher-verified-v1',source
 const primaryFields={'相关网址':'url','年份':'year','会议名称':'conferenceName'};
 const primaryItem={id:'1234567890123456789',metadata:{title:[candidate.title],doi:[],wosId:[],
   url:[primaryUrl],year:['2026'],conferenceName:[primaryCandidate.fields['会议名称']],author:[{fullname:'Alice Test'}]}};
+const journalFields={'URL':'url','年份':'year','发表期刊':'source'};
+const journalCandidate={...primaryCandidate,source:'Nature出版社',document_type:'journal-article',model_name:'期刊论文',
+ doi:'10.1038/s99999-025-00001-1',primary_url:'https://www.nature.com/articles/s99999-025-00001-1',
+ fields:{'URL':'https://www.nature.com/articles/s99999-025-00001-1','年份':'2025','发表期刊':'Synthetic Journal'}};
+const journalItem={...primaryItem,metadata:{...primaryItem.metadata,doi:[journalCandidate.doi],url:[journalCandidate.primary_url],
+ year:[2025],source:[{name:'Synthetic Journal',issn:null,standardName:null}]}};
 const item={id:'1234567890123456789',metadata:{title:[candidate.title],doi:[candidate.doi],wosId:[candidate.wos]}};
 const fixture=`<div id="app">Disposable library fixture</div><script>
 window.config={rows:[],failure:false,incomplete:false};window.reads=[];window.routes=[];
@@ -106,6 +112,21 @@ root.__vue__=batch;
         action:'import_excel_resolve',rows:[],ok:false,error:/身份字段/,expectedReads:0},
       {name:'official source rejects website masquerading as publisher',candidate:{...primaryCandidate,primary_url:primaryUrl+'.evil'},
         action:'import_excel_resolve',primary_fields:primaryFields,rows:[],ok:false,error:/文献证据/,expectedReads:0},
+      {name:'publisher journal uses actual URL year journal and full ordered authors plus DOI',candidate:journalCandidate,
+        action:'import_excel_resolve',primary_fields:journalFields,rows:[journalItem],ok:true,count:1},
+      {name:'publisher journal empty DOI and title queries prove absence',candidate:journalCandidate,
+        action:'import_excel_resolve',primary_fields:journalFields,rows:[],ok:true,count:0},
+      ...[[{name:'Different Journal'}],[{name:['Synthetic Journal']}],[{}],[['Synthetic Journal']],
+          [{name:'Synthetic Journal'},{name:'Other Journal'}]].map(source=>({
+        name:'ambiguous or changed native journal remains review-only '+JSON.stringify(source),candidate:journalCandidate,
+        action:'import_excel_resolve',primary_fields:journalFields,
+        rows:[{...journalItem,metadata:{...journalItem.metadata,source}}],ok:false,error:/人工查重/})),
+      {name:'publisher journal cannot silently lose its DOI',candidate:{...journalCandidate,doi:''},
+        action:'import_excel_resolve',primary_fields:journalFields,rows:[],ok:false,error:/文献证据/,expectedReads:0},
+      {name:'publisher journal cannot borrow conference schema',candidate:journalCandidate,
+        action:'import_excel_resolve',primary_fields:primaryFields,rows:[],ok:false,error:/身份字段/,expectedReads:0},
+      {name:'publisher DOI URL disagreement blocks before any native query',candidate:{...journalCandidate,doi:'10.1038/other'},
+        action:'import_excel_resolve',primary_fields:journalFields,rows:[],ok:false,error:/文献证据/,expectedReads:0},
     ];
     for(const c of cases){
       await page.goto(origin+'/#/collectItem/batchManage');

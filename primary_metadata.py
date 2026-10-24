@@ -1,4 +1,4 @@
-"""Reviewed publisher records backed by archived official HTML and original PDF.
+"""Reviewed publisher records backed by original HTML, PDFs and public APIs.
 
 Public indexes can omit proceedings without DOIs. Such records use their real
 publisher URL, never an invented DOI or a preprint's identifiers/authors.
@@ -17,6 +17,7 @@ from metadata_identity import MetadataSkip, doi, name_tokens, norm, text, title_
 
 KIND = 'publisher-verified-v1'
 SOURCES = {'proceedings.iclr.cc': 'ICLR官方论文集', 'proceedings.mlr.press': 'PMLR官方论文集'}
+SOURCES.update({'www.nature.com':'Nature出版社','www.sciopen.com':'SciOpen出版社'})
 SJTU = re.compile(r'\bShanghai\s+(?:Jiao\s*Tong|Jiaotong)\s+Univ(?:ersity)?\b|上海交通大学', re.I)
 
 
@@ -37,8 +38,9 @@ def trusted_page(url):
     if (parsed.scheme != 'https' or parsed.hostname not in SOURCES or parsed.username or parsed.password
             or parsed.port not in (None, 443) or parsed.query or parsed.fragment):
         raise SafetyStop('官方论文集网址未确认。')
-    pattern = (r'/paper_files/paper/\d{4}/hash/[a-f0-9]{32}-Abstract-Conference\.html'
-               if parsed.hostname == 'proceedings.iclr.cc' else r'/v\d+/[a-z0-9]+\.html')
+    pattern = {'proceedings.iclr.cc':r'/paper_files/paper/\d{4}/hash/[a-f0-9]{32}-Abstract-Conference\.html',
+               'proceedings.mlr.press':r'/v\d+/[a-z0-9]+\.html','www.nature.com':r'/articles/s\d+-\d{3}-\d+-[a-z0-9]+',
+               'www.sciopen.com':r'/article/10\.26599/[A-Za-z0-9.()-]+'}[parsed.hostname]
     if not re.fullmatch(pattern, parsed.path):
         raise SafetyStop('不是已核验的官方单篇论文页。')
     return SOURCES[parsed.hostname]
@@ -52,6 +54,9 @@ def compact(value):
 
 def rebuild_primary(record, folder, evidence):
     """Reparse the immutable originals on every resume; evidence is not a flag."""
+    if isinstance(evidence,dict) and evidence.get('evidence_type')=='publisher-journal-v1':
+        from journal_metadata import rebuild_journal
+        return rebuild_journal(record,folder,evidence)
     if (not isinstance(evidence, dict) or type(evidence.get('version')) is not int
             or evidence['version'] != 1 or evidence.get('reviewed') is not True):
         raise SafetyStop('官方来源尚未完成人工逐字段核验。')
@@ -181,7 +186,7 @@ def prepare_primary(client, record):
     if (folder/'metadata.json').exists():
         return client.read_cache(folder, record)
     folder.mkdir(exist_ok=True)
-    for name in ('source.html', 'source.pdf'):
+    for name in (doc['path'] for doc in evidence['documents']):
         target = folder/name
         if target.is_symlink() or target.exists() and file_hash(target) != file_hash(source_folder/name):
             raise SafetyStop('同篇官方来源归档冲突，保留原件。')

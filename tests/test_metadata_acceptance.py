@@ -17,10 +17,11 @@ class AcceptanceSourceTests(unittest.TestCase):
         (self.base/'extension/library-adapter.js').write_text('synthetic adapter')
         (self.base/'maintenance/metadata_acceptance.py').write_text('synthetic runner')
         (self.base/'zero_match.py').write_text('synthetic dependency')
+        (self.base/'metadata_excel.mjs').write_text('synthetic workbook serializer')
 
     def test_dependency_extension_and_runner_changes_require_restart(self):
         for name in ('zero_match.py', 'extension/library-adapter.js',
-                     'extension/manifest.json', 'maintenance/metadata_acceptance.py'):
+                     'extension/manifest.json', 'maintenance/metadata_acceptance.py', 'metadata_excel.mjs'):
             with self.subTest(name=name):
                 before = code_fingerprint(self.base)
                 path = self.base/name

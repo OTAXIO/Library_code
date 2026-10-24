@@ -146,8 +146,9 @@ def resolved(answer, candidate):
             or doi(item.get("doi")) != candidate["doi"]):
         raise SafetyStop("本库 DOI/题名/平台号与元数据不一致。")
     if candidate.get('kind') == PRIMARY_KIND:
+        venue_label='发表期刊' if candidate.get('document_type')=='journal-article' else '会议名称'
         expected = {'url': candidate['primary_url'], 'year': candidate['fields']['年份'],
-                    'venue': candidate['fields']['会议名称'], 'authors': candidate['author_names']}
+                    'venue': candidate['fields'][venue_label], 'authors': candidate['author_names']}
         if item.get('primary_identity') != expected:
             raise SafetyStop('本库官方网址、作者顺序、会议或年份不一致；未关联或结案。')
     return item
@@ -336,6 +337,9 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
             if primary and (type(fresh.get('publisher_metadata_protocol')) is not int
                             or fresh['publisher_metadata_protocol'] != 1):
                 raise SafetyStop('请加载支持官方论文集的扩展 0.4.37；未上传或重复导入。')
+            if primary and candidate.get('document_type')=='journal-article' and (
+                    type(fresh.get('publisher_journal_protocol')) is not int or fresh['publisher_journal_protocol']!=2):
+                raise SafetyStop('请加载支持原生期刊字段的扩展 0.4.40；未上传或重复导入。')
             source_ok = (candidate.get('source') == trusted_page(candidate.get('primary_url')) if primary
                          else candidate.get('kind') == KIND and candidate.get('source') == SOURCE)
             if (not source_ok or not candidate.get("sjtu")
@@ -388,7 +392,9 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                     raise MetadataSkip("导入必填字段缺失")
                 if primary:
                     mapping = {}
-                    for label in ('相关网址', '年份', '会议名称'):
+                    identity_labels=(('URL','年份','发表期刊') if candidate.get('document_type')=='journal-article'
+                                     else ('相关网址','年份','会议名称'))
+                    for label in identity_labels:
                         native = [f.get('field') for f in fields if f.get('label') == label]
                         if len(native) != 1 or not isinstance(native[0], str) or not native[0]:
                             raise SafetyStop('官方来源原生身份字段未确认，未上传。')

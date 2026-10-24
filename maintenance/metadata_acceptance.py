@@ -28,6 +28,7 @@ from pairing_ui import copy_pairing_code
 def code_fingerprint(base):
     """A stopped acceptance must restart before executing changed source code."""
     paths = set(base.glob('*.py'))
+    paths.update(base.glob('*.mjs'))
     paths.update((base/'extension').glob('*.js'))
     paths.add(base/'extension/manifest.json')
     paths.add(base/'maintenance/metadata_acceptance.py')
@@ -76,7 +77,7 @@ def main():
         with pair_file.open('x',encoding='utf-8') as stream:json.dump({'token':bridge.token},stream)
     stop=threading.Event(); commands=queue.Queue(); events=queue.Queue()
     version=json.loads((BASE/'extension/manifest.json').read_text(encoding='utf-8'))['version']
-    root=tk.Tk();root.title('公开元数据与官方论文集 · 导入验收 '+version);root.geometry('620x290')
+    root=tk.Tk();root.title('公开元数据与出版社原文 · 导入验收 '+version);root.geometry('620x290')
     panel=ttk.Frame(root,padding=16);panel.pack(fill='both',expand=True)
     ttk.Label(panel,text='仅配对现有 SA 比对页，并绑定现有后台导入页。\n不需要 WOS；配对后由脚本执行上传、推送、批注与结案。').pack(anchor='w')
     code=tk.StringVar(value=bridge.token)

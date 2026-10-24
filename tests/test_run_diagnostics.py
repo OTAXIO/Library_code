@@ -47,7 +47,11 @@ class DiagnosticsTests(unittest.TestCase):
     def test_failed_ack_has_error_and_stack_without_replaying_or_logging_secrets(self):
         backend = Mock(online=True, token="synthetic-private-token")
         backend.call.side_effect = SafetyStop("lost ack token=abc Bearer xyz https://example.org/?api_key=foo synthetic-private-token")
-        d = self.diagnostic(backend)
+        # Random hexadecimal IDs can coincidentally contain the deliberately
+        # short synthetic secret 'abc'. Keep the ID deterministic here without
+        # weakening the assertion that messages/logs never retain any secret.
+        with patch('run_diagnostics.uuid4',return_value=SimpleNamespace(hex='0'*32)):
+            d = self.diagnostic(backend)
         with self.assertRaises(SafetyStop) as stopped:
             TracedBridge(backend, d).call("import_excel_submit", {"sa_id": self.record.sa_id})
         d.failed(stopped.exception)

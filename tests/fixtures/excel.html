@@ -9,7 +9,7 @@ const tree={$options:{name:'selectTree'},treeData:[{id:'sjtu-test',name:'上海�
 const zero={form:{},modelOptions:[{id:'journal-test',name:'期刊论文'},{id:'conference-test',name:'会议论文'}],source:['WOS','人工提交'],$children:[tree]};
 const one={fileList:[],$el:element};
 const labels={'题名':'title','作者':'author','作者单位':'authorInstitution','发表日期':'issued',
-  '年份':'year','发表期刊':'source','DOI':'doi','URL':'url'};
+  '年份':'year','发表期刊':'source','DOI':'doi','URL':'url','卷号':'volume','期号':'issue','页码':'pages','ISSN':'issn'};
 const conferenceLabels={'题名':'title','作者':'author','作者单位':'authorInstitution','发表日期':'issued',
   '年份':'year','出处':'source','DOI':'doi','会议名称':'conferenceName','相关网址':'url'};
 const drawer={$refs:{stepZero:zero,stepOne:one},$children:[zero,one],form:{checkDuplicationField:''},active:0,modelFields:[],columns:[],
@@ -43,9 +43,10 @@ const push={modelFieldsList:[{fieldName:'title'}],duplicateQueryTypes:[{value:'p
  onSubmit(){pushes++;const row=batches.find(b=>b.id===this.form.batchId);row.status=2;row.actual=1;row.increase=1;this.drawer=false;}};
 const view={drawer:false,loading:false,tableData:[],page:{total:0},
  showDrawer(id){const row=batches.find(b=>b.id===id),c=row.paper;this.id=id;this.drawer=true;
- this.tableData=[{metadata:{title:[c.title],doi:[c.doi],author:c.author_names.map(fullname=>({fullname})),
- authorInstitution:c.addresses.map(address=>({address})),url:[c.fields?.['相关网址']||''],
- year:[c.fields?.['年份']||''],conferenceName:[c.fields?.['会议名称']||'']}}];this.page.total=1;}};
+ this.tableData=[{metadata:{title:[c.title],doi:[c.doi],author:c.author_names.map((fullname,i)=>({fullname,institutionOrderNums:c.author_mapping?.[i]})),
+ authorInstitution:c.addresses.map((address,i)=>({address,order:i+1})),url:[c.fields?.['URL']||c.fields?.['相关网址']||''],source:[{name:c.fields?.['发表期刊']||'',issn:null,standardName:null}],
+ issued:[c.fields?.['发表日期']||''],volume:[c.fields?.['卷号']||''],issue:[c.fields?.['期号']||''],pages:[c.fields?.['页码']||''],issn:[c.fields?.['ISSN']||''],
+ year:[c.fields?.['年份']?Number(c.fields['年份']):''],conferenceName:[c.fields?.['会议名称']||'']}}];this.page.total=1;}};
 const vm={$options:{name:'BatchManage'},$refs:{batch:drawer,wosDataText:{},batchPushModal:push,batchViewModal:view},
  $children:[drawer,push,view],$nextTick:()=>Promise.resolve(),page:{currentPage:1,pageSize:100,total:0},tableData:[],loading:false,
  getData(page,size){this.loading=false;this.page.total=batches.length;this.tableData=batches.slice((page-1)*size,page*size).map(b=>({...b}));},
