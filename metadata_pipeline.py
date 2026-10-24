@@ -21,6 +21,7 @@ from metadata_sources import KIND, SOURCE, MetadataClient, MetadataSkip, doi
 from primary_metadata import KIND as PRIMARY_KIND, trusted_page
 from roster_write import mark_skipped_many, mark_skipped_without_note, reconcile_processed, record_data_sources
 from roster_annotations import highlight_new_admission
+from batch_recovery import RecordReadback,UnconfirmedBatch,park_record
 from wos_policy import NonZeroMatchSkip, require_no_author_review
 from zero_match import OWNER, BatchResult, WorkflowStore, library_items, verify_import_match, verify_sa
 
@@ -197,7 +198,7 @@ def check_cross_workflow(base, record):
 def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: None,
                        audit=lambda *args: None, *, retry_skipped=False, client=None, excel_builder=build_excel):
     records = list(records)
-    if (not 1 <= len(records) <= 100 or len({r.sa_id for r in records}) != len(records)
+    if (not 1 <= len(records) <= (len(roster.records) if retry_skipped else 100) or len({r.sa_id for r in records}) != len(records)
             or any(r not in roster.records or r.owner != OWNER or r.matches != 0 for r in records)
             or type(retry_skipped) is not bool):
         raise SafetyStop("Excel 自动导入仅允许谭勋策名单中的零匹配任务。")
@@ -218,7 +219,7 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
             payload = {**payload, 'primary_fields': state['primary_fields']}
         if action == "search":
             payload = {**payload, "close_detail": True}
-        value = bridge.call(action, {"sa_id": record.sa_id, **payload}, timeout=90)
+        value = readback.call(bridge,action,{"sa_id": record.sa_id, **payload},timeout=90)
         if action == "search" and value.get("detail_released") is not True:
             raise SafetyStop("本条只读详情尚未确认收起，未继续下一篇或提交认领结案。")
         try:
@@ -242,8 +243,10 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
             store.save(record, state)
             raise MetadataDuplicateReview("本库重复待核验") from None
     for position, original in enumerate(records, 1):
+        readback=RecordReadback()
         record = next(r for r in result.roster.records if r.sa_id == original.sa_id)
         state = store.get(record)
+        resumed_import=state.get('phase')=='import_intent' and not state.get('batch')
         try:
             checkpoint()
             if record.done or record.skipped and not retry_skipped:
@@ -439,6 +442,11 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                 if answer.get("submitted") is not True:
                     raise SafetyStop("Excel 导入提交未确认。")
             if state["phase"] in ("import_intent", "imported", "push_intent", "pushed", "link_intent", "linked", "claim_intent", "claimed", "complete_intent", "done"):
+                if resumed_import:
+                    scan=call('import_excel_scan',payload)
+                    total=scan.get('scanned_count')
+                    if scan.get('batches')==[] and type(total) is int and 0<=total<=5000:
+                        raise UnconfirmedBatch('完整扫描 '+str(total)+' 个批次仍无对应原提交；保留断点，未重传。')
                 checked = call("import_excel_check", {**payload, "batch_id": state.get("batch", {}).get("id", ""),
                     "expect_pushed": state["phase"] in ("push_intent", "pushed", "link_intent", "linked", "claim_intent", "claimed", "complete_intent", "done")})
                 if checked.get("verified") is not True:
@@ -566,6 +574,14 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
             result.remaining -= 1
         except (MetadataSkip, NonZeroMatchSkip) as exc:
             if state.get("phase") not in (None, "prepared"):
+                if retry_skipped and isinstance(exc,MetadataSkip):
+                    try:result.roster=park_record(result.roster,record,exc.note,bridge,stop)
+                    except SafetyStop as blocked:
+                        result.halted,result.reason=True,str(blocked)
+                        break
+                    result.outcomes.append({'sa_id':record.sa_id,'status':'deferred','message':exc.note+'；保留原断点，已继续后续条目。'})
+                    result.remaining-=1
+                    continue
                 result.halted, result.reason = True, str(exc)
                 break
             checkpoint()
@@ -575,6 +591,16 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
             result.outcomes.append({"sa_id": record.sa_id, "status": "skip", "message": str(exc)})
             result.remaining -= 1
         except SafetyStop as exc:
+            note=readback.isolated_note(exc,retry_skipped)
+            if note:
+                try:result.roster=park_record(result.roster,record,note,bridge,stop)
+                except SafetyStop as blocked:
+                    result.halted,result.reason=True,str(blocked)
+                    break
+                result.outcomes.append({'sa_id':record.sa_id,'status':'deferred','message':note+'；保留原断点，已继续后续条目。','detail':str(exc)})
+                result.remaining-=1
+                progress('本条'+note+'，已保留断点；继续下一条。')
+                continue
             result.halted, result.reason = True, str(exc)
             break
     return result

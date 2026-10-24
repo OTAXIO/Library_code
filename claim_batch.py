@@ -65,8 +65,8 @@ def automatic_claim_selection(record, before, comparison, result):
 def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lambda text: None,
                     audit=lambda action, result, sa_id: None, limit=100,
                     retry_skipped=False, skip_writer=None):
-    """Process at most ``limit`` rows; never continue after an uncertain write."""
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+    """Retry the skipped snapshot once; ordinary batches keep their limit."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= (max(100,len(roster.records)) if retry_skipped is True else 100):
         raise SafetyStop("单次自动认领数量必须为 1–100。")
     if type(retry_skipped) is not bool:
         raise SafetyStop("跳过任务处理模式无效。")
@@ -76,7 +76,7 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
         # retry action does the inverse and accepts only numeric-2 rows.
         if not record.done and record.skipped == retry_skipped and record.sa_id not in ids:
             ids.append(record.sa_id)
-    ids = ids[:limit]
+    ids = ids if retry_skipped else ids[:limit]
     current_roster = roster
     completed, synced, skipped = [], [], {}
     checked = 0

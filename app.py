@@ -16,7 +16,7 @@ from ui_theme import P, install_theme, style_text
 from workflow_service import WorkflowService
 
 BASE = Path(__file__).resolve().parent
-VERSION = "0.4.41"
+VERSION = "0.4.42"
 SA_URL = "http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list"
 SCOPES = {"待处理": "pending", "重试跳过项": "skipped", "已完成": "done"}
 
@@ -148,10 +148,11 @@ class App:
     def configure_actions(self):
         manual = self.manual_mode()
         disabled = self.busy or self.scope.get() == "已完成"
-        self.start_button.configure(text="① 定位 WOS 文献" if manual else
+        retry=self.scope.get()=='重试跳过项'
+        self.start_button.configure(text="① 定位 WOS 文献" if manual else '重新检查全部跳过项' if retry else
             "开始自动导入" if self.mode() == "import" else "开始自动认领",
             state="disabled" if disabled else "normal")
-        self.limit_box.configure(state="disabled" if self.busy or manual else "normal")
+        self.limit_box.configure(state="disabled" if self.busy or manual or retry else "normal")
         self.import_style_box.configure(state="disabled" if self.busy else "readonly")
         selected = self.trees[self.mode()].selection()
         can_skip = (not self.busy and self.scope.get() == "待处理" and
@@ -267,9 +268,10 @@ class App:
                     raise SafetyStop("请先在列表中选中一篇论文；手动模式不会处理其他记录。")
                 records = [self.service.select_manual(self.roster, self.owner.get(), scope, selected[0])]
             else:
-                if not self.limit.get().strip().isdigit():
+                if scope!='skipped' and not self.limit.get().strip().isdigit():
                     raise SafetyStop("本轮条数须为 1–100 的整数。")
-                records = self.service.select(self.roster, mode, self.owner.get(), int(self.limit.get()), scope)
+                records = self.service.select(self.roster, mode, self.owner.get(),
+                    100 if scope=='skipped' else int(self.limit.get()), scope)
             if not self.bridge or not self.bridge.online:
                 raise SafetyStop("请连接 SA 比对页并绑定后台导入页；只有 WOS 模式还需绑定 WOS 页。")
         except (SafetyStop, KeyError) as exc:

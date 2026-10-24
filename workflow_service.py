@@ -24,6 +24,7 @@ class TaskResult:
     reason: str = ""
     cancelled: bool = False
     report_path: str = ""
+    deferred_count: int = 0
 
 
 def supported_claim(record):
@@ -59,12 +60,13 @@ class WorkflowService:
             raise SafetyStop("请选择负责人。")
         if owner != OWNER:
             raise SafetyStop("本次自动化仅处理谭勋策，其他负责人的记录不会修改。")
-        if type(limit) is not int or not 1 <= limit <= 100:
+        if scope!='skipped' and (type(limit) is not int or not 1 <= limit <= 100):
             raise SafetyStop("本轮条数须为 1–100 的整数。")
         if mode not in ("claim", "import") or scope not in ("pending", "skipped"):
             raise SafetyStop("已完成仅供查看；请选择待处理或重试跳过项。")
         roster.assert_unchanged()
-        records = self.visible(roster, mode, owner, scope)[:limit]
+        visible=self.visible(roster,mode,owner,scope)
+        records=visible if scope=='skipped' else visible[:limit]
         if not records:
             raise SafetyStop("当前范围没有可执行的" + ("零匹配导入" if mode == "import" else "单匹配认领") + "任务。")
         return records
@@ -216,6 +218,7 @@ class WorkflowService:
             raise SafetyStop("浏览器未连接，请在 SA 比对结果页扩展中配对。")
         def audit(action, outcome, sa_id):
             self.operation_log.record(action, outcome, sa_id)
+        deferred=0
         if mode == "claim":
             result = run_claim_batch(roster, records, bridge, cancel=stop.is_set,
                 progress=progress, audit=audit, limit=len(records), retry_skipped=scope == "skipped")
@@ -231,8 +234,9 @@ class WorkflowService:
                 result = run_metadata_batch(self.base, roster, records, bridge, stop, progress, audit,
                                             retry_skipped=scope == "skipped")
             else:
-                # Switching modes must not bypass an unresolved Excel write.
-                for record in records:
+                # Keep the source guard per record, so an old Excel intent
+                # cannot authorize WOS writes or block unrelated candidates.
+                def source_check(record):
                     path = self.base / "runtime/metadata-imports/zero-match.sqlite3"
                     if path.exists():
                         db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
@@ -246,25 +250,27 @@ class WorkflowService:
                 download = SerialWOS(bridge, default_store(self.base), stop, progress)
                 result = run_batch(roster, records, bridge, download, imports,
                     WorkflowStore(imports.root), stop, progress, audit, retry_skipped=scope == "skipped",
-                    manual_export=manual_export)
+                    manual_export=manual_export,source_check=source_check)
             messages = {e["sa_id"]: e["message"] for e in result.outcomes}
             completed = sum(e["status"] == "done" for e in result.outcomes)
             synced = sum(e["status"] == "synced" for e in result.outcomes)
             skipped = sum(e["status"] == "skip" for e in result.outcomes)
-            summary = f"完成 {completed} · 原已处理 {synced} · 跳过 {skipped} · 未执行/待续验 {result.remaining}。"
+            deferred=sum(e['status']=='deferred' for e in result.outcomes)
+            summary = f"完成 {completed} · 原已处理 {synced} · 跳过 {skipped} · 待核验 {deferred} · 未执行 {result.remaining}。"
             if result.reason:
                 summary += result.reason
-            elif skipped:
+            elif skipped or deferred:
                 reasons = {}
                 for item in result.outcomes:
-                    if item["status"] == "skip":
+                    if item["status"] in ('skip','deferred'):
                         note = str(item["message"])
                         reasons[note] = reasons.get(note, 0) + 1
                 shown = "；".join(f"{note[:100]}（{count}条）" for note, count in list(reasons.items())[:3])
-                summary += "本轮结束。跳过原因：" + shown
+                summary += "本轮结束。"+('跳过/待核原因：' if deferred else '跳过原因：') + shown
                 if len(reasons) > 3:
                     summary += "；其余见逐条结果和诊断。"
             else:
                 summary += "本轮结束；完成记录已核验并回写名单。"
         return TaskResult(result.roster, messages, summary, halted=bool(result.halted),
-                          reason=getattr(result, "reason", ""), cancelled=bool(getattr(result, "cancelled", False)))
+                          reason=getattr(result, "reason", ""), cancelled=bool(getattr(result, "cancelled", False)),
+                          deferred_count=deferred)

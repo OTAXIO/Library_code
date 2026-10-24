@@ -149,7 +149,8 @@ class RunDiagnostics:
             self.warn()
 
     def finish(self, result):
-        self.data.update(status="paused" if result.halted or result.cancelled else "finished", finished_at=self.now(),
+        self.data.update(status="paused" if result.halted or result.cancelled else
+                         "finished_with_review" if getattr(result,'deferred_count',0) else "finished", finished_at=self.now(),
                          summary=result.summary, reason=result.reason, outcomes=result.messages)
         if result.halted or result.cancelled:
             self.record(self.stage, "已暂停", result.reason or result.summary)

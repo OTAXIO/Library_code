@@ -27,6 +27,7 @@ from wos_policy import (WOSPolicyStop, NonZeroMatchSkip, match_count,
                         require_no_author_review, zero_result_note)
 from skip_notes import brief_skip_note
 from roster_annotations import highlight_new_admission
+from batch_recovery import RecordReadback,park_record
 
 OWNER = "谭勋策"
 COMPLETION_NOTE = "已入库"
@@ -217,12 +218,13 @@ def verify_comparison(comparison, candidate, record, allow_unclaimed=False):
 
 
 def run_batch(roster, records, sa, download, imports, workflow, stop,
-              progress=lambda _: None, audit=lambda *args: None, *, retry_skipped=False, manual_export=False):
+              progress=lambda _: None, audit=lambda *args: None, *, retry_skipped=False, manual_export=False,
+              source_check=lambda record: None):
     """Explicitly authorized one-click workflow; a write failure halts, not retries."""
     records = list(records)
     if type(manual_export) is not bool or manual_export and len(records) != 1:
         raise SafetyStop("手动导出模式每次仅执行一篇，未开始。")
-    if (not 1 <= len(records) <= 100 or len({r.sa_id for r in records}) != len(records) or
+    if (not 1 <= len(records) <= (len(roster.records) if retry_skipped else 100) or len({r.sa_id for r in records}) != len(records) or
             type(retry_skipped) is not bool or
             any(r not in roster.records or r.owner != OWNER or
                 type(r.matches) is not int or r.matches < 0 for r in records)):
@@ -234,7 +236,11 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
         except Exception:
             progress("log.txt 保存失败；独立断点日志仍保留，请检查日志目录。")
     downloader = WOSDownload(download, download.store, lambda: result.roster.assert_unchanged(), stop, record_operation)
-    flow = WOSFlow(sa, imports, lambda: result.roster.assert_unchanged(), progress, record_operation,
+    readback=RecordReadback()
+    class ReadTransport:
+        def call(self,action,payload,timeout=75):return readback.call(sa,action,payload,timeout)
+        def __getattr__(self,name):return getattr(sa,name)
+    flow = WOSFlow(ReadTransport(), imports, lambda: result.roster.assert_unchanged(), progress, record_operation,
                    cancelled=stop.is_set)
     backend_ready = False
 
@@ -251,7 +257,7 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
             raise SafetyStop("已请求暂停。")
         progress(f"零匹配补录 {position}/{len(records)} · {stage} · {payload.get('sa_id', '')}")
         try:
-            value = sa.call(action, payload, timeout=75)
+            value = readback.call(sa,action,payload,timeout=75)
         except Exception:
             record_operation(action, "已暂停", payload.get("sa_id", ""))
             raise
@@ -428,6 +434,7 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
     # still separately verified. Never reuse across contradictory identifiers.
     files = {}
     for position, original in enumerate(records, 1):
+        readback=RecordReadback()
         evidence = {}
         record = next(r for r in result.roster.records if r.sa_id == original.sa_id)
         # Enforce the scope at the executor too, not only in the UI's selector.
@@ -446,6 +453,7 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
         try:
             if record.matches != 0:
                 raise NonZeroMatchSkip("名单匹配数非 0，已跳过；未修改备注。")
+            source_check(record)
             fresh = call("status", {"sa_id": record.sa_id})
             row = fresh.get("row")
             # Already-processed rows are mirrored by their exact SA ID, even
@@ -700,6 +708,17 @@ def run_batch(roster, records, sa, download, imports, workflow, stop,
                 result.outcomes.append({"sa_id": record.sa_id, "title": record.title,
                     "status": "skip", "message": note, "detail": str(exc), **evidence})
                 result.remaining -= 1
+                continue
+            isolated=readback.isolated_note(exc,retry_skipped) if not manual_export else None
+            if isolated:
+                try:result.roster=park_record(result.roster,record,isolated,sa,stop)
+                except SafetyStop as blocked:
+                    result.halted,result.reason=True,str(blocked)
+                    break
+                result.outcomes.append({'sa_id':record.sa_id,'title':record.title,'status':'deferred',
+                    'message':isolated+'；保留原断点，已继续后续条目。','detail':str(exc)})
+                result.remaining-=1
+                progress('本条'+isolated+'，已保留断点；继续下一条。')
                 continue
             result.halted, result.reason = True, f"{stage}：{exc}"
             result.outcomes.append({"sa_id": record.sa_id, "title": record.title, "status": "halted", "message": result.reason, **evidence})
