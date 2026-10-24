@@ -64,6 +64,9 @@ async function runImportCommand(command) {
       if(row.source!==source || row.instructions!==command.instructions)fail("批次来源或说明不一致");
       return result;
     };
+    if(command.all_sources!==undefined&&(typeof command.all_sources!=='boolean'||command.action!=='import_scan'))
+      fail('全部来源扫描只允许只读扫描命令');
+    const scanSource=command.all_sources===true?'':source;
     let scannedCount=0;
     const batchTotal = () => {
       const value=vm.page.total;
@@ -75,7 +78,7 @@ async function runImportCommand(command) {
       await wait(()=>!vm.loading,"等待批次列表");
       const old=vm.tableData;
       vm.page.currentPage=page; vm.page.pageSize=100;
-      vm.queryForm={source,batchNumber:"",batchName:"",startTime:"",endTime:""}; vm.queryFormShow=true;
+      vm.queryForm={source:scanSource,batchNumber:"",batchName:"",startTime:"",endTime:""}; vm.queryFormShow=true;
       vm.getData(page,100,{...vm.queryForm});
       await wait(()=>!vm.loading && vm.tableData!==old,"刷新批次列表");
       batchTotal();
@@ -198,7 +201,8 @@ async function runImportCommand(command) {
       }
       return batch;
     };
-    if(command.action==="import_scan")return {ok:true,data:{batches:await scan(),scanned_count:scannedCount}};
+    if(command.action==="import_scan")return {ok:true,data:{batches:await scan(),scanned_count:scannedCount,
+      ...(command.all_sources===true?{all_sources:true,instructions:command.instructions,scan_protocol:1}:{})}};
     if(command.action==="import_upload") {
       if(drawer.drawer || (drawer.__saImport?.sa_id===command.sa_id && drawer.__saImport?.uploaded))fail("上传窗口/上传记录已存在，禁止自动重复上传");
       if((await scan()).length)fail("已有相同说明批次，禁止再次导入");

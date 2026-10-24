@@ -54,6 +54,9 @@ def main():
     parser.add_argument('--reassignment-authorization', type=Path,
         help='本地保存的人已确认的单条新旧工号授权，不上传此文件')
     parser.add_argument('--claim-only', action='store_true', help='只验收原认领流程，不上传或导入论文')
+    parser.add_argument('--recover-unconfirmed', action='store_true',
+        help='仅对明确要求核查的单条旧提交执行一次完整核查恢复，原意图另行归档')
+    parser.add_argument('--retry-skipped', action='store_true', help='明确续验这几个指定的跳过项，不清空状态或断点')
     args=parser.parse_args()
     loaded_code=code_fingerprint(BASE)
     if not 1<=len(args.sa_ids)<=5 or len(set(args.sa_ids))!=len(args.sa_ids):
@@ -64,6 +67,8 @@ def main():
     if authorization is not None and len(args.sa_ids) != 1:
         raise SafetyStop('认领纠正验收一次只允许一条已确认任务。')
     if authorization and args.claim_only: raise SafetyStop('普通认领与授权纠正不能混用。')
+    if args.recover_unconfirmed and (authorization or args.claim_only or args.retry_skipped or len(args.sa_ids)!=1):
+        raise SafetyStop('旧提交恢复必须是单条导入，不能与认领模式混用。')
     def select(current):
         result=[]
         for sa_id in args.sa_ids:
@@ -129,7 +134,12 @@ def main():
                 result=SimpleNamespace(roster=claim.roster,outcomes=outcomes,
                     remaining=max(0,len(selected)-claim.checked),halted=claim.halted,reason=claim.reason)
             else:
-                result=run_metadata_batch(BASE,current,selected,bridge,stop,events.put,log.record)
+                if args.recover_unconfirmed:
+                    from metadata_recovery import recover_missing_import
+                    recover_missing_import(BASE,current,selected[0],bridge,explicitly_requested=True,
+                        cancel=stop.is_set,audit=log.record)
+                result=run_metadata_batch(BASE,current,selected,bridge,stop,events.put,log.record,
+                    retry_skipped=args.retry_skipped)
             verified={}
             for item in result.outcomes:
                 if item['status']=='done':

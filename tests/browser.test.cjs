@@ -971,6 +971,19 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.equal(inspected.data.stage,'original');
     assert.equal(await page.evaluate(()=>window.cancelWrites),1);
   });
+  test('native unclaimed person may have an empty author role card, claimed or malformed cards may not',async()=>{
+    await page.evaluate(()=>{
+      testConfig.modern=true;testConfig.claim='未认领';
+      const show=detail.show;
+      detail.show=function(row){show.call(this,row);this.currentRows.find(v=>v.label==='作者信息').compareRightValue='';};
+    });
+    const read=await execute(command('search'));
+    assert.equal(read.ok,true,JSON.stringify(read));
+    assert.equal(read.data.comparison.find(v=>v.label==='作者信息').library,'');
+    await page.evaluate(()=>testConfig.claim='已认领');
+    assert.equal((await execute(command('search'))).ok,false);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
   try {
     const selected=process.env.SA_TEST_CASE?cases.filter(([name])=>name.includes(process.env.SA_TEST_CASE)):cases;
     assert.ok(selected.length,'No matching test');

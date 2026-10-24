@@ -56,7 +56,7 @@ async function runSACommand(command) {
   const reassignmentActions = ["prepare_reassignment", "inspect_reassignment", "cancel_reassignment", "submit_reassignment"];
   try {
     check();
-    if (!["status", "search", "open_metadata", "open_claim", "inspect_claim", "prepare_claim", "submit_claim", ...reassignmentActions, "link", "complete"].includes(command.action)) stop("不支持的命令");
+    if (!["status", "search", "open_metadata", "open_claim", "inspect_claim", "prepare_claim", "submit_claim", "repair_correspondent", ...reassignmentActions, "link", "complete"].includes(command.action)) stop("不支持的命令");
     if (typeof command.sa_id !== "string" || !command.sa_id || command.sa_id.length > 160) stop("名单 ID 不合法");
     if (command.close_detail !== undefined &&
         (command.action !== "search" || typeof command.close_detail !== "boolean"))
@@ -117,7 +117,8 @@ async function runSACommand(command) {
       const row = snap(await fresh());
       guardSurface();
       return {ok: true, data: {row, non_sjtu_completion_protocol: 1, import_completion_protocol: 1,
-        metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 1, publisher_journal_protocol: 2}};
+        metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 1,
+        publisher_journal_protocol: 2, publisher_correspondent_protocol: 1}};
     }
     const drawer = vm.$refs?.compareDetailDrawer;
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");
@@ -374,7 +375,16 @@ async function runSACommand(command) {
             if (![first, corresponding].every(flag => ["是", "否"].includes(flag))) stop("作者角色标记未明确，未推断");
             return `署名：${name}\n是否第一作者：${first}\n是否通讯作者：${corresponding}`;
           };
-          left = role(left); right = role(right);
+          left = role(left);
+          if (String(right ?? "").trim() === "") {
+            const claims = values.filter(v => v.label === "认领状态");
+            const template = document.createElement("template");
+            template.innerHTML = String(claims[0]?.compareRightValue ?? claims[0]?.rightValue ?? "");
+            const states = [...template.content.querySelectorAll(".claim-info__status")].map(el => el.textContent.trim());
+            if (claims.length !== 1 || !equal(states, ["未认领"]))
+              stop("本库作者卡片为空且未确认未认领状态，停止核验");
+            right = ""; // A genuinely unbound person has no role card yet. Never invent 否.
+          } else right = role(right);
         }
         return {label: plain(value.label), sa: plain(left), library: plain(right)};
       });
@@ -388,8 +398,122 @@ async function runSACommand(command) {
       if (command.close_detail === true) await closeReadOnlyDetail();
       return {ok: true, data: {row: before, comparison, import_completion_protocol: 1,
         metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 1, publisher_journal_protocol: 2,
-        staff_claim_protocol: 1, claim_identity: claimIdentity,
+        staff_claim_protocol: 1, claim_identity: claimIdentity, publisher_correspondent_protocol: 1,
         detail_released: command.close_detail === true}};
+    }
+    if (command.action === "repair_correspondent") {
+      await showDetail();
+      const {candidate, evidence, person} = command;
+      const item = drawer.itemData, itemId = String(row.itemId || "").replace(/^,/, "");
+      const titleKey = value => String(value || "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+      if (row.markStatus !== "待处理" || Number(row.matchCount) !== 1 || itemId !== command.item_id ||
+          item?.id !== itemId || command.staff_id !== row.gh || person?.wno !== row.gh ||
+          typeof person.id !== "string" || !person.id || claimIdentity?.state !== "已认领" ||
+          claimIdentity.library_staff_id !== row.gh || evidence?.protocol !== 1 ||
+          candidate?.sjtu !== true || evidence.title !== candidate?.title ||
+          evidence.doi !== candidate?.doi || evidence.candidate_sha256 !== candidate?.sha256 ||
+          !/^10\.20517\/[A-Za-z0-9.()-]+$/.test(candidate?.doi || "") ||
+          evidence.url !== "https://www.oaepublish.com/articles/" + candidate.doi.slice(9) ||
+          !Array.isArray(evidence.correspondent_names) || !evidence.correspondent_names.includes(command.author) ||
+          !/^[0-9a-f]{64}$/.test(evidence.source_sha256 || "") ||
+          titleKey(candidate.title) !== titleKey(row.titleValue) ||
+          !equal(item.metadata?.doi, [candidate.doi]) ||
+          !Array.isArray(item.metadata?.title) || item.metadata.title.length !== 1 ||
+          titleKey(item.metadata.title[0]) !== titleKey(candidate.title))
+        stop("出版社通讯作者证据、工号、已认领身份或平台号不一致，未保存");
+      const matches = item.metadata.author.filter(a => a.order === command.order &&
+        a.fullname === command.author && a.scholarId === person.id);
+      if (matches.length !== 1 || item.metadata.author.filter(a => a.scholarId === person.id).length !== 1 ||
+          matches[0].correspondent !== false || matches[0].ownCorrespondent === true || matches[0].commonCorrespondent === true)
+        stop("通讯作者原标记或原学者身份不唯一，未保存");
+      const original = JSON.parse(JSON.stringify(item.metadata));
+      const oldCorrespondents = original.author.filter(a => a.correspondent === true ||
+        a.ownCorrespondent === true || a.commonCorrespondent === true).map(a => a.fullname);
+      if (original.correspondent != null && (!Array.isArray(original.correspondent) ||
+          original.correspondent.length && !equal(original.correspondent, oldCorrespondents)))
+        stop("原文献通讯作者文本与逐作者标记冲突，未覆盖其他通讯作者信息");
+      const editor = drawer.$refs?.itemEdit;
+      if (!editor || editor.drawer || editor.dialogVisible) stop("另有元数据编辑表单，未覆盖");
+      drawer.editItem(itemId);
+      await vm.$nextTick();
+      await wait(() => editor.drawer && editor.$refs?.itemModelEdit?.ruleForm?.id === itemId &&
+        editor.$refs.itemModelEdit.loading === false, "读取原生通讯作者编辑表单");
+      const form = editor.$refs.itemModelEdit;
+      if (typeof form.onSubmit !== "function" || typeof form.onCorrespondentChange !== "function" ||
+          !form.validInfo?.author?.customConfig?.correspondent ||
+          !Array.isArray(form.ruleForm.metadata?.author) || form.ruleForm.updateTime !== item.updateTime)
+        stop("原生角色编辑器结构或版本不一致，未保存");
+      const normalizeAuthors = authors => authors.map(a => ({...a,
+        institutionOrderNums: typeof a.institutionOrderNums === "string" ?
+          a.institutionOrderNums.split(",").map(Number) : a.institutionOrderNums}));
+      if (!equal(normalizeAuthors(form.ruleForm.metadata.author), original.author) ||
+          !equal(form.ruleForm.metadata.title, original.title) || !equal(form.ruleForm.metadata.doi, original.doi))
+        stop("编辑表单与原生作者快照不一致，未保存");
+      const beforeForm = JSON.parse(JSON.stringify(form.ruleForm));
+      const selected = form.ruleForm.metadata.author.find(a => a.order === command.order);
+      selected.correspondent = true;
+      form.onCorrespondentChange(selected);
+      const expectedForm = JSON.parse(JSON.stringify(beforeForm));
+      expectedForm.metadata.author.find(a => a.order === command.order).correspondent = true;
+      const expected = JSON.parse(JSON.stringify(original));
+      expected.author.find(a => a.order === command.order).correspondent = true;
+      expected.correspondent = expected.author.filter(a => a.correspondent === true ||
+        a.ownCorrespondent === true || a.commonCorrespondent === true).map(a => a.fullname);
+      await vm.$nextTick();
+      if (!equal(form.ruleForm, expectedForm) || drawer.currentSaLzkId !== command.sa_id ||
+          !equal(drawer.itemData.metadata, original) || visibleAll(".el-dialog, .el-message-box").length)
+        stop("保存前表单或原文献发生变化，未提交");
+      submitted = true;
+      form.onSubmit(); // One native UI save; an unknown result is never retried.
+      await sleep(250);
+      await wait(() => form.loading === false, "等待原生通讯作者保存请求");
+      // This site's editor intentionally remains open after saving. Success
+      // comes from a fresh server read, never from a window closing or toast.
+      if (typeof drawer.refreshCompareData !== "function") stop("缺少原生保存回读方法");
+      drawer.refreshCompareData();
+      await wait(() => !drawer.dialogLoading, "读取已保存文献");
+      const semantic = metadata => {
+        const value = JSON.parse(JSON.stringify(metadata));
+        const roles = ["ownFirst", "commonFirst", "ownCorrespondent", "commonCorrespondent"];
+        const noFirst = !value.author.some(a => a.ownFirst === true || a.commonFirst === true);
+        for (const author of value.author) {
+          if (typeof author.institutionOrderNums === "string") author.institutionOrderNums = author.institutionOrderNums.split(",").map(Number);
+          for (const role of roles) if (author[role] == null) author[role] = false;
+          // Observed native save initializes an absent first-role annotation.
+          // This is readback normalization, never a source-based role decision.
+          if (noFirst && author.order === 1) author.ownFirst = true;
+        }
+        const correspondents = value.author.filter(a => a.correspondent === true ||
+          a.ownCorrespondent === true || a.commonCorrespondent === true).map(a => a.fullname);
+        if (value.correspondent != null && (!Array.isArray(value.correspondent) ||
+            value.correspondent.length && !equal(value.correspondent, correspondents)))
+          stop("通讯作者文本与逐作者标记回读不一致，保留断点");
+        value.correspondent = correspondents;
+        for (const institution of value.authorInstitution || []) delete institution.claimStatus;
+        const clean = (v, key) => {
+          if (key === "year" && Array.isArray(v)) v = v.map(String);
+          if (key === "issued_date" && Array.isArray(v)) v = v.map(x => new Date(x).getTime());
+          if (Array.isArray(v)) {const a=v.map(x=>clean(x)).filter(x=>x!==undefined);return a.length?a:undefined;}
+          if (v && typeof v === "object") {
+            const a=Object.fromEntries(Object.keys(v).sort().map(k=>[k,clean(v[k],k)]).filter(([,x])=>x!==undefined));
+            return Object.keys(a).length?a:undefined;
+          }
+          return v == null || v === "" ? undefined : v;
+        };
+        return clean(value);
+      };
+      if (drawer.itemData.id !== itemId || !equal(semantic(drawer.itemData.metadata), semantic(expected)))
+        stop("保存后元数据未精确匹配只改一个通讯作者标记，停止结案并保留断点");
+      if (editor.drawer) {
+        if (typeof editor.handleCloses !== "function" || editor.$refs.itemModelEdit !== form ||
+            !equal(semantic(form.ruleForm.metadata), semantic(drawer.itemData.metadata)))
+          stop("已保存编辑器存在其他未提交变化，未自动关闭");
+        editor.handleCloses(); // Only OUR fully read-back, clean saved form.
+      }
+      await wait(() => !visibleAll(".el-drawer").some(p => p !== detailSurface.panel), "等待已保存编辑器关闭", 5000);
+      const comparison = await showDetail();
+      return {ok: true, data: {verified: true, row: snap(await fresh()), comparison,
+        item_id: itemId, staff_id: row.gh, scholar_id: person.id, order: command.order, correspondent: true}};
     }
     if (["inspect_claim", "prepare_claim", "submit_claim", ...reassignmentActions].includes(command.action)) {
       const reassignment = reassignmentActions.includes(command.action);

@@ -48,13 +48,16 @@ def claim_completion_note(record, comparison, claimed=False):
     # missed these disagreements and could close them as a mere claim issue.
     # Parse explicit flags only; order==1 never proves absence of co-first roles.
     info=[detail_value(comparison,'作者信息',side) for side in ('sa','library')]
+    state = _norm(detail_value(comparison, "认领状态", "library"))
+    unbound_card = not claimed and state in {_norm(value) for value in _UNCLAIMED} and info[1] == ''
     for role in ('第一作者','通讯作者'):
         pattern=r'是否'+role+r'\s*[：:]\s*([是否])(?=\s|$)'
         flags=[re.findall(pattern,text) for text in info]
         if any('是否'+role in text for text in info):
+            if unbound_card and len(flags[0]) == 1:
+                continue # Roles are checked again from the person-bound card AFTER claiming.
             if any(len(value)!=1 for value in flags) or flags[0]!=flags[1]:
                 raise SafetyStop(role+'待核验，需按原文确认后处理。')
-    state = _norm(detail_value(comparison, "认领状态", "library"))
     if claimed:
         if state != _norm(CLAIMED):
             raise SafetyStop("尚未回读到已认领，不能自动结案。")

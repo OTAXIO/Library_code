@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from openpyxl import load_workbook
 from core import SafetyStop, file_hash, read_roster
@@ -117,6 +117,13 @@ class ClaimStateTests(unittest.TestCase):
         for reason in reasons:
             with self.subTest(reason=reason):
                 self.assertTrue(claim_state(self.comparison('是', '是'), self.record, reason))
+
+    def test_unclaimed_empty_native_card_can_claim_without_inventing_role_flags(self):
+        comparison=self.comparison('否','是',False);comparison[1]['library']=''
+        self.assertFalse(claim_state(comparison,self.record,'作者不一致'))
+        self.assertEqual(comparison[1]['library'],'')
+        comparison[0]['library']='已认领'
+        with self.assertRaises(SafetyStop):claim_state(comparison,self.record,'作者不一致')
 
     def test_cofirst_order_and_unit_reasons_still_require_review(self):
         reasons = ('共同一作不一致', '共同第一作者不一致', '首位作者待核验', '作者顺序不一致',
@@ -346,6 +353,34 @@ class PipelineTests(unittest.TestCase):
         self.roster.records[0]=self.record
         result=self.run_once();self.assertEqual(self.backend.calls,[])
         self.assertEqual(result.remaining,0)
+
+    def test_source_verified_role_repair_resumes_linked_skip_without_any_reimport(self):
+        original=self.backend.call; fixed=False
+        def call(action,payload,timeout=90):
+            answer=original(action,payload,timeout)
+            if action=='search' and not fixed:
+                info=next(v for v in answer['comparison'] if v['label']=='作者信息')
+                info['sa']='是否第一作者：否\n是否通讯作者：是'
+            elif action=='search' and fixed:
+                info=next(v for v in answer['comparison'] if v['label']=='作者信息')
+                info['sa']=info['library']='是否第一作者：否\n是否通讯作者：是'
+            return answer
+        self.backend.call=call
+        with patch('publisher_roles.repair_correspondence',return_value=False):
+            first=self.run_once()
+        self.assertFalse(first.halted,first.reason);self.assertTrue(first.roster.records[0].skipped)
+        state=WorkflowStore(self.base/'runtime/metadata-imports').get(first.roster.records[0])
+        self.assertEqual(state['phase'],'linked')
+        def repair(*args):
+            nonlocal fixed
+            fixed=True;return True
+        with patch('publisher_roles.repair_correspondence',side_effect=repair):
+            second=run_metadata_batch(self.base,first.roster,[first.roster.records[0]],self.backend,self.stop,
+                retry_skipped=True,client=self.client,excel_builder=self.builder)
+        self.assertFalse(second.halted,second.reason);self.assertTrue(second.roster.records[0].done)
+        self.assertEqual(second.roster.records[0].remark,'已入库')
+        for action in ('import_excel_upload','import_excel_submit','import_excel_push','link','complete'):
+            self.assertEqual(self.backend.calls.count(action),1,action)
 
     def test_other_owner_or_nonzero_roster_rejected(self):
         for bad in (replace(self.record,owner='其他人'),replace(self.record,matches=1)):

@@ -52,6 +52,8 @@ def claim_state(comparison, record, reason=None):
     # number just because role flags agree. The modern role card intentionally
     # has no staff field, so its absence is not invented into a disagreement.
     authors = [field("作者信息", side) for side in ("sa", "library")]
+    state = field("认领状态", "library")
+    unbound_card = authors[1] == '' and state in ("未认领", "无人认领", "未被认领")
     for author in authors:
         labels = re.findall(r"工号\s*[：:]", author)
         if labels and (len(labels) != 1 or
@@ -60,6 +62,8 @@ def claim_state(comparison, record, reason=None):
     for label in ("是否第一作者", "是否通讯作者"):
         flag_label = re.escape(label) + r"\s*[：:]"
         flags = [re.findall(flag_label + r"\s*([是否])(?=\s|$)", author) for author in authors]
+        if unbound_card and len(flags[0]) == 1 and len(re.findall(flag_label, authors[0])) == 1:
+            continue
         if (any(len(value) != 1 for value in flags) or
                 any(len(re.findall(flag_label, author)) != 1 for author in authors)):
             raise SafetyStop("已入库，作者角色结构待核验；未自动更改。")
@@ -70,7 +74,6 @@ def claim_state(comparison, record, reason=None):
         raise SafetyStop("已入库，第一单位结构待核验；未自动更改。")
     if unit[0] != unit[1]:
         raise MetadataReview("第一单位待核验")
-    state = field("认领状态", "library")
     if state not in ("已认领", "未认领", "无人认领", "未被认领"):
         raise SafetyStop("已入库，认领状态待核验。")
     # A cached reason can outlive linking/claiming. Only these exact two-role
@@ -507,7 +510,18 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
             # author-mismatch task. Import success alone must not close it.
             if state["phase"] == "claim_intent":
                 raise SafetyStop("上次作者认领回执未确认；保留入库断点，不重复认领或直接结案。")
-            claimed = claim_state(fresh["comparison"], record, row.get("reason"))
+            try:
+                claimed = claim_state(fresh["comparison"], record, row.get("reason"))
+            except MetadataReview as review:
+                if str(review) != '通讯作者待核验':
+                    raise
+                from publisher_roles import repair_correspondence
+                if not repair_correspondence(record, fresh['comparison'], row, state, store, call):
+                    raise review
+                fresh = call('search', {})
+                row = fresh['row']; verify_sa(record, row); verify_import_match(row, state)
+                verify_metadata_comparison(fresh['comparison'], candidate, record)
+                claimed = claim_state(fresh['comparison'], record, row.get('reason'))
             if not claimed:
                 if state["phase"] in ("claimed", "complete_intent", "done"):
                     raise SafetyStop("已认领断点与网页不一致，未重复认领。")
@@ -547,6 +561,9 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                 raise SafetyStop("网页批注或结案未确认；list 未标完成。")
             result.roster = reconcile_processed(result.roster, record, after).roster
             state.pop("deferred_reason", None)
+            if state.get('correspondence_repair', {}).get('phase') == 'intent':
+                state['correspondence_repair'].update(phase='verified_readback',
+                    comparison_sha256=digest(fresh['comparison']))
             state["phase"] = "done"; store.save(record, state)
             result.roster=highlight_new_admission(result.roster,record,state).roster
             result.outcomes.append({"sa_id": record.sa_id, "status": "done", "message": "已入库", "batch_id": state["batch"]["id"], "item_id": item["id"]})

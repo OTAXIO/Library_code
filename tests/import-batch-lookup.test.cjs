@@ -82,3 +82,24 @@ test('null boolean and empty totals cannot prove a complete empty scan',async()=
     const r=await run({action:'import_scan'});assert.equal(r.ok,false);assert.match(r.error,/批次数量未知/);await noWrites();
   }
 });
+test('all-source scan clears only the query filter and proves a complete empty match set',async()=>{
+  await page.evaluate(b=>batches.push({...b,id:'unrelated-one',instructions:'another-task',source:'人工提交'},
+    {...b,id:'unrelated-two',instructions:'another-task-2',source:'WOS'}),batch);
+  const r=await run({action:'import_scan',all_sources:true});
+  assert.equal(r.ok,true,JSON.stringify(r));assert.equal(r.data.all_sources,true);
+  assert.equal(r.data.scan_protocol,1);assert.equal(r.data.scanned_count,2);
+  assert.deepEqual(r.data.batches,[]);assert.equal(await page.evaluate(()=>vm.queryForm.source),'');
+  await noWrites();
+});
+test('all-source scan cannot hide a same-description batch with a different source',async()=>{
+  await page.evaluate(b=>batches.push({...b,source:'人工提交'}),batch);
+  const r=await run({action:'import_scan',all_sources:true});assert.equal(r.ok,false);
+  assert.match(r.error,/批次来源/);await noWrites();
+});
+test('all-source option never changes the source of an upload submit or push',async()=>{
+  for(const action of ['import_upload','import_submit','import_push']){
+    const r=await run({action,all_sources:true});assert.equal(r.ok,false,JSON.stringify(r));
+    assert.match(r.error,/只读扫描/);
+  }
+  await noWrites();
+});

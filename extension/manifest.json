@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SA 比对半自动助手",
-  "version": "0.4.45",
+  "version": "0.4.48",
   "description": "自动认领与零匹配导入；公开元数据、已核验官方论文集及原 WOS 流程串行执行，核验网页及名单回写，未知情况暂停。",
   "permissions": ["storage", "scripting", "activeTab", "downloads", "alarms"],
   "host_permissions": [

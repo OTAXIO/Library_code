@@ -28,6 +28,7 @@ from metadata_identity import MetadataSkip, norm, doi, text, title_key, name_tok
 SOURCE = "Crossref+OpenAlex"
 KIND = "crossref-openalex-v1"
 SJTU = re.compile(r"\bShanghai\s+(?:Jiao\s*Tong|Jiaotong)\s+Univ(?:ersity)?\b|上海交通大学", re.I)
+CONTRIBUTION_NOTE = re.compile(r'^(?:these|both) authors contributed equally(?: to (?:this|the) work)?[.]?$', re.I)
 
 
 def merge_metadata(record, crossref, openalex):
@@ -72,6 +73,11 @@ def merge_metadata(record, crossref, openalex):
         indices = []
         for address in raw:
             address = text(address)
+            # OpenAlex sometimes returns the publisher's '#' footnote as an
+            # affiliation. It is not an institution and must consume no index.
+            # Do not infer an author role here; retain the unmodified response.
+            if CONTRIBUTION_NOTE.fullmatch(address):
+                continue
             # The platform's actual template has no escaping for semicolons.
             if (not address or re.search(r"[;\r\n]", address) or "…" in address
                     or "..." in address or re.search(r"\b(?:unknown|unavailable)\b", address, re.I)):
@@ -79,6 +85,8 @@ def merge_metadata(record, crossref, openalex):
             if address not in addresses:
                 addresses.append(address)
             indices.append(addresses.index(address) + 1)
+        if not indices:
+            raise MetadataSkip('署名单位不完整')
         names.append(full)
         mappings.append(sorted(set(indices)))
     if len({norm(name) for name in names}) != len(names):

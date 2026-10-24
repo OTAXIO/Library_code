@@ -57,6 +57,19 @@ class ClaimCompletionTests(unittest.TestCase):
         self.assertEqual(payload["expected_comparison"], self.comparison)
         self.write.assert_called_once_with(self.roster, self.record)
 
+    def test_unclaimed_empty_role_card_allows_identity_lookup_but_never_closure(self):
+        self.comparison[0]['library']='未认领'
+        self.comparison[1].update(sa='是否第一作者：否\n是否通讯作者：是',library='')
+        self.assertEqual(claim_completion_note(self.record,self.comparison,claimed=False),'已认领')
+        with self.assertRaises(SafetyStop):
+            claim_completion_note(self.record,self.comparison,claimed=True)
+        self.comparison[0]['library']='已认领'
+        with self.assertRaises(SafetyStop):
+            claim_completion_note(self.record,self.comparison,claimed=True)
+        self.comparison[1]['library']='是否第一作者：否\n是否通讯作者：否'
+        with self.assertRaises(SafetyStop):
+            claim_completion_note(self.record,self.comparison,claimed=True)
+
     def test_already_processed_only_syncs_without_toggling(self):
         self.bridge.call.side_effect = [{"row": self.done}]
         result = self.run_close()

@@ -71,6 +71,23 @@ class MetadataSourceTests(unittest.TestCase):
         oa['authorships'].reverse()
         with self.assertRaises(MetadataSkip): merge_metadata(r,cr,oa)
 
+    def test_equal_contribution_footnote_is_not_an_institution_or_an_index(self):
+        r,cr,oa=example();oa['authorships'][0]['raw_affiliation_strings'].append('These authors contributed equally')
+        cr['author'].append({'given':'Bob','family':'Other'})
+        oa['authorships'].append({'raw_author_name':'Bob Other',
+            'raw_affiliation_strings':['These authors contributed equally.','Other University, China']})
+        before=copy.deepcopy(oa);c=merge_metadata(r,cr,oa)
+        self.assertEqual(c['addresses'],['Shanghai Jiao Tong University, China','Other University, China'])
+        self.assertEqual(c['author_mapping'],[[1],[2]])
+        self.assertEqual(c['fields']['作者'],'Alice Test(1);Bob Other(2)')
+        self.assertNotIn('contributed',c['fields']['作者单位'])
+        self.assertEqual(oa,before)
+        self.assertNotIn('通讯作者',c['fields'])
+
+    def test_contribution_note_alone_does_not_supply_an_affiliation(self):
+        r,cr,oa=example();oa['authorships'][0]['raw_affiliation_strings']=['These authors contributed equally']
+        with self.assertRaisesRegex(MetadataSkip,'署名单位不完整'):merge_metadata(r,cr,oa)
+
     def test_identity_type_and_delimiter_conflicts_are_deferred(self):
         patches=[('doi','10.1234/wrong'),('title','Different'),('type','book-chapter')]
         for key,value in patches:
