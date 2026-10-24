@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from approval import COMBINED_MISSING_IDS_CLAIM
 from claim_batch import automatic_claim_selection, run_claim_batch
 from core import Record, SafetyStop
+from bridge import BrowserRejected
 
 
 def record(sa_id="demo-001", **changes):
@@ -174,7 +175,7 @@ class ClaimBatchTests(unittest.TestCase):
         result = run_claim_batch(roster, [target], bridge, skip_writer=persist_skips)
         self.assertIn(target.sa_id, result.skipped)
         self.assertIn("并非同时为空", result.skipped[target.sa_id])
-        bridge.call.assert_called_once_with("search", {"sa_id": target.sa_id})
+        bridge.call.assert_called_once_with('search', {'sa_id': target.sa_id})
 
     def test_missing_claim_window_is_red_skip_and_next_record_continues(self):
         first, second = record("demo-no-window"), record("demo-next")
@@ -246,7 +247,8 @@ class ClaimBatchTests(unittest.TestCase):
         search = found(target)
         search["comparison"][0]["library"] = "已认领"
         bridge = Mock()
-        bridge.call.return_value = search
+        bridge.call.side_effect = [search, {**search, 'verified': True, 'claimed': True,
+            'staff_id': '00001', 'scholar_id': 'scholar-1', 'order': 1}]
         closed_roster = FakeRoster([replace(target, done=True)])
         closure = SimpleNamespace(completion=SimpleNamespace(roster=closed_roster))
         with patch("claim_batch.complete_claim", return_value=closure) as close, \
@@ -254,10 +256,57 @@ class ClaimBatchTests(unittest.TestCase):
             result = run_claim_batch(roster, [target], bridge)
         self.assertEqual(result.completed_ids, (target.sa_id,))
         self.assertFalse(result.halted)
-        bridge.call.assert_called_once_with("search", {"sa_id": target.sa_id})
+        self.assertEqual([c.args[0] for c in bridge.call.call_args_list], ['search', 'inspect_claim'])
         close.assert_called_once()
         self.assertEqual(close.call_args.kwargs["note"], "已认领")
         new_claim.assert_not_called()
+
+    def test_same_name_different_staff_is_not_accepted_as_claimed(self):
+        target = record('demo-wrong-staff')
+        roster = FakeRoster([target])
+        search = found(target)
+        search['comparison'][0]['library'] = '已认领'
+        bridge = Mock()
+        bridge.call.side_effect = [search, {**search, 'verified': True, 'claimed': True,
+            'staff_id': '00002', 'scholar_id': 'wrong-scholar', 'order': 1}]
+        with patch('claim_batch.complete_claim') as close:
+            result = run_claim_batch(roster, [target], bridge, skip_writer=persist_skips)
+        close.assert_not_called()
+        self.assertEqual(result.completed_ids, ())
+        self.assertIn('工号', result.skipped[target.sa_id])
+
+    def test_retry_malformed_identity_card_is_one_record_review_and_next_claim_continues(self):
+        first,second=record('bad-card',skipped=True),record('next',skipped=True)
+        roster=FakeRoster([first,second]);search=found(second);prep=prepared(search)
+        proof={'row':search['row'],'verified':True,'claimed':True,'staff_id':'00001',
+               'scholar_id':'scholar-1','author':'Tester','order':1}
+        bridge=Mock();bridge.call.side_effect=[BrowserRejected('search',
+            '[扩展 test] 【已暂停】新版认领卡片字段不完整，不能推断作者或人员编号'),found(first),search,prep,proof]
+        closure=SimpleNamespace(completion=SimpleNamespace(roster=FakeRoster([first,replace(second,done=True)])))
+        with patch('claim_batch.auto_complete_claim',return_value=closure):
+            result=run_claim_batch(roster,[first,second],bridge,retry_skipped=True,skip_writer=persist_skips)
+        self.assertFalse(result.halted)
+        self.assertEqual(result.completed_ids,(second.sa_id,))
+        self.assertEqual(result.skipped[first.sa_id],'认领信息待核')
+
+    def test_malformed_card_followed_by_login_expiry_preserves_existing_note_and_halts(self):
+        target=record('expired',skipped=True,remark='保留旧备注');roster=FakeRoster([target]);bridge=Mock()
+        bridge.call.side_effect=[BrowserRejected('search','【已暂停】新版认领卡片字段不完整'),
+                                BrowserRejected('status','【已暂停】已离开比对结果页或登录失效')]
+        writer=Mock()
+        result=run_claim_batch(roster,[target],bridge,retry_skipped=True,skip_writer=writer)
+        self.assertTrue(result.halted)
+        self.assertIn('登录',result.reason)
+        self.assertEqual(result.skipped,{})
+        writer.assert_not_called()
+        self.assertEqual(target.remark,'保留旧备注')
+
+    def test_unknown_read_timeout_is_still_a_batch_stop(self):
+        target=record('timeout',skipped=True);roster=FakeRoster([target]);bridge=Mock()
+        bridge.call.side_effect=SafetyStop('命令超时，结果不明')
+        result=run_claim_batch(roster,[target],bridge,retry_skipped=True,skip_writer=persist_skips)
+        self.assertTrue(result.halted)
+        self.assertIn('命令超时',result.reason)
 
     def test_cancel_and_limit_are_enforced(self):
         records = [record(f"demo-{index:03}") for index in range(101)]

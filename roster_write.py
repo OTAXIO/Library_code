@@ -544,7 +544,14 @@ def mark_skipped_many(roster, records, backup_dir=None, reasons=None):
 
 def mark_skipped_without_note(roster, records, backup_dir=None):
     """Write only numeric 2 in the separate flag; preserve both remark columns."""
-    return _mark_values(roster, [(record, 2) for record in records], backup_dir,
+    records=list(records)
+    if (not roster.status_separate or not records or len({r.row for r in records})!=len(records) or
+            any(r not in roster.records or r.done for r in records)):
+        raise SafetyStop('跳过目标重复、已完成或不属于当前名单，未回写。')
+    roster.assert_unchanged()
+    pending=[r for r in records if not r.skipped]
+    if not pending:return RosterUpdate(roster,None,(),{r.sa_id:r.remark for r in records})
+    return _mark_values(roster, [(record, 2) for record in pending], backup_dir,
                         preserve_notes=True)
 
 

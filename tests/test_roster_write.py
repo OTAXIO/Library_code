@@ -165,6 +165,16 @@ class RosterWriteTests(unittest.TestCase):
         self.assertEqual([r.remark for r in saved.roster.records], ["已有备注，不覆盖", "", ""])
         self.assertEqual([r.skipped for r in saved.roster.records], [True, True, False])
         self.assertEqual(saved.roster.records[0].source, "已有来源")
+        # A live nonzero match may be encountered again during skipped retry.
+        # It is already a 2, so keep its note and flag without another write.
+        original = self.path.read_bytes()
+        repeated = mark_skipped_without_note(saved.roster, saved.roster.records[:2])
+        self.assertEqual(repeated.cells, ())
+        self.assertIsNone(repeated.backup)
+        self.assertEqual(self.path.read_bytes(), original)
+        for targets in ([saved.roster.records[0]] * 2, [roster.records[0]]):
+            with self.assertRaises(SafetyStop):
+                mark_skipped_without_note(saved.roster, targets)
         with zipfile.ZipFile(self.path) as archive:
             self.assertEqual([name for name in archive.namelist() if archive.read(name) != parts[name]],
                              ["xl/worksheets/sheet1.xml"])
@@ -176,6 +186,9 @@ class RosterWriteTests(unittest.TestCase):
         # Existing normal skip calls still require a meaningful reason.
         with self.assertRaises(SafetyStop):
             mark_skipped_many(saved.roster, [saved.roster.records[2]])
+        mixed = mark_skipped_without_note(saved.roster, [saved.roster.records[0], saved.roster.records[2]])
+        self.assertEqual(mixed.cells, ('O4',))
+        self.assertEqual([r.remark for r in mixed.roster.records], ['已有备注，不覆盖', '', ''])
 
     def test_note_free_skip_refuses_legacy_first_column_flag(self):
         roster = read_roster(self.path)

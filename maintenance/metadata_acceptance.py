@@ -23,6 +23,8 @@ from core import SafetyStop, read_roster
 from metadata_pipeline import run_metadata_batch
 from operation_log import OperationLog
 from pairing_ui import copy_pairing_code
+from claim_reassignment import run_reassignment, validate_authorization
+from claim_batch import run_claim_batch
 
 
 def code_fingerprint(base):
@@ -49,17 +51,26 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sa-ids',nargs='+',required=True)
     parser.add_argument('--control-file',type=Path)
+    parser.add_argument('--reassignment-authorization', type=Path,
+        help='本地保存的人已确认的单条新旧工号授权，不上传此文件')
+    parser.add_argument('--claim-only', action='store_true', help='只验收原认领流程，不上传或导入论文')
     args=parser.parse_args()
     loaded_code=code_fingerprint(BASE)
     if not 1<=len(args.sa_ids)<=5 or len(set(args.sa_ids))!=len(args.sa_ids):
         raise SafetyStop('只允许 1–5 条不同任务。')
     roster=read_roster(BASE/'list.xlsx')
+    authorization = (json.loads(args.reassignment_authorization.read_text(encoding='utf-8'))
+                     if args.reassignment_authorization else None)
+    if authorization is not None and len(args.sa_ids) != 1:
+        raise SafetyStop('认领纠正验收一次只允许一条已确认任务。')
+    if authorization and args.claim_only: raise SafetyStop('普通认领与授权纠正不能混用。')
     def select(current):
         result=[]
         for sa_id in args.sa_ids:
             rows=[r for r in current.records if r.sa_id==sa_id]
-            if len(rows)!=1 or rows[0].owner!='谭勋策' or rows[0].matches!=0:
+            if len(rows)!=1 or rows[0].owner!='谭勋策' or authorization is None and rows[0].matches!=(1 if args.claim_only else 0):
                 raise SafetyStop('验收目标不是谭勋策未跳过的零匹配任务。')
+            if authorization is not None: validate_authorization(rows[0], authorization)
             result.append(rows[0])
         return result
     select(roster)
@@ -77,9 +88,10 @@ def main():
         with pair_file.open('x',encoding='utf-8') as stream:json.dump({'token':bridge.token},stream)
     stop=threading.Event(); commands=queue.Queue(); events=queue.Queue()
     version=json.loads((BASE/'extension/manifest.json').read_text(encoding='utf-8'))['version']
-    root=tk.Tk();root.title('公开元数据与出版社原文 · 导入验收 '+version);root.geometry('620x290')
+    root=tk.Tk();root.title(('按完整工号纠正认领 · 单条验收 ' if authorization else '自动认领流程验收 ' if args.claim_only else '公开元数据与出版社原文 · 导入验收 ')+version);root.geometry('620x290')
     panel=ttk.Frame(root,padding=16);panel.pack(fill='both',expand=True)
-    ttk.Label(panel,text='仅配对现有 SA 比对页，并绑定现有后台导入页。\n不需要 WOS；配对后由脚本执行上传、推送、批注与结案。').pack(anchor='w')
+    ttk.Label(panel,text=('只连接现有 SA 比对页；限定原授权的两个工号和这一行作者。\n由脚本核验撤销、重新认领、网页与名单批注结案。'
+        if authorization else '只连接现有 SA 页，按完整工号核验原认领入口与批注结案。\n不上传论文，不覆盖已有其他人员的认领。' if args.claim_only else '仅配对现有 SA 比对页，并绑定现有后台导入页。\n不需要 WOS；配对后由脚本执行上传、推送、批注与结案。')).pack(anchor='w')
     code=tk.StringVar(value=bridge.token)
     entry=ttk.Entry(panel,textvariable=code,state='readonly');entry.pack(fill='x',pady=10)
     status=tk.StringVar(value='等待配对，尚未执行。')
@@ -99,7 +111,25 @@ def main():
             current=read_roster(BASE/'list.xlsx'); selected=select(current)
             log=OperationLog(BASE/'log.txt')
             before=current.sha256
-            result=run_metadata_batch(BASE,current,selected,bridge,stop,events.put,log.record)
+            if authorization:
+                from types import SimpleNamespace
+                updated=run_reassignment(BASE,current,selected[0],bridge,authorization,log.record,stop.is_set)
+                result=SimpleNamespace(roster=updated,outcomes=[{'sa_id':selected[0].sa_id,
+                    'status':'done','message':'按完整工号核验认领，网页与名单已认领批注结案'}],remaining=0,halted=False,reason='')
+            elif args.claim_only:
+                from types import SimpleNamespace
+                if len({r.skipped for r in selected if not r.done})>1:
+                    raise SafetyStop('认领验收仅接受同一待处理或跳过范围。')
+                claim=run_claim_batch(current,selected,bridge,cancel=stop.is_set,progress=events.put,
+                    audit=log.record,limit=len(selected),retry_skipped=any(r.skipped for r in selected))
+                done=set(claim.completed_ids)|set(claim.synced_ids)
+                outcomes=[{'sa_id':r.sa_id,'status':'done' if r.sa_id in done else 'review',
+                    'message':'网页与名单已核验' if r.sa_id in done else claim.skipped.get(r.sa_id,claim.reason or '未执行')}
+                    for r in selected]
+                result=SimpleNamespace(roster=claim.roster,outcomes=outcomes,
+                    remaining=max(0,len(selected)-claim.checked),halted=claim.halted,reason=claim.reason)
+            else:
+                result=run_metadata_batch(BASE,current,selected,bridge,stop,events.put,log.record)
             verified={}
             for item in result.outcomes:
                 if item['status']=='done':
@@ -117,6 +147,23 @@ def main():
         except Exception as exc:
             message=str(exc) if isinstance(exc,SafetyStop) else f'验收异常 {type(exc).__name__}；未自动重复操作。'
             print(json.dumps({'error':message},ensure_ascii=False),flush=True);events.put(('finish',message))
+    def probe_staff():
+        """Read-only native preparation; diagnose snapshot drift without cancelling."""
+        try:
+            from claim import sa_claim_source
+            current=read_roster(BASE/'list.xlsx'); target=select(current)[0]
+            found=bridge.call('search',{'sa_id':target.sa_id,'authorization':authorization})
+            source,staff=sa_claim_source(found.get('comparison'))
+            result=bridge.call('prepare_reassignment',{'sa_id':target.sa_id,'expected':found['row'],
+                'sa_text':source,'staff_id':staff,'roster_staff_id':target.staff_id,'authorization':authorization})
+            folder=BASE/'runtime/claim-reassignments';folder.mkdir(parents=True,exist_ok=True)
+            path=folder/('probe-'+datetime.now().strftime('%Y%m%d-%H%M%S-%f')+'.json')
+            path.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+            print(json.dumps({'readonly_probe':str(path)},ensure_ascii=False),flush=True)
+            events.put(('finish','只读工号快照已保存，没有撤销或重新认领。'))
+        except Exception as exc:
+            print(json.dumps({'probe_error':str(exc)},ensure_ascii=False),flush=True)
+            events.put(('finish','只读检查结束；未提交认领。'))
     def pump():
         nonlocal busy,last_control_stamp
         if args.control_file and args.control_file.exists():
@@ -124,7 +171,7 @@ def main():
             if stamp!=last_control_stamp:
                 last_control_stamp=stamp
                 command=args.control_file.read_text(encoding='utf-8').strip()
-                if command in ('RUN','STATUS','PAUSE','QUIT'):commands.put(command)
+                if command in ('RUN','STATUS','PAUSE','QUIT','PROBE_STAFF'):commands.put(command)
         while not commands.empty():
             command=commands.get_nowait()
             if command=='RUN' and not busy:
@@ -134,6 +181,8 @@ def main():
                 if not bridge.online:print('NOT_CONNECTED',flush=True);continue
                 busy=True;stop.clear();threading.Thread(target=run,daemon=True).start()
             elif command=='STATUS':print(json.dumps({'online':bridge.online,'busy':busy}),flush=True)
+            elif command=='PROBE_STAFF' and authorization and not busy:
+                busy=True;threading.Thread(target=probe_staff,daemon=True).start()
             elif command=='PAUSE':stop.set()
             elif command=='QUIT' and not busy:close();return
         while not events.empty():

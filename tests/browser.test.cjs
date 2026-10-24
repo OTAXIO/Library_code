@@ -855,6 +855,122 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.equal((await prepare()).ok,false);
     assert.equal(await page.evaluate(()=>writeCount),0);
   });
+  const authorization={version:1,approved:true,sa_id:'demo-001',item_id:'1234567890123456789',
+    staff_id:'00001',previous_staff_id:'00002',author_order:1};
+  const setupReassignment=async()=>{
+    await page.evaluate(()=>{
+      testConfig.modern=true;testConfig.reassignment=true;
+      claimedUsers[1]='old-scholar';claimedUsers[2]='unchanged-scholar';
+    });
+    const read=await execute(command('search'));
+    assert.equal(read.ok,true,JSON.stringify(read));
+    return read;
+  };
+  const reassignCommand=async(action,extra={})=>{
+    const read=await execute(command('search',{authorization}));
+    assert.equal(read.ok,true,JSON.stringify(read));
+    return execute(command(action,{expected:read.data.row,sa_text:'测试员(00001)',staff_id:'00001',
+      roster_staff_id:'00001',authorization,...extra}));
+  };
+  test('staff identity: conflict card is read without treating it as claimed',async()=>{
+    const read=await setupReassignment();
+    assert.equal(read.data.claim_identity.library_staff_id,'00002');
+    assert.equal(read.data.comparison.find(f=>f.label==='认领状态').library,'认领不一致');
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('staff identity: equal display names with different staff never establish ownership',async()=>{
+    const read=await setupReassignment();
+    const inspected=await reassignCommand('inspect_claim',{authorization:undefined});
+    assert.equal(inspected.ok,true,JSON.stringify(inspected));
+    assert.equal(inspected.data.staff_id,'00001');
+    assert.equal(inspected.data.claimed,false);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('staff reassignment: two exact wno lookups, one cancel and one claim, other authors retained',async()=>{
+    await setupReassignment();
+    await page.evaluate(()=>testConfig.authors=[{id:'author-1',order:1,fullname:'Demo',
+      scholarId:null,institutionOrderNums:[],scholarIdentityCategory:'硕士研究生'},
+      {id:'author-2',order:2,fullname:'Coauthor',scholarId:null,institutionOrderNums:[]}]);
+    const prep=await reassignCommand('prepare_reassignment');
+    assert.equal(prep.ok,true,JSON.stringify(prep));
+    assert.equal(prep.data.prepared.previous_person.wno,'00002');
+    assert.equal(prep.data.prepared.person.wno,'00001');
+    assert.equal(await page.evaluate(()=>writeCount),0);
+    const cancelled=await reassignCommand('cancel_reassignment',{prepared:prep.data.prepared,confirmed:true});
+    assert.equal(cancelled.ok,true,JSON.stringify(cancelled));
+    assert.equal(cancelled.data.stage,'cancelled');
+    const result=await reassignCommand('submit_reassignment',{prepared:prep.data.prepared,confirmed:true});
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.scholar_id,'scholar-001');
+    assert.equal(await page.evaluate(()=>window.cancelWrites),1);
+    assert.equal(await page.evaluate(()=>claimWrites),1);
+    assert.equal(await page.evaluate(()=>claimedUsers[2]),'unchanged-scholar');
+    const readback=await reassignCommand('inspect_reassignment',{prepared:prep.data.prepared});
+    assert.equal(readback.ok,true,JSON.stringify(readback));
+    assert.equal(readback.data.stage,'claimed');
+    const lookups=await page.evaluate(()=>peopleQueries.filter(q=>q.wno));
+    assert.ok(lookups.every(q=>q.name===''&&['00001','00002'].includes(q.wno)));
+    assert.ok(lookups.some(q=>q.wno==='00002'));
+    assert.equal(await page.evaluate(()=>writeCount),2);
+    // Native claiming can auto-process a row. Fill only its empty note without
+    // toggling it back to pending or relying on the transport success word.
+    await page.evaluate(()=>synthetic.markStatus='已处理');
+    const read=await execute(command('search',{authorization}));
+    const closed=await execute(command('complete',{expected:read.data.row,expected_comparison:read.data.comparison,
+      reviewed:true,note:'已认领',owner:'谭勋策',staff_claim_evidence:readback.data}));
+    assert.equal(closed.ok,true,JSON.stringify(closed));
+    assert.equal(closed.data.row.markStatus,'已处理');
+    assert.equal(closed.data.row.remark,'已认领');
+    assert.equal(await page.evaluate(()=>annotationRequests),1);
+  });
+  test('staff reassignment: missing approval or stripped leading zero never cancels',async()=>{
+    await setupReassignment();
+    for(const change of [{approved:false},{previous_staff_id:'2'},{staff_id:1}]){
+      const result=await reassignCommand('prepare_reassignment',{authorization:{...authorization,...change}});
+      assert.equal(result.ok,false,JSON.stringify(result));
+      await page.evaluate(()=>{people.dialogModalVisible=false;claimWindow.drawer=false;});
+      await page.waitForTimeout(200);
+    }
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('staff reassignment: changed other author or old wno prevents cancel',async()=>{
+    await setupReassignment();
+    const prep=await reassignCommand('prepare_reassignment');
+    assert.equal(prep.ok,true,JSON.stringify(prep));
+    await page.evaluate(()=>claimedUsers[2]='foreign-change');
+    const result=await reassignCommand('cancel_reassignment',{prepared:prep.data.prepared,confirmed:true});
+    assert.equal(result.ok,false,JSON.stringify(result));
+    assert.equal(await page.evaluate(()=>writeCount),0);
+    assert.equal(await page.evaluate(()=>people.dialogModalVisible),false);
+  });
+  test('staff reassignment: display name or alias changes do not change the wno identity',async()=>{
+    await setupReassignment();
+    const prep=await reassignCommand('prepare_reassignment');
+    assert.equal(prep.ok,true,JSON.stringify(prep));
+    await page.evaluate(()=>testConfig.people=[{id:'scholar-001',wno:'00001',nameCn:'显示名更新',
+      nameEn:'Display changed',aliases:[{nameAlias:'different auxiliary alias'}]}]);
+    const result=await reassignCommand('cancel_reassignment',{prepared:prep.data.prepared,confirmed:true});
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.stage,'cancelled');
+    assert.equal(await page.evaluate(()=>window.cancelWrites),1);
+    assert.equal(await page.evaluate(()=>claimedUsers[2]),'unchanged-scholar');
+  });
+  test('staff reassignment: cancelled acknowledgement must be read back before claiming',async()=>{
+    await setupReassignment();
+    const prep=await reassignCommand('prepare_reassignment');
+    await page.evaluate(()=>testConfig.badCancelReadback=true);
+    const result=await reassignCommand('cancel_reassignment',{prepared:prep.data.prepared,confirmed:true});
+    assert.equal(result.ok,false,JSON.stringify(result));
+    assert.match(result.error,/已发出写入/);
+    assert.equal(await page.evaluate(()=>window.cancelWrites),1);
+    assert.equal(await page.evaluate(()=>claimWrites),0);
+    // The matching journal's read-only recovery can inspect the uncertain
+    // drawer, while all generic/manual reads still lack this authorization.
+    const inspected=await reassignCommand('inspect_reassignment',{prepared:prep.data.prepared});
+    assert.equal(inspected.ok,true,JSON.stringify(inspected));
+    assert.equal(inspected.data.stage,'original');
+    assert.equal(await page.evaluate(()=>window.cancelWrites),1);
+  });
   try {
     const selected=process.env.SA_TEST_CASE?cases.filter(([name])=>name.includes(process.env.SA_TEST_CASE)):cases;
     assert.ok(selected.length,'No matching test');

@@ -64,14 +64,17 @@ const detail = {currentSaLzkId:"",dialogLoading:false,compareData:[],saLzkCompar
         '<span class="claim-info__label">'+label+'</span><span class="claim-info__value">'+values[i]+'</span>').join('')+'</div></div>';
       this.leftData={id:testConfig.wrongModernSa??row.saLzkId,gh:'00001',name:'测试员',doi:testConfig.saDoi??'',wos:''};
       this.itemData={id:row.itemId.replace(/^,/,''),metadata:{doi:testConfig.libraryDoi??'10.1234/test'}};
+      if(testConfig.reassignment)this.itemData.metadata.author=copy(testConfig.authors??defaultAuthors)
+        .map(a=>({...a,scholarId:claimedUsers[a.order]??null}));
       this.displayFields=[{label:'DOI',key:'doi',altKeys:['doi']},{label:'WOS记录号',key:'wosId',altKeys:['wos']}];
       this.currentRows=this.compareData.filter(value=>value.label!=='WOS记录号').map(value=>{
         if(value.label==='认领状态'){
-          const state=testConfig.claim??(claimedUsers[1]?'已认领':'未认领');
+          const state=testConfig.reassignment ? (claimedUsers[1]==='old-scholar'?'认领不一致':
+            claimedUsers[1]==='scholar-001'?'已认领':'未认领') : testConfig.claim??(claimedUsers[1]?'已认领':'未认领');
           let identity='';
-          if(state==='已认领'){
+          if(state==='已认领'||state==='认领不一致'){
             const labels=testConfig.missingClaimStaff?['姓名']:['姓名','工号'];
-            const values=testConfig.missingClaimStaff?['测试员']:['测试员',testConfig.libraryClaimStaff??'00001'];
+            const values=testConfig.missingClaimStaff?['测试员']:['测试员',state==='认领不一致'?'00002':testConfig.libraryClaimStaff??'00001'];
             if(testConfig.duplicateClaimStaff){labels.push('工号');values.push('00001');}
             identity=card(labels,values);
           }
@@ -102,6 +105,8 @@ const claimWindow={ids:"",auth:true,loading:false,activeName:"authorInstitution"
   async getItemDetail(){await new Promise(resolve=>setTimeout(resolve,5));
     const authors=copy(testConfig.authors??defaultAuthors);
     for(const author of authors)if(claimedUsers[author.order])author.scholarId=claimedUsers[author.order];
+    if(testConfig.reassignment&&claimedUsers[1]==='scholar-001'&&authors[0].scholarIdentityCategory)
+      authors[0].scholarIdentityCategory='博士研究生';
     this.tableData={id:testConfig.wrongClaimItem??this.ids,metadata:{author:authors,authorInstitution:[]},
       itemAuthorRelationVOs:testConfig.relations??{}};
     this.drawer=true;this.loading=false;},
@@ -111,6 +116,10 @@ const claimWindow={ids:"",auth:true,loading:false,activeName:"authorInstitution"
   handleClaim(author){writeCount++;claimWrites++;this.loading=true;
     if(testConfig.hangClaim)return;
     if(!testConfig.badClaimReadback)claimedUsers[author.order]=author.data.scholarId;
+    this.getItemDetail();},
+  cancelClaims(author){writeCount++;window.cancelWrites=(window.cancelWrites||0)+1;
+    if(testConfig.hangCancel)return;
+    if(!testConfig.badCancelReadback)delete claimedUsers[author.order];
     this.getItemDetail();}
 };
 bindVisibility(claimWindow,"claim","drawer");
@@ -119,7 +128,10 @@ const people={loading:false,tableData:[],total:0,queryForm:{},page:{current:1,si
     this.dialogModalVisible=true;this.getScholarData();},
   async getScholarData(){this.loading=true;await new Promise(resolve=>setTimeout(resolve,5));
     if(!(testConfig.stalePeople&&this.queryForm.wno)){
-      this.tableData=copy(testConfig.people??[{id:"scholar-001",wno:"00001",nameCn:"测试员",nameEn:"Tester",aliases:[{nameAlias:"Demo"}]}]);
+      window.peopleQueries=(window.peopleQueries||[]).concat(copy(this.queryForm));
+      this.tableData=copy(testConfig.reassignment&&this.queryForm.wno==='00002'?
+        [{id:'old-scholar',wno:testConfig.wrongOldWno??'00002',nameCn:'测试员',nameEn:'Tester',aliases:[{nameAlias:'Demo'}]}]:
+        testConfig.people??[{id:"scholar-001",wno:"00001",nameCn:"测试员",nameEn:"Tester",aliases:[{nameAlias:"Demo"}]}]);
       this.total=testConfig.peopleTotal??this.tableData.length;
     }this.loading=false;},
   sureAuthor(person){this.queryForm.name=person.nameCn||person.nameEn;this.queryForm.scholarId=person.id;

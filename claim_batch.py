@@ -5,8 +5,10 @@ from dataclasses import dataclass
 
 from approval import auto_complete_claim, claim_completion_note, complete_claim, verify_claim_result
 from automation import classify
-from claim import sa_claim_source
+from claim import inspect_staff_claim, sa_claim_source
 from core import SafetyStop
+from bridge import BrowserRejected
+import re
 from remarks import CLAIMED, detail_value
 from roster_write import mark_skipped_many, reconcile_processed
 from skip_notes import brief_skip_note
@@ -167,7 +169,33 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
         except _ClaimInterrupted as exc:
             return interrupted(exc)
         except Exception as exc:
+            # A completed read can reject ONE paper's malformed identity card.
+            # It has not submitted a claim and leaves only its readonly detail;
+            # the next exact-ID read can release that detail normally. Never
+            # classify timeouts, login errors, editors or unknown writes here.
+            if (retry_skipped and isinstance(exc, BrowserRejected) and exc.action == 'search'
+                    and '【已暂停】' in str(exc) and '已发出写入' not in str(exc)
+                    and re.search(r'认领卡片字段不完整|新版本库认领状态未唯一确认|新版认领卡片与 SA 人员信息不一致|作者角色标记未明确',str(exc))):
+                try:
+                    # A login expiry can surface first as an empty card. Prove
+                    # the same task is still readable before treating this as
+                    # a per-paper problem or rewriting its existing skip note.
+                    current = bridge.call('status', {'sa_id': sa_id}).get('row', {})
+                    if (current.get('saLzkId') != sa_id or current.get('gh') != record.staff_id
+                            or current.get('markStatus') != '待处理'
+                            or str(current.get('matchCount')) != str(record.matches)):
+                        raise SafetyStop('卡片异常后的后台身份或处理状态未确认，保留原备注。')
+                except _ClaimInterrupted as interrupted_error:
+                    return interrupted(interrupted_error)
+                except Exception as status_error:
+                    halted=True; halt_reason='认领卡片读取失败且会话未确认，未改本条备注：'+str(status_error)
+                    note('卡片异常后的会话核验', '已暂停', sa_id)
+                    break
+                skipped[sa_id] = '认领信息待核'
+                note('认领卡片只读核验未通过，保留本条并继续', '已跳过', sa_id)
+                continue
             skipped[sa_id] = "读取网页失败，浏览器状态需人工核验：" + str(exc)
+            halt_reason = skipped[sa_id]
             note("自动认领列表条目", "已暂停", sa_id)
             halted = True
             break
@@ -197,6 +225,7 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
         # duplicate the claim; verify the fresh detail and close it as 已认领.
         if claim_state == CLAIMED:
             try:
+                inspect_staff_claim(record, bridge, before, comparison)
                 completion_note = claim_completion_note(record, comparison, claimed=True)
             except Exception as exc:
                 skipped[sa_id] = str(exc)

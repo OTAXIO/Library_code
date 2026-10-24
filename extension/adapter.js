@@ -4,6 +4,7 @@
  * already-processed task. No credentials, auth internals or generic API proxy. */
 async function runSACommand(command) {
   let submitted = false;
+  let releaseReadOnlyPicker = null;
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const stop = message => { throw new Error(message); };
   const check = () => {
@@ -51,9 +52,11 @@ async function runSACommand(command) {
     }
     return result;
   };
+  let claimIdentity = null;
+  const reassignmentActions = ["prepare_reassignment", "inspect_reassignment", "cancel_reassignment", "submit_reassignment"];
   try {
     check();
-    if (!["status", "search", "open_metadata", "open_claim", "prepare_claim", "submit_claim", "link", "complete"].includes(command.action)) stop("不支持的命令");
+    if (!["status", "search", "open_metadata", "open_claim", "inspect_claim", "prepare_claim", "submit_claim", ...reassignmentActions, "link", "complete"].includes(command.action)) stop("不支持的命令");
     if (typeof command.sa_id !== "string" || !command.sa_id || command.sa_id.length > 160) stop("名单 ID 不合法");
     if (command.close_detail !== undefined &&
         (command.action !== "search" || typeof command.close_detail !== "boolean"))
@@ -221,7 +224,11 @@ async function runSACommand(command) {
         stop("元数据编辑窗口尚未关闭，请先保存或取消，程序不会丢弃修改");
     };
     const cleanClaim = () => {
-      if (previousClaim.__saAssistant !== command.sa_id || previousClaim.loading ||
+      const recoveryRead = ["search", "inspect_reassignment"].includes(command.action) &&
+        command.authorization?.approved === true && command.authorization.sa_id === command.sa_id &&
+        command.authorization.item_id === previousClaim.ids &&
+        equal(previousClaim.__saReassignment, command.authorization);
+      if (previousClaim.__saAssistant !== command.sa_id && !recoveryRead || previousClaim.loading ||
           previousClaim.tableData?.metadata?.author?.some(author => author.data))
         stop("认领窗口存在人工操作或未保存选择，请先人工处理并关闭");
     };
@@ -348,15 +355,18 @@ async function runSACommand(command) {
           const template = document.createElement("template");
           template.innerHTML = String(right ?? "");
           const states = [...template.content.querySelectorAll(".claim-info__status")].map(el => el.textContent.trim());
-          if (states.length !== 1 || !["已认领", "未认领"].includes(states[0])) stop("新版本库认领状态未唯一确认");
+          if (states.length !== 1 || !["已认领", "未认领", "认领不一致"].includes(states[0])) stop("新版本库认领状态未唯一确认");
           // The current site's loadClaimData produces 已认领 only for the
           // scholar found by this SA's gh and renders that person's wno here.
           // Confirm the actual card, not just the status word or name aliases.
-          if (states[0] === "已认领") {
-            const [, claimedStaff] = card(right, ["姓名", "工号"]);
-            if (!/^[0-9]{1,40}$/.test(claimedStaff) || claimedStaff !== staff)
+          let claimedStaff = "";
+          if (states[0] !== "未认领") {
+            [, claimedStaff] = card(right, ["姓名", "工号"]);
+            if (!/^[0-9]{1,40}$/.test(claimedStaff) ||
+                (states[0] === "已认领" ? claimedStaff !== staff : claimedStaff === staff))
               stop("本库已认领人员编号与 SA 不一致，不能结案");
           }
+          claimIdentity = {sa_staff_id: staff, library_staff_id: claimedStaff, state: states[0]};
           right = states[0]; // Do not concatenate the adjacent 认领 action button.
         } else if (modern && value.label === "作者信息") {
           const role = html => {
@@ -378,12 +388,16 @@ async function runSACommand(command) {
       if (command.close_detail === true) await closeReadOnlyDetail();
       return {ok: true, data: {row: before, comparison, import_completion_protocol: 1,
         metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 1, publisher_journal_protocol: 2,
+        staff_claim_protocol: 1, claim_identity: claimIdentity,
         detail_released: command.close_detail === true}};
     }
-    if (["prepare_claim", "submit_claim"].includes(command.action)) {
-      const submitting = command.action === "submit_claim";
+    if (["inspect_claim", "prepare_claim", "submit_claim", ...reassignmentActions].includes(command.action)) {
+      const reassignment = reassignmentActions.includes(command.action);
+      const inspecting = ["inspect_claim", "inspect_reassignment"].includes(command.action);
+      const cancelling = command.action === "cancel_reassignment";
+      const submitting = ["submit_claim", "submit_reassignment"].includes(command.action);
       if (submitting && command.confirmed !== true) stop("缺少本条作者认领的人工确认");
-      if (row.markStatus !== "待处理") stop("该记录已处理，不自动认领");
+      if (!inspecting && row.markStatus !== "待处理") stop("该记录已处理，不自动认领");
       const ids = String(row.itemId || "").replace(/^,/, "").split(",").filter(Boolean);
       if (Number(row.matchCount) !== 1 || ids.length !== 1) stop("自动认领需要唯一匹配条目");
       const comparison = await showDetail();
@@ -397,6 +411,13 @@ async function runSACommand(command) {
       if (command.sa_text !== saText || command.staff_id !== staffId) stop("SA 提交编号或姓名在读取后发生变化，请重新定位");
       if ((row.gh && row.gh !== staffId) || (command.roster_staff_id && command.roster_staff_id !== staffId))
         stop("SA 括号编号与名单/网页工号不一致，请人工核对");
+      const authorization = command.authorization;
+      if (reassignment && (!authorization || authorization.version !== 1 ||
+          typeof authorization.version !== "number" || authorization.sa_id !== command.sa_id || authorization.item_id !== ids[0] ||
+          authorization.staff_id !== staffId || !/^[0-9]{1,40}$/.test(authorization.previous_staff_id ?? "") ||
+          authorization.previous_staff_id === staffId || !Number.isSafeInteger(authorization.author_order) ||
+          authorization.author_order < 1 || authorization.approved !== true))
+        stop("缺少这条记录、作者序号及新旧完整工号的明确纠正授权");
       const claim = drawer.$refs?.claimDetail;
       if (!claim || !["getItemDetail", "handleSelect", "handleClaim", "getShows"].every(key => typeof claim[key] === "function"))
         stop("作者认领页面结构已变化，请更新扩展");
@@ -430,11 +451,14 @@ async function runSACommand(command) {
       if (new Set(authors.map(author => String(author.order))).size !== authors.length) stop("作者序号重复，不能自动认领");
       if (claim.tableData.metadata.author.some(author => author.data)) stop("已有未提交的学者选择，请人工核对");
       const available = authors.filter(author => author.eligible && !author.scholarId);
-      if (!available.length) stop("没有可认领的作者行，请人工核验现有认领");
+      if (!available.length && !reassignment && !inspecting) stop("没有可认领的作者行，请人工核验现有认领");
       // Selecting a row here only opens the search dialog. No scholar is bound
       // until the second, explicitly confirmed command revalidates everything.
-      const target = submitting ? authors.find(author => author.index === command.author_index) : available[0];
-      if (!target || !target.eligible || target.scholarId) stop("所选作者不可认领或已有认领，不能覆盖");
+      const target = reassignment ? authors.find(author => author.order === authorization.author_order) :
+        inspecting ? authors.find(author => author.eligible) :
+        submitting ? authors.find(author => author.index === command.author_index) : available[0];
+      if (!target || !target.eligible || !reassignment && !inspecting && target.scholarId)
+        stop("所选作者不可认领或已有认领，不能覆盖");
       claim.handleSelect(target.index, claim.index, claim.tableData.metadata.author[target.index]);
       await vm.$nextTick();
       const modal = claim.$refs?.authorModal;
@@ -467,41 +491,143 @@ async function runSACommand(command) {
       guard();
       const allowedFilters = ["id", "institutionId", "wno", "typeIdentity", "name", "scholarId"];
       if (Object.keys(modal.queryForm).some(key => !allowedFilters.includes(key))) stop("人员查询字段已变化");
-      modal.queryForm = {id: claim.tableData.metadata.author[target.index].id,
-        institutionId: "", wno: staffId, typeIdentity: "", name: ""};
-      modal.page = {current: 1, size: 10};
-      await vm.$nextTick();
-      const oldPeople = modal.tableData;
-      const request = modal.getScholarData();
-      if (!request || typeof request.then !== "function") stop("人员查询方法不兼容");
-      let finished = false, failure;
-      request.then(() => {finished = true;}, error => {failure = error; finished = true;});
-      await wait(() => finished && !modal.loading, "按工号/学号查询");
-      guard();
-      if (failure || modal.tableData === oldPeople || !Array.isArray(modal.tableData)) stop("人员查询没有返回新数据");
-      if (Number(modal.total) !== 1 || modal.tableData.length !== 1) stop("工号/学号未返回唯一人员，请人工处理");
-      const person = modal.tableData[0];
-      if (typeof person.wno !== "string" || person.wno !== staffId || typeof person.id !== "string" || !person.id)
-        stop("查询人员的工号/学号不完全一致，不能认领");
+      const lookup = async wno => {
+        modal.queryForm = {id: claim.tableData.metadata.author[target.index].id,
+          institutionId: "", wno, typeIdentity: "", name: ""};
+        modal.page = {current: 1, size: 10};
+        await vm.$nextTick();
+        const oldPeople = modal.tableData;
+        const request = modal.getScholarData();
+        if (!request || typeof request.then !== "function") stop("人员查询方法不兼容");
+        let finished = false, failure;
+        request.then(() => {finished = true;}, error => {failure = error; finished = true;});
+        await wait(() => finished && !modal.loading, "按完整工号/学号查询");
+        guard();
+        if (failure || modal.tableData === oldPeople || !Array.isArray(modal.tableData)) stop("人员查询没有返回新数据");
+        if (Number(modal.total) !== 1 || modal.tableData.length !== 1) stop("工号/学号未返回唯一人员，请人工处理");
+        const result = modal.tableData[0];
+        if (typeof result.wno !== "string" || result.wno !== wno || typeof result.id !== "string" || !result.id)
+          stop("查询人员的工号/学号不完全一致，不能认领");
+        return result;
+      };
+      const previousPerson = reassignment ? await lookup(authorization.previous_staff_id) : null;
+      const person = await lookup(staffId);
       if (person.aliases != null && !Array.isArray(person.aliases)) stop("学者别名格式未知");
       const names = [person.nameCn, person.nameEn, ...(person.aliases || []).map(alias => alias.nameAlias)]
         .filter(name => typeof name === "string" && name.trim()).map(name => name.trim());
       const name = person.nameCn || person.nameEn;
       if (typeof name !== "string" || !name.trim()) stop("人员姓名为空");
-      if (authors.some(author => author.scholarId === person.id || author.relations.some(r => r.scholarId === person.id && r.status >= 6)))
-        stop("该人员已存在认领关系，请人工核验，不重复提交");
       if (JSON.stringify(authorsSnapshot()) !== JSON.stringify(authors)) stop("查找期间作者数据发生变化");
       const prepared = {item_id: ids[0], staff_id: staffId, sa_text: saText,
         person: {id: person.id, wno: person.wno, name, names: [...new Set(names)]}, authors};
-      if (!submitting) {
+      const closePicker = async () => {
         modal.dialogModalVisible = false;
         await vm.$nextTick();
         await waitForPickerClose();
+      };
+      releaseReadOnlyPicker = async () => {
+        // A failed preflight may leave only OUR empty query picker. Do not
+        // strand it across retries, nor discard a selected scholar or a user
+        // dialog/query. An unknown write deliberately never uses this cleanup.
+        if (modal.dialogModalVisible && modal.$el === pickerRoot && modal.authorIndex === target.index &&
+            modal.queryForm.name === "" && modal.queryForm.institutionId === "" && modal.queryForm.typeIdentity === "" &&
+            [staffId, authorization?.previous_staff_id].filter(Boolean).includes(modal.queryForm.wno) &&
+            !claim.tableData.metadata.author.some(a => a.data) &&
+            visibleAll(".el-dialog, .el-message-box").every(ownsPicker)) {
+          guard(); await closePicker();
+        }
+      };
+      let verifyReassignment = null;
+      // Identity comes from the exact wno query -> scholar ID -> author row.
+      // A matching display name, alias or even a status card alone is no proof.
+      if (command.action === "inspect_claim") {
+        const claimed = authors.filter(a => a.scholarId === person.id);
+        await closePicker();
+        return {ok: true, data: {row: before, comparison, prepared,
+          verified: true, claimed: claimed.length === 1, staff_id: staffId,
+          scholar_id: person.id, author: claimed.length === 1 ? claimed[0].fullname : "",
+          order: claimed.length === 1 ? claimed[0].order : null}};
+      }
+      if (reassignment) {
+        if (!previousPerson || previousPerson.id === person.id || typeof claim.cancelClaims !== "function")
+          stop("新旧工号未对应两个不同的学者，或原生撤销方法不可用");
+        const metadata = () => canonical({...claim.tableData.metadata,
+          author: claim.tableData.metadata.author.map(({scholarId, claimStatus, data, ...rest}) => rest)});
+        Object.assign(prepared, {authorization, previous_person: {id: previousPerson.id, wno: previousPerson.wno},
+          metadata: metadata()});
+        const original = command.prepared;
+        const personKey = p => p && {id: p.id, wno: p.wno};
+        // The native claim updates this target's scholar identity category
+        // (for example a master's student -> PhD student with a different wno).
+        // It is a person attribute, not an authorship/affiliation/paper field.
+        // All other authors and every other metadata field remain frozen.
+        const metadataKey = m => m && canonical({...m,author:m.author?.map((a,i)=>{
+          if(i!==target.index)return a;
+          const {scholarIdentityCategory,...rest}=a;return rest;
+        })});
+        const verifyChange = expected => {
+          const after = authorsSnapshot();
+          if (!original || !equal(original.authorization, authorization) || original.staff_id !== staffId ||
+              original.item_id !== ids[0] || original.sa_text !== saText ||
+              !equal(personKey(original.person), personKey(prepared.person)) || !equal(original.previous_person, prepared.previous_person) ||
+              !equal(metadataKey(original.metadata), metadataKey(metadata())) || !Array.isArray(original.authors) ||
+              original.authors.length !== after.length) stop("工号、学者或论文快照已变化，停止纠正");
+          for (let i=0;i<after.length;i++) {
+            const old = original.authors[i], now = after[i];
+            if (i !== target.index) {
+              if (!equal(old, now)) stop("其他作者的认领发生变化，未继续纠正");
+            } else if (!equal({...old, scholarId: expected, relations: []}, {...now, relations: []}) ||
+                old.scholarId !== previousPerson.id) stop("目标作者行或原认领关系未确认");
+          }
+          if (after.some(a => a.index !== target.index && a.scholarId === person.id)) stop("目标工号已绑定其他作者行");
+          return after;
+        };
+        verifyReassignment = verifyChange;
+        if (command.action === "prepare_reassignment") {
+          if (claimIdentity?.state !== "认领不一致" || claimIdentity.library_staff_id !== previousPerson.wno ||
+              target.scholarId !== previousPerson.id || authors.some(a => a.scholarId === person.id))
+            stop("授权的旧工号与这行现有认领不一致，未撤销任何关系");
+          await closePicker();
+          return {ok: true, data: {row: before, comparison, prepared, verified: true, stage: "original"}};
+        }
+        if (command.action === "inspect_reassignment") {
+          const state = target.scholarId === previousPerson.id ? "original" :
+            target.scholarId === person.id ? "claimed" : target.scholarId === "" ? "cancelled" : "unknown";
+          if (state === "unknown") stop("作者现有认领不属于本次两个工号");
+          verifyChange(target.scholarId);
+          await closePicker();
+          return {ok: true, data: {row: before, comparison, verified: true, stage: state,
+            claimed: state === "claimed", staff_id: staffId, scholar_id: person.id,
+            author: target.fullname, order: target.order}};
+        }
+        if (cancelling) {
+          if (command.confirmed !== true) stop("缺少已授权的单条撤销确认");
+          verifyChange(previousPerson.id);
+          if (!equal(original.authors[target.index], target)) stop("撤销前目标作者的认领关系已变化");
+          if (claimIdentity?.state !== "认领不一致" || claimIdentity.library_staff_id !== previousPerson.wno)
+            stop("撤销前原工号卡片未确认，未提交撤销");
+          await closePicker(); guard(); check();
+          const oldTable = claim.tableData;
+          claim.__saReassignment = canonical(authorization);
+          submitted = true; claim.__saAssistant = null;
+          claim.cancelClaims(claim.tableData.metadata.author[target.index]);
+          await wait(() => !claim.loading && claim.tableData !== oldTable, "撤销原工号认领后回读");
+          guard(); verifyChange("");
+          claim.__saAssistant = command.sa_id;
+          return {ok: true, data: {row: before, verified: true, stage: "cancelled", staff_id: staffId,
+            scholar_id: person.id, author: target.fullname, order: target.order}};
+        }
+        verifyChange("");
+      }
+      if (authors.some(author => author.scholarId === person.id || author.relations.some(r => r.scholarId === person.id && r.status >= 6)))
+        stop("该工号已存在认领关系，请人工核验，不重复提交");
+      if (!submitting) {
+        await closePicker();
         const exact = available.filter(author => names.includes(author.fullname.trim()));
         return {ok: true, data: {row: before, comparison, prepared,
           suggested_index: exact.length === 1 ? exact[0].index : null}};
       }
-      if (!equal(prepared, command.prepared)) stop("人员或作者数据已变化，请重新查找并确认");
+      if (!reassignment && !equal(prepared, command.prepared)) stop("人员或作者数据已变化，请重新查找并确认");
       if (target.relations.some(r => r.scholarId === person.id && r.status >= 1 && r.status <= 5))
         stop("该作者已有非本人作品记录，需人工核查，不能自动覆盖");
       if (target.relations.some(r => r.status >= 6)) stop("该作者已有其他有效认领关系，不能自动覆盖");
@@ -520,12 +646,14 @@ async function runSACommand(command) {
       if (visibleAll(".el-dialog, .el-message-box").length)
         stop("网页出现其他操作窗口，请人工处理");
       const beforeWrite = claim.tableData;
+      if (reassignment) claim.__saReassignment = canonical(authorization);
       submitted = true;
       claim.__saAssistant = null; // Never silently close an uncertain write.
       claim.handleClaim(selected); // Exactly one existing UI submit, never batch.
       await wait(() => !claim.loading && claim.tableData !== beforeWrite, "认领结果回读");
       guard();
       const after = authorsSnapshot();
+      if (verifyReassignment) verifyReassignment(person.id);
       const confirmed = after.filter(author => author.order === target.order && author.fullname === target.fullname && author.scholarId === person.id);
       if (confirmed.length !== 1 || after.filter(author => author.scholarId === person.id).length !== 1)
         stop("认领结果未匹配目标作者与学者，需人工核验");
@@ -554,7 +682,9 @@ async function runSACommand(command) {
       stop("缺少人工核验及处理备注");
     const processedImport = command.action === "complete" && imported &&
       !!command.metadata_imported_evidence && row.markStatus === "已处理";
-    if (row.markStatus !== "待处理" && !processedImport) stop("记录已经处理，禁止再次切换状态");
+    const processedClaim = command.action === "complete" && note === "已认领" &&
+      !!command.staff_claim_evidence && row.markStatus === "已处理";
+    if (row.markStatus !== "待处理" && !processedImport && !processedClaim) stop("记录已经处理，禁止再次切换状态");
     if (imported) {
       const metadata=!!command.metadata_imported_evidence;
       if(metadata&&command.imported_evidence)stop("结案证明来源冲突");
@@ -689,6 +819,17 @@ async function runSACommand(command) {
         needed.add("认领状态"); needed.add("作者信息");
         if (Number(row.matchCount) !== 1 || field(comparison, "认领状态", "library") !== "已认领")
           stop("尚未回读到唯一条目已认领，不能提交“已认领”备注");
+        if (command.staff_claim_evidence) {
+          const p = command.staff_claim_evidence;
+          const native = drawer.itemData?.metadata?.author;
+          if (command.owner !== "谭勋策" || !p || p.verified !== true || p.claimed !== true ||
+              p.row?.saLzkId !== command.sa_id || p.row?.gh !== row.gh || p.row?.itemId !== row.itemId || p.staff_id !== row.gh ||
+              typeof p.scholar_id !== "string" || !p.scholar_id || !Array.isArray(native) ||
+              claimIdentity?.state !== "已认领" || claimIdentity.library_staff_id !== p.staff_id ||
+              native.filter(a => a.scholarId === p.scholar_id).length !== 1 ||
+              native.filter(a => a.scholarId === p.scholar_id && a.order === p.order && a.fullname === p.author).length !== 1)
+            stop("按工号核验的学者与目标作者行不一致，未结案");
+        }
       }
       if (selected.includes("DOI和WOSID SA未提交")) {
         needed.add("DOI"); needed.add("WOS记录号");
@@ -709,7 +850,7 @@ async function runSACommand(command) {
     if (command.action === "complete") {
       const modal = vm.$refs.compareStatusDialog;
       if (!modal || typeof modal.show !== "function" || typeof modal.handleConfirm !== "function") stop("状态弹窗结构不兼容");
-      if (processedImport) {
+      if (processedImport || processedClaim) {
         // CompareStatusDialog.handleConfirm ALWAYS toggles its source status.
         // Do not call it, fake a pending currentRow, or reopen a processed task.
         // Its observed dc7a.i contract is this fixed endpoint + JSON row body.
@@ -762,6 +903,9 @@ async function runSACommand(command) {
     } else if (String(row.itemId || "").replace(/^,/, "") !== command.item_id) stop("平台唯一号回读不一致，需人工核验");
     return {ok: true, data: {row: after, verified: true}};
   } catch (error) {
+    if (!submitted && releaseReadOnlyPicker) {
+      try {await releaseReadOnlyPicker();} catch { /* Preserve any foreign/changed window. */ }
+    }
     return {ok: false, error: (submitted ? "【已发出写入，禁止自动重试】" : "【已暂停】") + error.message};
   }
 }

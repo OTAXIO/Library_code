@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from approval import COMBINED_MISSING_IDS_CLAIM, auto_complete_claim, complete_claim
+from approval import COMBINED_MISSING_IDS_CLAIM, auto_complete_claim, complete_claim, claim_completion_note
 from core import SafetyStop
 
 
@@ -28,6 +28,25 @@ class ClaimCompletionTests(unittest.TestCase):
     def run_close(self, **kwargs):
         return complete_claim(self.roster, self.record, self.bridge, self.row,
                               self.comparison, reviewed=kwargs.get("reviewed", True))
+
+    def test_embedded_first_and_corresponding_flags_must_agree_before_claim_closure(self):
+        field=self.comparison[1]
+        for first in ('是','否'):
+            for corresponding in ('是','否'):
+                field['sa']=f'是否第一作者：{first}\n是否通讯作者：{corresponding}'
+                field['library']=field['sa']
+                self.assertEqual(claim_completion_note(self.record,self.comparison,claimed=True),'已认领')
+        for text in ('是否第一作者：是\n是否通讯作者：否','是否第一作者：未知\n是否通讯作者：否',
+                     '是否第一作者：否\n是否通讯作者：是'):
+            field['sa']='是否第一作者：否\n是否通讯作者：否';field['library']=text
+            with self.assertRaisesRegex(SafetyStop,'作者待核验'):
+                claim_completion_note(self.record,self.comparison,claimed=True)
+
+    def test_claim_cannot_hide_an_explicit_title_or_identifier_conflict(self):
+        for label in ('题名','DOI','WOS记录号'):
+            comparison=self.comparison+[{'label':label,'sa':'one','library':'another'}]
+            with self.assertRaisesRegex(SafetyStop,'文献'):
+                claim_completion_note(self.record,comparison,claimed=True)
 
     def test_backend_verified_before_one_excel_write(self):
         result = self.run_close()

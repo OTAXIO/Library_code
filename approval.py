@@ -1,6 +1,7 @@
 """Narrow, reviewed claim closure: backend readback precedes Excel completion."""
 from dataclasses import dataclass
 import unicodedata
+import re
 
 from claim import sa_claim_source
 from core import SafetyStop
@@ -36,6 +37,23 @@ def claim_completion_note(record, comparison, claimed=False):
         labels.add(field["label"])
     if not _AUTHOR_FIELDS <= labels:
         raise SafetyStop("缺少作者或认领详情，不能自动认领。")
+    if '题名' in labels and _norm(detail_value(comparison,'题名','sa')) != _norm(detail_value(comparison,'题名','library')):
+        raise SafetyStop('文献题名待核验，未自动认领或结案。')
+    for label in ('DOI','WOS记录号'):
+        if label in labels and not ('DOI' in str(record.reason) and 'WOS' in str(record.reason)):
+            left=detail_value(comparison,label,'sa')
+            if left and _norm(left)!=_norm(detail_value(comparison,label,'library')):
+                raise SafetyStop('文献标识待核验，未自动认领或结案。')
+    # The modern card embeds both roles inside 作者信息. A label-only router
+    # missed these disagreements and could close them as a mere claim issue.
+    # Parse explicit flags only; order==1 never proves absence of co-first roles.
+    info=[detail_value(comparison,'作者信息',side) for side in ('sa','library')]
+    for role in ('第一作者','通讯作者'):
+        pattern=r'是否'+role+r'\s*[：:]\s*([是否])(?=\s|$)'
+        flags=[re.findall(pattern,text) for text in info]
+        if any('是否'+role in text for text in info):
+            if any(len(value)!=1 for value in flags) or flags[0]!=flags[1]:
+                raise SafetyStop(role+'待核验，需按原文确认后处理。')
     state = _norm(detail_value(comparison, "认领状态", "library"))
     if claimed:
         if state != _norm(CLAIMED):
