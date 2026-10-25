@@ -310,6 +310,25 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.backend.calls.count('complete'),1)
         self.assertFalse(any(a.startswith('wos_') or 'claim' in a for a in self.backend.calls))
 
+    def test_manual_reopen_preserves_done_journal_and_never_reimports(self):
+        from workflow_service import WorkflowService
+        first = self.run_once()
+        self.assertFalse(first.halted, first.reason)
+        state = WorkflowStore(self.base/'runtime/metadata-imports').get(self.record)
+        self.assertEqual(state['phase'], 'done')
+        reopened = WorkflowService(self.base).review_selected(first.roster, '谭勋策', self.record.sa_id, 'pending')
+        self.assertFalse(reopened.roster.records[0].done)
+        self.assertEqual(WorkflowStore(self.base/'runtime/metadata-imports').get(self.record), state)
+        previous = len(self.backend.calls)
+        after = run_metadata_batch(self.base, reopened.roster, [reopened.roster.records[0]],
+            self.backend, self.stop, client=self.client, excel_builder=self.builder)
+        self.assertFalse(after.halted, after.reason)
+        self.assertTrue(after.roster.records[0].done)
+        self.assertFalse(set(self.backend.calls[previous:]) &
+                         {'import_excel_upload','import_excel_submit','import_excel_push','link','complete','submit_claim'})
+        for action in ('import_excel_upload', 'import_excel_submit', 'import_excel_push', 'complete'):
+            self.assertEqual(self.backend.calls.count(action), 1, action)
+
     def test_explicit_unchanged_claim_rejection_preserves_import_without_unknown_claim_intent(self):
         self.backend.claimed=False;original=self.backend.call
         def call(action,payload,timeout=90):

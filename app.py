@@ -16,7 +16,7 @@ from ui_theme import P, install_theme, style_text
 from workflow_service import WorkflowService
 
 BASE = Path(__file__).resolve().parent
-VERSION = "0.4.58"
+VERSION = "0.4.59"
 SA_URL = "http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list"
 SCOPES = {"待处理": "pending", "重试跳过项": "skipped", "已完成": "done"}
 
@@ -57,6 +57,8 @@ class App:
         ttk.Label(header, text="机构知识库", style="Title.TLabel").pack(side="left")
         self.pair_button = ttk.Button(header, text="连接浏览器", command=self.pair)
         self.pair_button.pack(side="right")
+        self.review_button = ttk.Button(header, text="手动核验名单", command=self.open_manual_review)
+        self.review_button.pack(side="right", padx=8)
         ttk.Label(header, textvariable=self.connection, style="Muted.TLabel").pack(side="right", padx=10)
         controls = ttk.Frame(frame)
         controls.grid(row=1, column=0, sticky="ew", pady=(0, 8))
@@ -158,6 +160,8 @@ class App:
         can_skip = (not self.busy and self.scope.get() == "待处理" and
                     self.owner.get() == "谭勋策" and len(selected) == 1)
         self.skip_button.configure(state="normal" if can_skip else "disabled")
+        self.review_button.configure(state="normal" if not self.busy and self.roster and
+                                     self.owner.get() == "谭勋策" else "disabled")
         if manual:
             self.counts_label.pack_forget()
             self.manual_import_button.pack(side="left", after=self.start_button, padx=(8, 0))
@@ -253,6 +257,39 @@ class App:
             self.notebook.tab(page, state="disabled" if value and key != mode else "normal")
         self.pause_button.configure(state="normal" if value else "disabled")
         self.configure_actions()
+
+    def open_manual_review(self):
+        if self.busy:
+            return
+        window = getattr(self, 'review_dialog', None)
+        if window is not None and window.window.winfo_exists():
+            window.window.lift()
+            return
+        try:
+            if not self.roster or self.owner.get() != '谭勋策':
+                raise SafetyStop('请先读取名单，并选择负责人谭勋策。')
+            self.roster.assert_unchanged()
+            from manual_review_ui import ManualReviewDialog
+            selected = self.trees[self.mode()].selection()
+            self.review_dialog = ManualReviewDialog(self.root, self.roster, self.apply_manual_review,
+                                                     selected[0] if len(selected) == 1 else '')
+        except (SafetyStop, OSError) as exc:
+            self.status.set(str(exc))
+            messages.showwarning('无法手动核验', str(exc), parent=self.root)
+
+    def apply_manual_review(self, sa_id, state):
+        if self.busy:
+            raise SafetyStop('当前任务仍在执行，请等待结束后再保存核验。')
+        try:
+            self.set_busy(True)
+            result = self.service.review_selected(self.roster, self.owner.get(), sa_id, state, self.bridge)
+            self.roster = result.roster
+            self.last_results.update(result.messages)
+            self.status.set(result.summary)
+            return result
+        finally:
+            self.set_busy(False)
+            self.render()
 
     def start(self, *, manual_intake=False):
         if self.busy:

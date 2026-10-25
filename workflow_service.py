@@ -131,6 +131,24 @@ class WorkflowService:
             text += "跳过已保存，但 log.txt 未能保存，请检查日志。"
         return TaskResult(saved.roster, {record.sa_id: text}, text)
 
+    def review_selected(self, roster, owner, sa_id, state, bridge=None):
+        """Human override of a single local flag; keep all original intent journals."""
+        from manual_review import STATES, select_review, state_of, write_review
+        record = select_review(roster, owner, sa_id)
+        if roster.path.resolve() != fixed_roster_path(self.base).resolve():
+            raise SafetyStop('手动核验只允许保存当前 code/list.xlsx。')
+        if bridge is not None and getattr(bridge, 'pending', None):
+            raise SafetyStop('浏览器命令仍待回读，请等待结束后再手动核验。')
+        saved = write_review(roster, record, state)
+        label = STATES[state][0]
+        text = f'手动核验已保存：{label}（仅名单）。备注已保留。'
+        try:
+            self.operation_log.record('手动核验名单状态', '已执行', record.sa_id,
+                detail=f'{STATES[state_of(record)][0]} → {label}；仅名单状态及 ID 填色；原备注和业务断点保留。')
+        except Exception:
+            text += 'log.txt 未能保存，请检查日志。'
+        return TaskResult(saved.roster, {record.sa_id: text}, text)
+
     def locate_import(self, roster, record, owner, scope, bridge, stop, progress):
         return self._diagnosed("wos-locate", scope, [record], bridge, progress,
             lambda observed, updates: self._locate_import(roster, record, owner, scope, observed, stop, updates))

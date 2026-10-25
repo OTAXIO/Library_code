@@ -427,12 +427,128 @@ class MinimalUITests(unittest.TestCase):
         self.app.set_busy(True)
         self.assertEqual(str(self.app.owner_box["state"]), "disabled")
         self.assertEqual(str(self.app.skip_button["state"]), "disabled")
+        self.assertEqual(str(self.app.review_button["state"]), "disabled")
         self.assertEqual(self.app.notebook.tab(self.app.pages["import"], "state"), "disabled")
         with patch("app.messages.showwarning"):
             self.app.close()
         self.assertTrue(self.app.stop.is_set())
         self.assertFalse(self.app.closed)
         self.app.set_busy(False)
+
+    def test_manual_review_window_lists_all_owned_tasks_and_filters_three_states(self):
+        self.app.open_manual_review()
+        dialog = self.app.review_dialog
+        self.root.update()
+        self.assertEqual(len(dialog.tree.get_children()), 6)
+        dialog.query.set('role-issue')
+        self.assertEqual(dialog.tree.get_children(), ('8',))
+        dialog.query.set('')
+        for label, expected in (('已完成', ('4',)), ('已跳过', ('3', '6')), ('未完成', ('2', '5', '8'))):
+            dialog.scope.set(label)
+            self.assertEqual(dialog.tree.get_children(), expected)
+        dialog.close()
+
+    def test_manual_review_save_uses_selected_id_and_refreshes_main_view(self):
+        self.app.trees['claim'].selection_set('claim-pending')
+        self.app.open_manual_review()
+        dialog = self.app.review_dialog
+        self.root.update()
+        self.assertEqual(dialog.selected().sa_id, 'claim-pending')
+        chosen = replace(self.app.roster.records[0], done=True)
+        updated = SimpleNamespace(records=[chosen] + self.app.roster.records[1:], assert_unchanged=Mock())
+        result = TaskResult(updated, {chosen.sa_id: '手动核验已保存'}, '手动核验已保存')
+        dialog.choice.set('已完成')
+        with patch.object(self.service, 'review_selected', return_value=result) as review:
+            dialog.save_button.invoke()
+        self.assertEqual(review.call_args.args[1:4], ('谭勋策', 'claim-pending', 'done'))
+        self.assertIs(self.app.roster, updated)
+        self.assertNotIn(chosen.sa_id, self.app.trees['claim'].get_children())
+        self.assertEqual(dialog.tree.set('2', 'status'), '已完成')
+        self.assertFalse(self.app.busy)
+        self.assertEqual(self.app.status.get(), '手动核验已保存')
+        dialog.close()
+
+    def test_manual_review_cancel_or_failure_keeps_original_state(self):
+        original = self.app.roster
+        self.app.open_manual_review()
+        dialog = self.app.review_dialog
+        with patch.object(self.service, 'review_selected') as review:
+            dialog.close()
+        review.assert_not_called()
+        self.app.open_manual_review()
+        dialog = self.app.review_dialog
+        dialog.tree.selection_set('2')
+        self.root.update()
+        dialog.choice.set('已跳过')
+        with patch.object(self.service, 'review_selected', side_effect=SafetyStop('名单已改变')), patch('manual_review_ui.messages.showwarning'):
+            dialog.save_button.invoke()
+        self.assertIs(self.app.roster, original)
+        self.assertIn('名单已改变', dialog.result.get())
+        self.assertEqual(str(dialog.save_button['state']), 'normal')
+        self.assertFalse(self.app.busy)
+        dialog.close()
+
+    def test_manual_review_cannot_open_while_busy_or_modify_other_owner(self):
+        self.app.set_busy(True)
+        self.app.open_manual_review()
+        self.assertFalse(hasattr(self.app, 'review_dialog'))
+        with self.assertRaises(SafetyStop):
+            self.app.apply_manual_review('claim-pending', 'done')
+        self.app.set_busy(False)
+        self.app.owner.set('其他人')
+        self.app.render()
+        self.assertEqual(str(self.app.review_button['state']), 'disabled')
+        with patch('app.messages.showwarning'):
+            self.app.open_manual_review()
+        self.assertFalse(hasattr(self.app, 'review_dialog'))
+
+    def test_manual_review_real_button_saves_and_reopens_synthetic_workbook_offline(self):
+        from openpyxl import load_workbook
+        from tests.test_roster_write import make_roster
+        path = self.service.base / 'list.xlsx'
+        make_roster(path, flags=(None, None))
+        book = load_workbook(path)
+        book.active['B2'] = '谭勋策'
+        book.active['A2'] = '原备注保留'
+        book.save(path)
+        book.close()
+        self.app.roster = self.service.load()
+        self.app.bridge = SimpleNamespace(pending=None, online=False, call=Mock(), close=Mock())
+        self.app.render()
+        self.app.review_button.invoke()
+        dialog = self.app.review_dialog
+        dialog.tree.selection_set('2')
+        self.root.update()
+        for label, flag in (('已完成', 1), ('已跳过', 2), ('未完成', None)):
+            dialog.choice.set(label)
+            dialog.save_button.invoke()
+            self.root.update()
+            book = load_workbook(path)
+            self.assertEqual(book.active.cell(2, self.app.roster.completion_column).value, flag)
+            self.assertEqual(book.active['A2'].value, '原备注保留')
+            self.assertIsNone(book.active.cell(3, self.app.roster.completion_column).value)
+            book.close()
+        self.assertEqual(len(self.service.operation_log.read()), 3)
+        self.app.bridge.call.assert_not_called()
+        dialog.close()
+
+    def test_manual_review_controls_fit_small_window_and_clear_selection_after_filter(self):
+        self.app.open_manual_review()
+        dialog = self.app.review_dialog
+        dialog.window.attributes('-alpha', 0)
+        dialog.window.geometry('600x430')
+        self.root.update()
+        for widget in (dialog.search, dialog.tree, dialog.detail, dialog.save_button, dialog.choices):
+            self.assertLessEqual(widget.winfo_rooty() - dialog.window.winfo_rooty() + widget.winfo_height(),
+                                 dialog.window.winfo_height())
+            self.assertLessEqual(widget.winfo_rootx() - dialog.window.winfo_rootx() + widget.winfo_width(),
+                                 dialog.window.winfo_width())
+        dialog.tree.selection_set('2')
+        self.root.update()
+        dialog.query.set('no-match')
+        self.assertEqual(dialog.choice.get(), '')
+        self.assertEqual(str(dialog.save_button['state']), 'disabled')
+        dialog.close()
 
     def test_threaded_dispatch_finishes_on_main_thread_without_second_start(self):
         held = threading.Event()

@@ -108,12 +108,16 @@ class YellowStyles:
         index=len(self.xfs);self.append('cellXfs',self.xfs,xf);return index
 
     def clear_red(self, original):
+        return self.clear_status_fill(original, colors=('FFFF0000',))
+
+    def clear_status_fill(self, original, colors=('FFFF0000', 'FFFFFF00')):
+        """Remove workflow colors while retaining font, borders and number format."""
         if not 0<=original<len(self.xfs):raise SafetyStop('ID 单元格原样式无效。')
         original_xf=self.xfs[original];fid=original_xf.get('fillId','0')
         if not fid.isdigit() or int(fid)>=len(self.fills):raise SafetyStop('ID 单元格填充无效。')
         pattern=self.fills[int(fid)].find(f'{{{NS}}}patternFill')
         color=pattern.find(f'{{{NS}}}fgColor') if pattern is not None else None
-        if pattern is None or pattern.get('patternType')!='solid' or color is None or color.get('rgb')!='FFFF0000':
+        if pattern is None or pattern.get('patternType')!='solid' or color is None or color.get('rgb') not in colors:
             return original
         xf=copy.deepcopy(original_xf);xf.set('fillId','0');xf.set('applyFill','1')
         found=[i for i,node in enumerate(self.xfs) if _shape(node)==_shape(xf)]
@@ -121,7 +125,7 @@ class YellowStyles:
         index=len(self.xfs);self.append('cellXfs',self.xfs,xf);return index
 
 
-def _yellow_id(data, reference, styles, restore=False):
+def _yellow_id(data, reference, styles, restore=False, *, pending=False):
     raw=data.decode('utf-8')
     matches=list(re.finditer(r'<c\b(?=[^>]*\br="'+reference+r'")[^>]*?(?:/>|>.*?</c>)',raw,re.S))
     if len(matches)!=1:raise SafetyStop('ID 单元格不是唯一的原始文本单元格。')
@@ -129,7 +133,8 @@ def _yellow_id(data, reference, styles, restore=False):
     if node.find(f'{{{NS}}}f') is not None:raise SafetyStop('ID 单元格是公式，未修改。')
     original=node.get('s','0')
     if not original.isdigit():raise SafetyStop('ID 单元格样式不正确。')
-    selected=styles.clear_red(int(original)) if restore else styles.yellow(int(original))
+    selected=(styles.clear_status_fill(int(original)) if pending else
+              styles.clear_red(int(original)) if restore else styles.yellow(int(original)))
     if selected==int(original):return data,False
     cell=match.group();opening,rest=cell.split('>',1)
     if re.search(r'\ss="\d+"',opening):opening=re.sub(r'\ss="\d+"',' s="'+str(selected)+'"',opening)
