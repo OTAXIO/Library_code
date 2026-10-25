@@ -271,6 +271,16 @@ class WorkflowService:
                     summary += "；其余见逐条结果和诊断。"
             else:
                 summary += "本轮结束；完成记录已核验并回写名单。"
+        if scope=='skipped' and not result.halted and not getattr(result,'cancelled',False):
+            from roster_annotations import annotate_roster, review_reason
+            by_id={r.sa_id:r for r in result.roster.records}
+            unresolved={sid:review_reason(message) for sid,message in messages.items()
+                        if sid in by_id and by_id[sid].skipped and not by_id[sid].done and review_reason(message)}
+            if unresolved:
+                result.roster=annotate_roster(result.roster,unresolved=unresolved).roster
+            resolved_ids={sid for sid in messages if sid in by_id and by_id[sid].done}
+            if resolved_ids:
+                result.roster=annotate_roster(result.roster,resolved_ids=resolved_ids).roster
         return TaskResult(result.roster, messages, summary, halted=bool(result.halted),
                           reason=getattr(result, "reason", ""), cancelled=bool(getattr(result, "cancelled", False)),
                           deferred_count=deferred)

@@ -135,7 +135,7 @@ class NativeTransportTests(unittest.TestCase):
                 patch('metadata_sources.urlopen',side_effect=URLError(ssl.SSLError('handshake'))), \
                 patch('metadata_sources.curl_open',return_value=PublicResponse(b'{"ok":true}',URL)) as native:
             client=MetadataClient(temp);self.assertEqual(client.get(URL),{'ok':True})
-            native.assert_called_once();self.assertEqual(client.transport,'windows-curl')
+            native.assert_called_once();self.assertEqual(client.transport,'urllib')
         failures=[HTTPError(URL,429,'limit',{},None),URLError(TimeoutError()),
                   URLError(OSError('connection'))]
         for transport in ('auto','urllib'):
@@ -146,6 +146,17 @@ class NativeTransportTests(unittest.TestCase):
                         patch('metadata_sources.curl_open') as native:
                     with self.assertRaises(SafetyStop):MetadataClient(temp,transport=transport).get(URL)
                     py.assert_called_once();native.assert_not_called()
+
+    def test_one_tls_fallback_does_not_pin_later_public_requests(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch('metadata_sources.windows_curl',return_value=Path('curl.exe')), \
+                patch('metadata_sources.urlopen',side_effect=[URLError(ssl.SSLError('handshake')),PublicResponse(b'{"next":true}',URL)]) as py, \
+                patch('metadata_sources.curl_open',return_value=PublicResponse(b'{"first":true}',URL)) as native:
+            client=MetadataClient(temp)
+            self.assertEqual(client.get(URL),{'first':True})
+            client.last_request=0
+            self.assertEqual(client.get(URL),{'next':True})
+            self.assertEqual(py.call_count,2);native.assert_called_once()
 
 
 if __name__ == '__main__': unittest.main()

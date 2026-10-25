@@ -172,7 +172,9 @@ class MetadataClient:
             if not self.auto_transport or not isinstance(reason, ssl.SSLError) or not windows_curl():
                 raise
             response = curl_open(request, timeout=25)
-            self.transport = 'windows-curl'
+            # A successful fallback for one endpoint must not pin every later
+            # Crossref/OpenAlex request to Schannel. Start each auto GET with
+            # verified Python TLS; retain the single TLS-only fallback bound.
             return response
 
     def get(self, url):

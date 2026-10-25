@@ -65,7 +65,9 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(t.isolated_note(exc.exception),'批次待核')
         for action,error in [('import_excel_submit',BrowserRejected('import_excel_submit',MISSING)),
                              ('import_excel_check',SafetyStop('命令超时（网页已接收命令但未返回结果）')),
-                             ('status',BrowserRejected('status','请重新登录'))]:
+                             ('status',BrowserRejected('status','请重新登录')),
+                             ('status',BrowserRejected('status','网页有未关闭的窗口，请人工处理后再预检')),
+                             ('status',SafetyStop('Crossref 请求超时（25 秒）（URLError/TimeoutError），未判为未收录。'))]:
             bridge.call.side_effect=error
             with self.assertRaises(SafetyStop) as raised:t.call(bridge,action,{},90)
             self.assertIsNone(t.isolated_note(raised.exception,True))

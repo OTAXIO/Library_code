@@ -76,5 +76,32 @@ class AnnotationTests(unittest.TestCase):
         with self.assertRaises(SafetyStop):annotate_roster(stale,notes={self.record.sa_id:'待核'})
         self.assertEqual(file_hash(self.path),checksum)
 
+    def test_unresolved_red_requires_skip_and_preserves_other_rows(self):
+        from roster_write import mark_skipped_many
+        with self.assertRaises(SafetyStop):
+            annotate_roster(self.roster,unresolved={self.record.sa_id:'作者资料冲突'})
+        saved=mark_skipped_many(self.roster,[self.record],reasons={self.record.sa_id:'旧原因'}).roster
+        result=annotate_roster(saved,unresolved={self.record.sa_id:'作者资料冲突'})
+        self.assertEqual(result.red_cells,('C2',));self.assertEqual(result.yellow_cells,())
+        self.assertEqual(result.roster.records[0].remark,'作者资料冲突')
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertEqual(result.roster.records[1:],saved.records[1:])
+        book=load_workbook(self.path);self.assertEqual(book.active['C2'].fill.fgColor.rgb,'FFFF0000');book.close()
+        again=annotate_roster(result.roster,unresolved={self.record.sa_id:'作者资料冲突'})
+        self.assertEqual(again.roster.sha256,result.roster.sha256)
+        self.assertIsNone(again.backup)
+        self.complete()
+        with self.assertRaises(SafetyStop):annotate_roster(self.roster,unresolved={self.record.sa_id:'已完成不可标红'})
+        cleared=annotate_roster(self.roster,resolved_ids=[self.record.sa_id])
+        self.assertEqual(cleared.restored_cells,('C2',))
+        book=load_workbook(self.path);self.assertIsNone(book.active['C2'].fill.patternType);book.close()
+
+    def test_clear_red_does_not_erase_success_yellow_or_clear_pending(self):
+        with self.assertRaises(SafetyStop):annotate_roster(self.roster,resolved_ids=[self.record.sa_id])
+        proof=self.complete();yellow=highlight_new_admission(self.roster,self.record,proof)
+        result=annotate_roster(yellow.roster,resolved_ids=[self.record.sa_id])
+        self.assertEqual(result.roster.sha256,yellow.roster.sha256)
+        self.assertEqual(result.restored_cells,())
+
 
 if __name__=='__main__':unittest.main()

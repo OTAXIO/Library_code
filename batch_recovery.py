@@ -12,7 +12,7 @@ from roster_annotations import annotate_roster
 READ_ACTIONS={'status','search','import_excel_check','import_excel_scan','import_excel_probe',
               'import_excel_resolve','import_check','import_scan','import_resolve','import_capabilities','wos_diagnose'}
 GLOBAL=re.compile(r'登录|验证码|会话|未连接|断开|通信|命令超时|仍在执行|正在执行|回执|未返回结果|请求失败|HTTP|TLS|'
-                  r'网络|限流|频率|请.*(?:重载|加载.*扩展)|协议|浏览器结果格式|连接服务',re.I)
+                  r'网络|限流|频率|请.*(?:重载|加载.*扩展)|协议|浏览器结果格式|连接服务|网页有未关闭的窗口|请求超时|URLError|TimeoutError|curl \d+',re.I)
 MISSING=re.compile(r'(?:未找到本条导入批次|未找到原批次 ID)（完整扫描 \d+ 条，同说明 \d+ 条）；原提交结果不明，保留断点，未重传$')
 
 
