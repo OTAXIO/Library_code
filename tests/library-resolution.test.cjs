@@ -35,7 +35,8 @@ async function getData(page,query){
   await new Promise(resolve=>setTimeout(resolve,config.visibleRace?350:10));
   if(config.reject)throw Error('Synthetic native query rejection');
   if(!config.failure&&!(config.titleFailure&&query.title)){
-    this.tableData=config.badTable?{}:config.rows.map(x=>({...x}));
+    const hidden=config.literalTitleMiss&&(query.doi||String(query.title||'').includes(' '));
+    this.tableData=config.badTable?{}:(hidden?[]:config.rows.map(x=>({...x})));
     this.total='total' in config?config.total:this.tableData.length+(config.incomplete?1:0);
   }
   this.loading=Boolean(config.stillLoading);
@@ -87,6 +88,8 @@ root.__vue__=batch;
       {name:'metadata title permits presentation-only dash quote HTML and trailing-period differences',candidate:{...metadataCandidate,title:'Synthetic "paper"-I & evidence'},action:'import_excel_resolve',rows:[{...item,metadata:{...item.metadata,title:['<i>Synthetic “paper” – I &amp; evidence.</i>']}}],ok:true,count:1},
       {name:'metadata title never removes changed words',candidate:metadataCandidate,action:'import_excel_resolve',rows:[{...item,metadata:{...item.metadata,title:['Synthetic different paper']}}],ok:false,error:/冲突/},
       {name:'metadata title never removes changed digits',candidate:{...metadataCandidate,title:'Synthetic paper 1'},action:'import_excel_resolve',rows:[{...item,metadata:{...item.metadata,title:['Synthetic paper 2']}}],ok:false,error:/冲突/},
+      {name:'legacy PDF word joins do not become false same DOI conflicts',candidate:{...metadataCandidate,title:'Synthetic paper'},action:'import_excel_resolve',rows:[{...item,metadata:{...item.metadata,title:['Syntheticpaper']}}],ok:true,count:1},
+      {name:'literal full title absence triggers bounded fragment retrieval before deciding missing',candidate:metadataCandidate,action:'import_excel_resolve',rows:[item],literalTitleMiss:true,ok:true,count:1},
       {name:'WOS title policy remains strict despite metadata presentation support',candidate:{...candidate,title:'Synthetic paper-I'},rows:[{...item,metadata:{...item.metadata,title:['Synthetic paper – I.']}}],ok:false,error:/冲突/},
       {name:'metadata title rejects hidden control characters before searching',candidate:{...metadataCandidate,title:'Synthetic\u0001 paper'},action:'import_excel_resolve',rows:[],ok:false,error:/无效字符/,expectedReads:0},
       {name:'metadata lookup cannot borrow WOS evidence with wrong kind',candidate:{...metadataCandidate,kind:'other'},action:'import_excel_resolve',rows:[],ok:false,error:/文献证据/,expectedReads:0},
@@ -97,6 +100,10 @@ root.__vue__=batch;
       {name:'official no-DOI lookup verifies native URL year venue and full author order',candidate:primaryCandidate,
         action:'import_excel_resolve',primary_fields:primaryFields,rows:[primaryItem],ok:true,count:1},
       {name:'official no-DOI empty full-title lookup proves absence',candidate:primaryCandidate,
+        action:'import_excel_resolve',primary_fields:primaryFields,rows:[],ok:true,count:0},
+      {name:'formal ACL DOI and canonical page are recognized before a read',
+        candidate:{...primaryCandidate,source:'ACL官方论文集',doi:'10.18653/v1/2025.acl-long.1',
+          primary_url:'https://aclanthology.org/2025.acl-long.1/',fields:{...primaryCandidate.fields,'相关网址':'https://aclanthology.org/2025.acl-long.1/'}},
         action:'import_excel_resolve',primary_fields:primaryFields,rows:[],ok:true,count:0},
       {name:'native index numeric year agrees with original textual batch preview',candidate:primaryCandidate,
         action:'import_excel_resolve',primary_fields:primaryFields,rows:[{...primaryItem,metadata:{...primaryItem.metadata,year:[2026]}}],ok:true,count:1},

@@ -104,7 +104,8 @@ async function runExcelCommand(command) {
         c.source==='Nature出版社'&&c.doi.startsWith('10.1038/')&&c.primary_url==='https://www.nature.com/articles/'+c.doi.slice(8)||
         c.source==='SciOpen出版社'&&c.doi.startsWith('10.26599/')&&String(c.primary_url).toLowerCase()==='https://www.sciopen.com/article/'+c.doi)||
       !journal&&c.source==='ICLR官方论文集'&&/^https:\/\/proceedings\.iclr\.cc\/paper_files\/paper\/\d{4}\/hash\/[a-f0-9]{32}-Abstract-Conference\.html$/.test(c.primary_url)||
-      !journal&&c.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(c.primary_url));
+      !journal&&c.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(c.primary_url)||
+      !journal&&c.source==='ACL官方论文集'&&/^https:\/\/aclanthology\.org\/\d{4}\.[a-z0-9-]+\.\d+\/$/.test(c.primary_url)&&c.doi==='10.18653/v1/'+c.primary_url.slice(25,-1));
     if(!c||(!primary&&(c.kind!=='crossref-openalex-v1'||c.source!=='Crossref+OpenAlex'))||c.sjtu!==true||c.wos!==''||
        (primary?c.doi!==''&&!/^10\.\d{4,9}\/\S+$/.test(c.doi):!/^10\.\d{4,9}\/\S+$/.test(c.doi))||!c.title||!Array.isArray(c.author_names)||!c.author_names.length||
        !/^[a-f0-9]{64}$/.test(c.sha256)||!/^[a-f0-9]{64}$/.test(command.xlsx_sha256)||

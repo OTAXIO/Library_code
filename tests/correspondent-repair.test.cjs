@@ -15,7 +15,7 @@ after(async()=>{await browser?.close();});
 async function setup(mode='ok'){
   await page.goto('about:blank');await page.goto('http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list');
   await page.evaluate(mode=>{
-    testConfig.modern=true;testConfig.claim='已认领';testConfig.libraryDoi='10.20517/demo.2026.1';
+    testConfig.modern=true;testConfig.claim='已认领';testConfig.libraryDoi=mode==='acl'?'10.18653/v1/2025.acl-long.1':'10.20517/demo.2026.1';
     let metadata={title:['Synthetic paper'],doi:[testConfig.libraryDoi],year:[2026],
       authorInstitution:[{address:'Shanghai Jiao Tong University',order:1,claimStatus:9,institutionId:'sjtu'}],
       author:[{fullname:'Other Author',order:1,scholarId:'other-scholar',institutionOrderNums:[1],correspondent:false},
@@ -70,6 +70,16 @@ test('one native save changes only the exact claimed author correspondent flag',
   assert.equal(metadata.author[0].correspondent,false);assert.equal(metadata.author[0].scholarId,'other-scholar');
   assert.equal(metadata.author[1].scholarId,'scholar-001');assert.equal(metadata.author[1].ownFirst,null);
   assert.deepEqual(metadata.year,[2026]);
+});
+test('archived ACL envelope evidence can repair only the named claimed correspondent',async()=>{
+  const {payload}=await setup('acl');
+  Object.assign(payload.candidate,{doi:'10.18653/v1/2025.acl-long.1',kind:'publisher-verified-v1',
+    source:'ACL官方论文集',primary_url:'https://aclanthology.org/2025.acl-long.1/',
+    primary_evidence_sha256:'e'.repeat(64),correspondent_names:['Demo']});
+  Object.assign(payload.evidence,{protocol:2,doi:payload.candidate.doi,url:payload.candidate.primary_url,
+    pdf_url:'https://aclanthology.org/2025.acl-long.1.pdf'});
+  const result=await page.evaluate(runSACommand,payload);
+  assert.equal(result.ok,true,JSON.stringify(result));assert.equal(await page.evaluate(()=>roleWrites),1);
 });
 test('native save may keep its editor open; a verified clean form closes without resubmitting',async()=>{
   const {payload}=await setup('keeps-open');const r=await page.evaluate(runSACommand,payload);

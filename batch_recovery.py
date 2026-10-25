@@ -4,6 +4,7 @@ Advancing never replays a write or discards its journal. Transport timeouts,
 login/session errors, changed rosters and unfinished commands remain batch stops.
 """
 import re
+import time
 from bridge import BrowserRejected
 from core import SafetyStop
 from roster_annotations import annotate_roster
@@ -25,9 +26,23 @@ class RecordReadback:
     def call(self, bridge, action, payload, timeout):
         self.action=action;self.returned=False
         try:answer=bridge.call(action,payload,timeout=timeout)
-        except BrowserRejected:
+        except BrowserRejected as error:
             self.returned=True
-            raise
+            # A close animation can outlive the adapter's short wait. Only a
+            # completed, explicitly pre-write rejection of this read permits
+            # one fresh read. Never replay a delivered write or an unknown ACK.
+            if (action != 'search' or error.action != action or
+                    not re.search(r'关闭只读详情超时[。.]本次命令未提交写入', str(error)) or
+                    GLOBAL.search(str(error)) or
+                    isinstance(getattr(bridge,'pending',None),dict) or
+                    getattr(bridge,'online',True) is False):
+                raise
+            time.sleep(3)
+            self.returned=False
+            try:answer=bridge.call(action,payload,timeout=timeout)
+            except BrowserRejected:
+                self.returned=True
+                raise
         self.returned=True
         return answer
 

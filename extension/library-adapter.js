@@ -36,7 +36,8 @@ async function resolveLibraryRecord(command) {
         c.source==='Nature出版社'&&c.primary_url==='https://www.nature.com/articles/'+c.doi.replace(/^10\.1038\//,'')&&c.doi.startsWith('10.1038/')||
         c.source==='SciOpen出版社'&&String(c.primary_url).toLowerCase()==='https://www.sciopen.com/article/'+c.doi&&c.doi.startsWith('10.26599/'));
       return c.source==='ICLR官方论文集'&&/^https:\/\/proceedings\.iclr\.cc\/paper_files\/paper\/\d{4}\/hash\/[a-f0-9]{32}-Abstract-Conference\.html$/.test(c.primary_url)||
-        c.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(c.primary_url);
+        c.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(c.primary_url)||
+        c.source==='ACL官方论文集'&&/^https:\/\/aclanthology\.org\/\d{4}\.[a-z0-9-]+\.\d+\/$/.test(c.primary_url)&&c.doi==='10.18653/v1/'+c.primary_url.slice(25,-1);
     };
     const metadata=command.action==='import_excel_resolve'&&(primary||c?.kind==='crossref-openalex-v1');
     if((command.action!=="import_resolve"&&!metadata)||!c||typeof c.title!=="string"||!norm(c.title)||
@@ -55,7 +56,7 @@ async function resolveLibraryRecord(command) {
       if(/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(text))fail('元数据题名含无效字符');
       const key=norm(text).replace(/[\u2010-\u2014\u2212]/g,'-')
         .replace(/[\u2018\u2019]/g,"'").replace(/[\u201c\u201d]/g,'"')
-        .replace(/\s*-\s*/g,'-').replace(/[ .]+$/g,'');
+        .replace(/\s*-\s*/g,'-').replace(/[ .]+$/g,'').replace(/\s+/g,'');
       if(!key)fail('元数据题名为空');
       return key;
     };
@@ -105,9 +106,16 @@ async function resolveLibraryRecord(command) {
     };
     // DOI absence alone is not proof of a missing paper: an existing entry
     // can lack DOI. Always cross-check the full title before any new upload.
+    const scalar=(meta,key)=>Array.isArray(meta?.[key])&&meta[key].length===1&&typeof meta[key][0]==='string'?meta[key][0]:'';
     const rows=c.doi?await read({doi:c.doi}):[];
     rows.push(...await read({title:c.title}));
-    const scalar=(meta,key)=>Array.isArray(meta?.[key])&&meta[key].length===1&&typeof meta[key][0]==='string'?meta[key][0]:'';
+    if(metadata&&!rows.length){
+      // The native title filter is a literal substring match. A joined word
+      // or typographic dash can hide an existing no-DOI record from a full
+      // title query. Broaden retrieval once, never the identity decision.
+      const fragment=(c.title.match(/[\p{L}\p{N}]{8,}/u)||[])[0];
+      if(fragment&&fragment!==c.title)rows.push(...await read({title:fragment}));
+    }
     const items=[];
     const seen=new Set();
     for(const row of rows){

@@ -13,11 +13,12 @@ import shutil
 from urllib.parse import urlparse
 
 from core import SafetyStop, digest, file_hash
-from metadata_identity import MetadataSkip, doi, name_tokens, norm, text, title_key
+from metadata_identity import MetadataSkip, doi, name_tokens, norm, text, title_key, legacy_title_key
 
 KIND = 'publisher-verified-v1'
 SOURCES = {'proceedings.iclr.cc': 'ICLR官方论文集', 'proceedings.mlr.press': 'PMLR官方论文集'}
 SOURCES.update({'www.nature.com':'Nature出版社','www.sciopen.com':'SciOpen出版社'})
+SOURCES['aclanthology.org']='ACL官方论文集'
 SJTU = re.compile(r'\bShanghai\s+(?:Jiao\s*Tong|Jiaotong)\s+Univ(?:ersity)?\b|上海交通大学', re.I)
 
 
@@ -40,7 +41,8 @@ def trusted_page(url):
         raise SafetyStop('官方论文集网址未确认。')
     pattern = {'proceedings.iclr.cc':r'/paper_files/paper/\d{4}/hash/[a-f0-9]{32}-Abstract-Conference\.html',
                'proceedings.mlr.press':r'/v\d+/[a-z0-9]+\.html','www.nature.com':r'/articles/s\d+-\d{3}-\d+-[a-z0-9]+',
-               'www.sciopen.com':r'/article/10\.26599/[A-Za-z0-9.()-]+'}[parsed.hostname]
+               'www.sciopen.com':r'/article/10\.26599/[A-Za-z0-9.()-]+',
+               'aclanthology.org':r'/\d{4}\.[a-z0-9-]+\.\d+/'}[parsed.hostname]
     if not re.fullmatch(pattern, parsed.path):
         raise SafetyStop('不是已核验的官方单篇论文页。')
     return SOURCES[parsed.hostname]
@@ -54,6 +56,9 @@ def compact(value):
 
 def rebuild_primary(record, folder, evidence):
     """Reparse the immutable originals on every resume; evidence is not a flag."""
+    if isinstance(evidence,dict) and evidence.get('evidence_type')=='publisher-acl-v1':
+        from acl_metadata import rebuild_acl
+        return rebuild_acl(record,folder,evidence)
     if isinstance(evidence,dict) and evidence.get('evidence_type')=='publisher-journal-v1':
         from journal_metadata import rebuild_journal
         return rebuild_journal(record,folder,evidence)
@@ -170,8 +175,12 @@ def rebuild_primary(record, folder, evidence):
 def prepare_primary(client, record):
     """Only explicitly reviewed evidence is a fallback; never fabricate a hit."""
     registry = client.root.parent / 'primary-evidence'
-    key = hashlib.sha256(title_key(record.title).encode('utf-8')).hexdigest()
-    source_folder = registry / key
+    folders=[registry/hashlib.sha256(fn(record.title).encode('utf-8')).hexdigest()
+             for fn in (title_key,legacy_title_key)]
+    available=list(dict.fromkeys(f for f in folders if (f/'evidence.json').exists()))
+    if len(available)>1 and len({file_hash(f/'evidence.json') for f in available})>1:
+        raise SafetyStop('同题名存在不同官方证据，未选择或覆盖。')
+    source_folder = available[0] if available else folders[0]
     evidence_path = source_folder / 'evidence.json'
     if not evidence_path.exists():
         return None

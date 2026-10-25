@@ -47,10 +47,11 @@ async function runImportCommand(command) {
         candidate.source==='Nature出版社'&&candidate.doi.startsWith('10.1038/')&&candidate.primary_url==='https://www.nature.com/articles/'+candidate.doi.slice(8)||
         candidate.source==='SciOpen出版社'&&candidate.doi.startsWith('10.26599/')&&String(candidate.primary_url).toLowerCase()==='https://www.sciopen.com/article/'+candidate.doi)||
       !journal&&candidate.source==='ICLR官方论文集'&&/^https:\/\/proceedings\.iclr\.cc\/paper_files\/paper\/\d{4}\/hash\/[a-f0-9]{32}-Abstract-Conference\.html$/.test(candidate.primary_url)||
-      !journal&&candidate.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(candidate.primary_url));
+      !journal&&candidate.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(candidate.primary_url)||
+      !journal&&candidate.source==='ACL官方论文集'&&/^https:\/\/aclanthology\.org\/\d{4}\.[a-z0-9-]+\.\d+\/$/.test(candidate.primary_url)&&candidate.doi==='10.18653/v1/'+candidate.primary_url.slice(25,-1));
     if (!candidate || !candidate.title || (excel ? candidate.wos!==''||(primary?!publisherSource||candidate.doi!==''&&!/^10\.\d{4,9}\/\S+$/.test(candidate.doi):candidate.source!=='Crossref+OpenAlex'||
         !/^10\.\d{4,9}\/\S+$/.test(candidate.doi))||!Array.isArray(candidate.author_names)||!candidate.author_names.length : !/^WOS:\d{15}$/.test(candidate.wos)) || candidate.sjtu!==true ||
-        !/^[a-f0-9]{64}$/.test(candidate.sha256)) fail("缺少已核验的单篇 WOS 证据");
+        !/^[a-f0-9]{64}$/.test(candidate.sha256)) fail(excel?'缺少已核验的单篇元数据证据':'缺少已核验的单篇 WOS 证据');
     for (const child of Object.values(vm.$refs)) {
       if (child?.drawer && !(child.__saImport?.sa_id===command.sa_id && [drawer,push,view].includes(child)))
         fail("存在人工打开的导入/编辑窗口，请关闭后再操作");
@@ -170,13 +171,13 @@ async function runImportCommand(command) {
               if(!candidate.fields[label]||!Array.isArray(values)||values.length!==1||typeof values[0]!=='string'||
                  values[0]!==candidate.fields[label])fail('期刊导入后的'+label+'未确认，未推送');
             }
-            if(!Array.isArray(candidate.addresses)||meta.authorInstitution.length!==candidate.addresses.length||
-               meta.authorInstitution.some((unit,i)=>unit?.order!==i+1||norm(unit.address)!==norm(candidate.addresses[i]))||
-               !Array.isArray(candidate.author_mapping)||candidate.author_mapping.length!==authors.length||
-               authors.some((author,i)=>!Array.isArray(author?.institutionOrderNums)||
-                 JSON.stringify(author.institutionOrderNums)!==JSON.stringify(candidate.author_mapping[i])))
-              fail('期刊导入后的逐作者单位对应未确认，未推送');
           }
+          if(!Array.isArray(candidate.addresses)||meta.authorInstitution.length!==candidate.addresses.length||
+             meta.authorInstitution.some((unit,i)=>unit?.order!==i+1||norm(unit.address)!==norm(candidate.addresses[i]))||
+             !Array.isArray(candidate.author_mapping)||candidate.author_mapping.length!==authors.length||
+             authors.some((author,i)=>!Array.isArray(author?.institutionOrderNums)||
+               JSON.stringify(author.institutionOrderNums)!==JSON.stringify(candidate.author_mapping[i])))
+            fail('导入后的逐作者单位对应未确认，未推送');
         }
       }
       const ownViewPanels=descendants(view).filter(v=>v.$options?.name==='ElDrawer').map(v=>v.$refs?.drawer||v.$el);

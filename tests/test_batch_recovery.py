@@ -20,6 +20,30 @@ MISSING='[扩展 0.4.40] [已暂停] 未找到本条导入批次（完整扫描 
 
 
 class RecoveryTests(unittest.TestCase):
+    @patch('batch_recovery.time.sleep')
+    def test_acknowledged_readonly_close_timeout_gets_one_bounded_read(self,sleep):
+        tracker=RecordReadback();bridge=Mock(online=True,pending=None)
+        error=BrowserRejected('search','[扩展 0.4.53] 【已暂停】关闭只读详情超时。本次命令未提交写入；请检查网页窗口后重新定位')
+        bridge.call.side_effect=[error,{'detail_released':True}]
+        self.assertEqual(tracker.call(bridge,'search',{'close_detail':True},90),{'detail_released':True})
+        self.assertEqual(bridge.call.call_count,2);sleep.assert_called_once_with(3)
+        self.assertEqual(bridge.call.call_args_list[0],bridge.call.call_args_list[1])
+        self.assertTrue(tracker.returned)
+
+    @patch('batch_recovery.time.sleep')
+    def test_read_recovery_never_replays_writes_unknowns_or_more_than_once(self,sleep):
+        message='关闭只读详情超时。本次命令未提交写入；请检查网页窗口后重新定位'
+        for action,error,pending in [('complete',BrowserRejected('complete',message),None),
+                ('search',SafetyStop('命令超时'),None),
+                ('search',BrowserRejected('search',message),{}),
+                ('search',BrowserRejected('search',message+'；请重新登录'),None)]:
+            bridge=Mock(online=True,pending=pending);bridge.call.side_effect=error
+            with self.assertRaises(SafetyStop):RecordReadback().call(bridge,action,{},90)
+            self.assertEqual(bridge.call.call_count,1)
+        bridge=Mock(online=True,pending=None);bridge.call.side_effect=BrowserRejected('search',message)
+        with self.assertRaises(BrowserRejected):RecordReadback().call(bridge,'search',{},90)
+        self.assertEqual(bridge.call.call_count,2)
+
     def roster(self,count=3,skipped=True):
         temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup);base=Path(temp.name)
         path=base/'list.xlsx';make_roster(path,flags=((2 if skipped else None),)*count)

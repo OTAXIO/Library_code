@@ -11,7 +11,7 @@ const payload = JSON.parse(await fs.readFile(input, 'utf8'));
 const c = payload.candidate;
 const primary = c?.kind === 'publisher-verified-v1' && /^[a-f0-9]{64}$/.test(c.primary_evidence_sha256??'') &&
   c.fields?.[c.document_type==='journal-article'?'URL':'相关网址'] === c.primary_url &&
-  ['ICLR官方论文集','PMLR官方论文集','Nature出版社','SciOpen出版社'].includes(c.source);
+  ['ICLR官方论文集','PMLR官方论文集','Nature出版社','SciOpen出版社','ACL官方论文集'].includes(c.source);
 if ((!primary && (c?.kind !== 'crossref-openalex-v1' || !c.doi)) || !c.sjtu || !c.fields) throw Error('Unverified metadata');
 const headers = Object.keys(c.fields), values = headers.map(k => c.fields[k]);
 if (headers.length < 7 || values.some(v => typeof v !== 'string')) throw Error('Invalid flat data');

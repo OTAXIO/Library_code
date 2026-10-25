@@ -89,6 +89,24 @@ class DiscoveryTests(unittest.TestCase):
             self.client.prepare(self.record)
         self.assertEqual(self.client.get.call_count, 3)
 
+    def test_publication_is_not_confused_with_same_title_preprint_or_supporting_data(self):
+        for kind in ('posted-content','component','dataset'):
+            with self.subTest(kind=kind):
+                other=copy.deepcopy(self.cr);other.update(type=kind,DOI='10.1234/supplement')
+                self.client.discovery.memo.clear()
+                self.responses({'message':{'items':[other,self.cr]}},self.oa)
+                candidate,folder=self.client.prepare(replace(self.record,sa_id='formal-'+kind))
+                self.assertEqual(candidate['doi'],self.cr['DOI'])
+                proof=json.loads((folder/'metadata.json').read_text(encoding='utf8'))
+                self.assertEqual(proof['lookup'][0]['selection_basis'],'single-supported-publication')
+
+    def test_unknown_type_or_two_formal_publications_stay_ambiguous(self):
+        for kind in ('journal-article','proceedings-article','book-chapter',None):
+            other=copy.deepcopy(self.cr);other.update(type=kind,DOI='10.1234/other')
+            self.client.discovery.memo.clear();self.responses({'message':{'items':[other,self.cr]}})
+            with self.subTest(kind=kind),self.assertRaisesRegex(MetadataSkip,'未唯一'):
+                self.client.prepare(self.record)
+
     def test_explicit_doi_404_does_not_substitute_title_search(self):
         self.responses(None)
         with self.assertRaisesRegex(MetadataSkip, 'Crossref未查询到'):
@@ -183,6 +201,7 @@ class DiscoveryTests(unittest.TestCase):
     def test_tls_and_connection_failures_name_inner_type_without_exposing_error_payload(self):
         from urllib.error import URLError
         self.client.transport = 'urllib'
+        self.client.auto_transport = False
         for inner, expected in ((ssl.SSLEOFError(8, 'PRIVATE_PROXY_DETAIL'), 'TLS 连接'),
                                 (ConnectionResetError(10054, 'PRIVATE_PROXY_DETAIL'), '连接被重置'),
                                 (ConnectionRefusedError(10061, 'PRIVATE_PROXY_DETAIL'), '连接被拒绝')):

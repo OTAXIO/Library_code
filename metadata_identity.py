@@ -32,13 +32,19 @@ def text(value):
     return value
 
 
-def title_key(value):
+def legacy_title_key(value):
     """Ignore presentation only, never remove/replace words or fuzzy-match titles."""
     value = norm(text(value)).translate(str.maketrans({
         "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-", "\u2212": "-",
         "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
     }))
     return re.sub(r"\s*-\s*", "-", value).rstrip(" .")
+
+
+def title_key(value):
+    # Legacy PDF ingestion sometimes joins adjacent words. Preserve every
+    # letter, digit and punctuation mark; ignore only whitespace presentation.
+    return re.sub(r'\s+', '', legacy_title_key(value))
 
 
 def name_tokens(value):

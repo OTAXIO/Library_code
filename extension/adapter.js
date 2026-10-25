@@ -117,8 +117,8 @@ async function runSACommand(command) {
       const row = snap(await fresh());
       guardSurface();
       return {ok: true, data: {row, non_sjtu_completion_protocol: 1, import_completion_protocol: 1,
-        metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 1,
-        publisher_journal_protocol: 2, publisher_correspondent_protocol: 1,
+        metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 2,
+        publisher_journal_protocol: 2, publisher_correspondent_protocol: 2,
         native_claim_response_protocol:typeof vm.$http?.request==='function'?1:0,
         claim_queue_protocol:4, non_institution_author_protocol:1}};
     }
@@ -411,8 +411,8 @@ async function runSACommand(command) {
       // guards refuse editors, claim selections, target changes and strangers.
       if (command.close_detail === true) await closeReadOnlyDetail();
       return {ok: true, data: {row: before, comparison, import_completion_protocol: 1,
-        metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 1, publisher_journal_protocol: 2,
-        staff_claim_protocol: 1, claim_identity: claimIdentity, publisher_correspondent_protocol: 1,
+        metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 2, publisher_journal_protocol: 2,
+        staff_claim_protocol: 1, claim_identity: claimIdentity, publisher_correspondent_protocol: 2,
         native_claim_response_protocol:typeof vm.$http?.request==='function'?1:0,
         claim_queue_protocol:4, non_institution_author_protocol:1,
         detail_released: command.close_detail === true}};
@@ -422,14 +422,19 @@ async function runSACommand(command) {
       const {candidate, evidence, person} = command;
       const item = drawer.itemData, itemId = String(row.itemId || "").replace(/^,/, "");
       const titleKey = value => String(value || "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+      const trustedRole=evidence?.protocol===1&&/^10\.20517\/[A-Za-z0-9.()-]+$/.test(candidate?.doi||'')&&
+        evidence.url==='https://www.oaepublish.com/articles/'+candidate.doi.slice(9)||
+        evidence?.protocol===2&&candidate?.source==='ACL官方论文集'&&candidate.kind==='publisher-verified-v1'&&
+        /^[a-f0-9]{64}$/.test(candidate.primary_evidence_sha256??'')&&
+        /^https:\/\/aclanthology\.org\/\d{4}\.[a-z0-9-]+\.\d+\/$/.test(candidate.primary_url??'')&&
+        candidate.doi==='10.18653/v1/'+candidate.primary_url.slice(25,-1)&&evidence.url===candidate.primary_url&&
+        evidence.pdf_url===candidate.primary_url.slice(0,-1)+'.pdf'&&equal(evidence.correspondent_names,candidate.correspondent_names);
       if (row.markStatus !== "待处理" || Number(row.matchCount) !== 1 || itemId !== command.item_id ||
           item?.id !== itemId || command.staff_id !== row.gh || person?.wno !== row.gh ||
           typeof person.id !== "string" || !person.id || claimIdentity?.state !== "已认领" ||
-          claimIdentity.library_staff_id !== row.gh || evidence?.protocol !== 1 ||
+          claimIdentity.library_staff_id !== row.gh || !trustedRole ||
           candidate?.sjtu !== true || evidence.title !== candidate?.title ||
           evidence.doi !== candidate?.doi || evidence.candidate_sha256 !== candidate?.sha256 ||
-          !/^10\.20517\/[A-Za-z0-9.()-]+$/.test(candidate?.doi || "") ||
-          evidence.url !== "https://www.oaepublish.com/articles/" + candidate.doi.slice(9) ||
           !Array.isArray(evidence.correspondent_names) || !evidence.correspondent_names.includes(command.author) ||
           !/^[0-9a-f]{64}$/.test(evidence.source_sha256 || "") ||
           titleKey(candidate.title) !== titleKey(row.titleValue) ||
@@ -486,7 +491,8 @@ async function runSACommand(command) {
       // This site's editor intentionally remains open after saving. Success
       // comes from a fresh server read, never from a window closing or toast.
       if (typeof drawer.refreshCompareData !== "function") stop("缺少原生保存回读方法");
-      drawer.refreshCompareData();
+      const savedRead = drawer.refreshCompareData();
+      if (savedRead && typeof savedRead.then === 'function') await savedRead;
       await wait(() => !drawer.dialogLoading, "读取已保存文献");
       const semantic = metadata => {
         const value = JSON.parse(JSON.stringify(metadata));
@@ -922,7 +928,7 @@ async function runSACommand(command) {
         if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(text)) stop("入库题名格式待核验");
         const key = norm(text).replace(/[\u2010-\u2014\u2212]/g, "-")
           .replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"')
-          .replace(/\s*-\s*/g, "-").replace(/[ .]+$/g, "");
+          .replace(/\s*-\s*/g, "-").replace(/[ .]+$/g, "").replace(/\s+/g, "");
         if (!key) stop("入库题名为空，未结案");
         return key;
       };
@@ -936,7 +942,8 @@ async function runSACommand(command) {
           c.source==='Nature出版社'&&c.doi.startsWith('10.1038/')&&c.primary_url==='https://www.nature.com/articles/'+c.doi.slice(8)||
           c.source==='SciOpen出版社'&&c.doi.startsWith('10.26599/')&&String(c.primary_url).toLowerCase()==='https://www.sciopen.com/article/'+c.doi)||
         !journal&&c.source==='ICLR官方论文集'&&/^https:\/\/proceedings\.iclr\.cc\/paper_files\/paper\/\d{4}\/hash\/[a-f0-9]{32}-Abstract-Conference\.html$/.test(c.primary_url)||
-        !journal&&c.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(c.primary_url));
+        !journal&&c.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(c.primary_url)||
+        !journal&&c.source==='ACL官方论文集'&&/^https:\/\/aclanthology\.org\/\d{4}\.[a-z0-9-]+\.\d+\/$/.test(c.primary_url)&&c.doi==='10.18653/v1/'+c.primary_url.slice(25,-1));
       if (command.action !== "complete" || command.owner !== "谭勋策" || Number(row.matchCount) !== 1 ||
           !proof || !/^\d{1,40}$/.test(proof.item_id??"") ||
           String(row.itemId??"").replace(/^,/,"") !== proof.item_id || !c ||

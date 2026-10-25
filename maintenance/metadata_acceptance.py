@@ -23,6 +23,7 @@ from core import SafetyStop, read_roster
 from metadata_pipeline import run_metadata_batch
 from operation_log import OperationLog
 from pairing_ui import copy_pairing_code
+from batch_recovery import RecordReadback
 from claim_reassignment import run_reassignment, validate_authorization
 from claim_batch import run_claim_batch
 
@@ -57,6 +58,14 @@ def claim_outcomes(selected, claim):
         for r in selected]
 
 
+def select_ids(command):
+    """Retarget an idle acceptance without dropping its browser connection."""
+    ids=command.split()[1:]
+    if not 1<=len(ids)<=5 or len(set(ids))!=len(ids) or any(not re.fullmatch(r'[A-Za-z0-9_-]{1,160}',v) for v in ids):
+        raise SafetyStop('一次请选择 1–5 个不同的名单 ID。')
+    return ids
+
+
 def verify_completed(bridge, records):
     verified, errors = {}, {}
     for record in records:
@@ -72,6 +81,56 @@ def verify_completed(bridge, records):
         except Exception as exc:
             errors[record.sa_id]=str(exc)
     return verified, errors
+
+
+def audit_completed_imports(base,roster,records,bridge,cancelled=lambda:False,audit=lambda *args:None):
+    """Read original batches, library identities, claims and closure; no writes."""
+    from core import file_hash
+    from metadata_sources import MetadataClient
+    from metadata_pipeline import validate_batch,resolved,verify_metadata_comparison,claim_state
+    from zero_match import WorkflowStore,verify_sa
+    base=Path(base);root=base/'runtime/metadata-imports';store=WorkflowStore(root)
+    client=MetadataClient(root/'papers');verified={};errors={}
+    def read(action,payload):
+        try:answer=bridge.call(action,payload,timeout=90)
+        except Exception:
+            audit(action,'已暂停',record.sa_id)
+            raise
+        audit(action,'已执行',record.sa_id)
+        return answer
+    for record in records:
+        try:
+            roster.assert_unchanged()
+            if cancelled():raise SafetyStop('已请求暂停。')
+            if record.owner!='谭勋策' or record.matches!=0 or not record.done or record.remark!='已入库':
+                raise SafetyStop('只核验已入库完成项，未启动新导入。')
+            state=store.get(record)
+            if state.get('phase')!='done':raise SafetyStop('缺少原入库完成断点。')
+            path=Path(state['path'])
+            if not path.resolve().is_relative_to((root/'papers').resolve()) or file_hash(path)!=state['xlsx_sha256']:
+                raise SafetyStop('原单篇 Excel 路径或哈希不一致。')
+            candidate,_=client.read_cache(path.parent,record)
+            if candidate!=state['candidate']:raise SafetyStop('原始资料与完成断点不同。')
+            payload={'sa_id':record.sa_id,'candidate':candidate,'instructions':state['instructions'],
+                'model_id':state['model_id'],'batch_id':state['batch']['id'],'expect_pushed':True,
+                **({'primary_fields':state['primary_fields']} if state.get('primary_fields') else {})}
+            batch=read('import_excel_check',payload)
+            if batch.get('verified') is not True:raise SafetyStop('批次回读未确认。')
+            validate_batch(batch['batch'],record,state['batch']['id'],pushed=True,model_id=state['model_id'])
+            library=read('import_excel_resolve',payload);item=resolved(library,candidate)
+            if not item or item['id']!=state['item_id']:raise SafetyStop('原本库条目未唯一回读。')
+            found=read('search',{'sa_id':record.sa_id,'close_detail':True})
+            row=found['row'];verify_sa(record,row)
+            if (row.get('gh')!=record.staff_id or row.get('markStatus')!='已处理' or row.get('remark')!='已入库'
+                    or str(row.get('matchCount'))!='1' or str(row.get('itemId','')).lstrip(',')!=state['item_id']):
+                raise SafetyStop('网页人员、平台关联、批注或结案状态不一致。')
+            verify_metadata_comparison(found['comparison'],candidate,record)
+            if not claim_state(found['comparison'],record,row.get('reason')):raise SafetyStop('认领状态未确认。')
+            verified[record.sa_id]={'batch':batch['batch'],'library':item,'website':found,
+                'xlsx_sha256':state['xlsx_sha256'],'record_key':record.key,'list_row':record.row,
+                'list_note':record.remark,'list_done':record.done,'source':record.source}
+        except Exception as exc:errors[record.sa_id]=str(exc)
+    return verified,errors
 
 
 def main():
@@ -214,6 +273,47 @@ def main():
         except Exception as exc:
             print(json.dumps({'probe_error':str(exc)},ensure_ascii=False),flush=True)
             events.put(('finish','只读检查结束；未提交认领。'))
+    def audit_zero():
+        """Inventory current zero matches; never open details or write statuses."""
+        current=read_roster(BASE/'list.xlsx');snapshots=[];failure=''
+        try:
+            targets=[r for r in current.records if r.owner=='谭勋策' and r.matches==0 and not r.done]
+            for index,record in enumerate(targets,1):
+                if stop.is_set():break
+                current.assert_unchanged()
+                reader=RecordReadback()
+                try:found=reader.call(bridge,'status',{'sa_id':record.sa_id},timeout=75)
+                except SafetyStop as exc:
+                    if not reader.isolated_note(exc,True):raise
+                    snapshots.append({'sa_id':record.sa_id,'row_number':record.row,'error':str(exc)})
+                    events.put(f'只读盘点 · {index}/{len(targets)} · 本条待核')
+                    continue
+                row=found.get('row',{})
+                if row.get('saLzkId')!=record.sa_id or row.get('gh')!=record.staff_id:
+                    raise SafetyStop('只读盘点的人员或名单编号不一致。')
+                snapshots.append({'sa_id':record.sa_id,'row_number':record.row,'row':row})
+                events.put(f'只读盘点 · {index}/{len(targets)} · 当前匹配 {row.get("matchCount")}')
+        except Exception as exc:
+            failure=str(exc)
+        finally:
+            folder=BASE/'runtime/live-acceptance';folder.mkdir(parents=True,exist_ok=True)
+            path=folder/(datetime.now().strftime('%Y%m%d-%H%M%S-%f')+'-zero-audit.json')
+            path.write_text(json.dumps({'readonly':True,'roster_sha256':current.sha256,'records':snapshots,'error':failure},ensure_ascii=False,indent=2),encoding='utf8')
+            print(json.dumps({'zero_audit':str(path),'checked':len(snapshots),'currently_zero':sum(str(x.get('row',{}).get('matchCount'))=='0' for x in snapshots),'error':failure},ensure_ascii=False),flush=True)
+            events.put(('finish','只读盘点已保存；未上传或修改数据。'))
+    def audit_done():
+        message='原始批次、本库、网页、名单只读验收已保存。'
+        try:
+            current=read_roster(BASE/'list.xlsx');log=OperationLog(BASE/'log.txt')
+            verified,errors=audit_completed_imports(BASE,current,select(current),bridge,stop.is_set,log.record)
+            folder=BASE/'runtime/live-acceptance';folder.mkdir(parents=True,exist_ok=True)
+            path=folder/(datetime.now().strftime('%Y%m%d-%H%M%S-%f')+'-completed-import-audit.json')
+            path.write_text(json.dumps({'readonly':True,'roster_sha256':current.sha256,'verified':verified,'errors':errors},ensure_ascii=False,indent=2),encoding='utf8')
+            print(json.dumps({'completed_import_audit':str(path),'verified':list(verified),'errors':errors},ensure_ascii=False),flush=True)
+        except Exception as exc:
+            message='只读验收停止；原入库断点未改变。'
+            print(json.dumps({'audit_error':str(exc)},ensure_ascii=False),flush=True)
+        finally:events.put(('finish',message))
     def pump():
         nonlocal busy,last_control_stamp
         if args.control_file and args.control_file.exists():
@@ -235,6 +335,19 @@ def main():
                 busy=True;threading.Thread(target=probe_staff,daemon=True).start()
             elif command=='READBACK' and not busy:
                 busy=True;threading.Thread(target=readback,daemon=True).start()
+            elif command=='AUDIT_ZERO' and not busy and not authorization and not args.claim_only:
+                busy=True;stop.clear();threading.Thread(target=audit_zero,daemon=True).start()
+            elif command=='AUDIT_DONE' and not busy and not authorization and not args.claim_only:
+                busy=True;stop.clear();threading.Thread(target=audit_done,daemon=True).start()
+            elif command.startswith('SELECT ') and not busy and not authorization:
+                previous=args.sa_ids
+                try:
+                    args.sa_ids=select_ids(command);select(read_roster(BASE/'list.xlsx'))
+                    print(json.dumps({'selected':args.sa_ids},ensure_ascii=False),flush=True)
+                    status.set('验收目标已切换；尚未执行。')
+                except Exception as exc:
+                    args.sa_ids=previous
+                    print(json.dumps({'selection_error':str(exc)},ensure_ascii=False),flush=True)
             elif command=='PAUSE':stop.set()
             elif command=='QUIT' and not busy:close();return
         while not events.empty():

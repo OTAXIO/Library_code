@@ -230,6 +230,19 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
         except Exception:
             progress("log.txt 保存失败；独立入库断点仍保留。")
         return value
+    def validate_roles(fresh):
+        """The same role check before and after claiming; one source-backed repair."""
+        current_row=fresh['row']
+        try:
+            return claim_state(fresh['comparison'],record,current_row.get('reason')),fresh
+        except MetadataReview as review:
+            if str(review)!='通讯作者待核验':raise
+            from publisher_roles import repair_correspondence
+            if not repair_correspondence(record,fresh['comparison'],current_row,state,store,call):raise review
+            after=call('search',{});verify_sa(record,after['row']);verify_import_match(after['row'],state)
+            verify_metadata_comparison(after['comparison'],state['candidate'],record)
+            return claim_state(after['comparison'],record,after['row'].get('reason')),after
+
     def accept_batch(batch, previous=None, pushed=False):
         try:
             return validate_batch(batch, record, previous, pushed, model_id=state.get("model_id"))
@@ -344,7 +357,8 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
             path = Path(state["path"])
             primary = candidate.get('kind') == PRIMARY_KIND
             if primary and (type(fresh.get('publisher_metadata_protocol')) is not int
-                            or fresh['publisher_metadata_protocol'] != 1):
+                            or fresh['publisher_metadata_protocol'] not in (1,2) or
+                            candidate.get('source')=='ACL官方论文集' and fresh['publisher_metadata_protocol']!=2):
                 raise SafetyStop('请加载支持官方论文集的扩展 0.4.37；未上传或重复导入。')
             if primary and candidate.get('document_type')=='journal-article' and (
                     type(fresh.get('publisher_journal_protocol')) is not int or fresh['publisher_journal_protocol']!=2):
@@ -510,18 +524,8 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
             # author-mismatch task. Import success alone must not close it.
             if state["phase"] == "claim_intent":
                 raise SafetyStop("上次作者认领回执未确认；保留入库断点，不重复认领或直接结案。")
-            try:
-                claimed = claim_state(fresh["comparison"], record, row.get("reason"))
-            except MetadataReview as review:
-                if str(review) != '通讯作者待核验':
-                    raise
-                from publisher_roles import repair_correspondence
-                if not repair_correspondence(record, fresh['comparison'], row, state, store, call):
-                    raise review
-                fresh = call('search', {})
-                row = fresh['row']; verify_sa(record, row); verify_import_match(row, state)
-                verify_metadata_comparison(fresh['comparison'], candidate, record)
-                claimed = claim_state(fresh['comparison'], record, row.get('reason'))
+            claimed,fresh=validate_roles(fresh)
+            row=fresh['row']
             if not claimed:
                 if state["phase"] in ("claimed", "complete_intent", "done"):
                     raise SafetyStop("已认领断点与网页不一致，未重复认领。")
@@ -549,7 +553,9 @@ def run_metadata_batch(base, roster, records, bridge, stop, progress=lambda _: N
                 verify_metadata_comparison(fresh.get("comparison"), candidate, record)
                 if str(row.get("matchCount")) != "1" or str(row.get("itemId", "")).lstrip(',') != item["id"]:
                     raise SafetyStop("认领后平台关联改变，未结案。")
-                if not claim_state(fresh["comparison"], record, row.get("reason")):
+                claimed,fresh=validate_roles(fresh)
+                row=fresh['row']
+                if not claimed:
                     raise SafetyStop("作者认领未回读成功，未结案。")
             if row.get("markStatus") not in ("待处理", "已处理") or row.get("remark", "") not in ("", "已入库"):
                 raise SafetyStop("结案前状态或人工备注改变，未覆盖。")

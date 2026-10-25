@@ -154,7 +154,26 @@ class MetadataClient:
         self.root.mkdir(parents=True, exist_ok=True)
         self.last_request = 0.0
         self.discovery = MetadataDiscovery(lambda url: self.get(url), cancelled, progress)
-        self.transport = ('windows-curl' if windows_curl() else 'urllib') if transport == 'auto' else transport
+        # Prefer Python's verified TLS path. The Windows Schannel path can fail
+        # its handshake even when the same public GET succeeds through Python.
+        self.auto_transport = transport == 'auto'
+        self.transport = 'urllib' if self.auto_transport else transport
+
+    def open_public(self, request):
+        if self.transport == 'windows-curl':
+            return curl_open(request, timeout=25)
+        try:
+            return urlopen(request, timeout=25)
+        except (URLError, ssl.SSLError) as error:
+            reason = error.reason if isinstance(error, URLError) else error
+            # A TLS handshake has not submitted a business operation. At most
+            # one alternative verified public GET is allowed in auto mode.
+            # HTTP failures, limits, DNS errors and timeouts are never retried.
+            if not self.auto_transport or not isinstance(reason, ssl.SSLError) or not windows_curl():
+                raise
+            response = curl_open(request, timeout=25)
+            self.transport = 'windows-curl'
+            return response
 
     def get(self, url):
         # A public GET is safe, but never retry 429/5xx aggressively or call it zero.
@@ -173,8 +192,7 @@ class MetadataClient:
         try:
             request = Request(url, headers={"User-Agent": "SA-Library-Assistant/0.4.36 (metadata verification)",
                                            "Accept": "application/json"})
-            opener = curl_open if self.transport == 'windows-curl' else urlopen
-            with opener(request, timeout=25) as response:
+            with self.open_public(request) as response:
                 redirected = urlsplit(response.url)
                 if redirected.scheme != "https" or redirected.netloc != parsed.netloc:
                     raise SafetyStop("元数据接口重定向异常。")

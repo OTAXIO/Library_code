@@ -1,5 +1,6 @@
 """No network: native public TLS, bounds, redaction and no replay."""
 import json
+import ssl
 from pathlib import Path
 import subprocess
 import tempfile
@@ -10,7 +11,7 @@ from urllib.request import Request
 
 from core import SafetyStop
 from metadata_sources import MetadataClient
-from metadata_transport import MAX_BODY, curl_open
+from metadata_transport import MAX_BODY, curl_open, PublicResponse
 
 URL = 'https://api.openalex.org/works/https://doi.org/10.1234/test'
 
@@ -115,11 +116,36 @@ class NativeTransportTests(unittest.TestCase):
     def test_auto_choice_does_not_remove_explicit_urllib_option(self):
         with tempfile.TemporaryDirectory() as temp:
             with patch('metadata_sources.windows_curl', return_value=Path('C:/Windows/System32/curl.exe')):
-                self.assertEqual(MetadataClient(temp).transport, 'windows-curl')
+                self.assertEqual(MetadataClient(temp).transport, 'urllib')
                 self.assertEqual(MetadataClient(temp, transport='urllib').transport, 'urllib')
             with patch('metadata_sources.windows_curl', return_value=None):
                 self.assertEqual(MetadataClient(temp).transport, 'urllib')
             with self.assertRaises(SafetyStop): MetadataClient(temp, transport='unknown')
+
+    def test_auto_prefers_working_verified_python_tls(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch('metadata_sources.urlopen',return_value=PublicResponse(b'{"ok":true}',URL)) as py, \
+                patch('metadata_sources.curl_open') as native:
+            self.assertEqual(MetadataClient(temp).get(URL),{'ok':True})
+            py.assert_called_once();native.assert_not_called()
+
+    def test_auto_tls_fallback_is_once_and_never_for_http_timeout_or_explicit_transport(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch('metadata_sources.windows_curl',return_value=Path('curl.exe')), \
+                patch('metadata_sources.urlopen',side_effect=URLError(ssl.SSLError('handshake'))), \
+                patch('metadata_sources.curl_open',return_value=PublicResponse(b'{"ok":true}',URL)) as native:
+            client=MetadataClient(temp);self.assertEqual(client.get(URL),{'ok':True})
+            native.assert_called_once();self.assertEqual(client.transport,'windows-curl')
+        failures=[HTTPError(URL,429,'limit',{},None),URLError(TimeoutError()),
+                  URLError(OSError('connection'))]
+        for transport in ('auto','urllib'):
+            for failure in failures+([URLError(ssl.SSLError('TLS'))] if transport=='urllib' else []):
+                with self.subTest(transport=transport,error=type(failure).__name__), \
+                        tempfile.TemporaryDirectory() as temp, \
+                        patch('metadata_sources.urlopen',side_effect=failure) as py, \
+                        patch('metadata_sources.curl_open') as native:
+                    with self.assertRaises(SafetyStop):MetadataClient(temp,transport=transport).get(URL)
+                    py.assert_called_once();native.assert_not_called()
 
 
 if __name__ == '__main__': unittest.main()

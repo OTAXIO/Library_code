@@ -83,6 +83,16 @@ class MetadataDiscovery:
             if title_key(value) == target:
                 matched.append(row)
         self.steps[-1].update(candidate_count=len(rows), exact_count=len(matched), candidates=preview)
+        if source == 'Crossref' and len(matched) > 1:
+            # A deposited preprint or supporting dataset can share the exact
+            # title with its publication. Our intake supports only articles or
+            # proceedings; choose a unique supported publication only when all
+            # competing hits are explicitly typed non-publication materials.
+            eligible=[row for row in matched if row.get('type') in ('journal-article','proceedings-article')]
+            excluded=[row for row in matched if row.get('type') in ('posted-content','component','dataset')]
+            if len(eligible)==1 and len(eligible)+len(excluded)==len(matched):
+                self.steps[-1].update(selection_basis='single-supported-publication',eligible_count=1)
+                return eligible[0]
         if len(matched) > 1:
             raise MetadataSkip("题名未唯一匹配")
         return matched[0] if matched else None

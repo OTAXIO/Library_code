@@ -57,6 +57,20 @@ def parse_correspondence(raw, url, candidate):
 def correspondence_evidence(folder, candidate):
     """Archive one public GET, then reparse immutable evidence on every resume."""
     d = doi(candidate.get('doi'))
+    if candidate.get('source')=='ACL官方论文集':
+        from types import SimpleNamespace
+        from primary_metadata import rebuild_primary
+        folder=Path(folder)
+        archive=folder/'metadata.json'
+        if archive.is_symlink():raise SafetyStop('ACL 角色归档路径异常。')
+        saved=json.loads(archive.read_text(encoding='utf8'))
+        rebuilt=rebuild_primary(SimpleNamespace(title=candidate['title'],doi=d,wos=''),folder,saved['primary'])
+        if rebuilt!=candidate or saved['candidate']!=candidate:
+            raise SafetyStop('ACL 正式角色证据与当前论文不一致。')
+        if not candidate.get('correspondent_names'):return None
+        return {'protocol':2,'url':candidate['primary_url'],'doi':d,'title':candidate['title'],
+            'candidate_sha256':candidate['sha256'],'correspondent_names':candidate['correspondent_names'],
+            'source_sha256':file_hash(folder/'source.pdf'),'pdf_url':candidate['primary_url'].rstrip('/')+'.pdf'}
     if not d.startswith('10.20517/'):
         return None
     folder = Path(folder); path = folder/'publisher-correspondence.html'
@@ -94,7 +108,8 @@ def repair_correspondence(record, comparison, row, state, store, call):
         return False
     capabilities = call('status', {})
     if (type(capabilities.get('publisher_correspondent_protocol')) is not int
-            or capabilities['publisher_correspondent_protocol'] != 1 or capabilities.get('row') != row):
+            or capabilities['publisher_correspondent_protocol'] not in (1,2) or
+            evidence['protocol']==2 and capabilities['publisher_correspondent_protocol']!=2 or capabilities.get('row') != row):
         raise SafetyStop('请重载扩展 0.4.48 后核验通讯作者；未准备或提交保存意图。')
     inspected = call('inspect_claim', {'expected': row,
         'sa_text': next(v['sa'] for v in comparison if v['label'] == '认领状态'),

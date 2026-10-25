@@ -12,7 +12,7 @@ from unittest.mock import patch
 from pypdf import PdfWriter
 from pypdf.generic import DictionaryObject, NameObject, DecodedStreamObject
 from core import SafetyStop, file_hash, read_roster
-from metadata_identity import MetadataSkip, title_key
+from metadata_identity import MetadataSkip, title_key, legacy_title_key
 from metadata_sources import MetadataClient
 from metadata_pipeline import resolved, run_metadata_batch
 from primary_metadata import rebuild_primary, trusted_page
@@ -48,6 +48,14 @@ def synthetic(folder):
 
 
 class PrimaryTests(unittest.TestCase):
+    def test_original_registry_keys_still_resolve_after_whitespace_policy_update(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);source=root/'primary-evidence'/hashlib.sha256(legacy_title_key(example()[0].title).encode()).hexdigest()
+            source.mkdir(parents=True);record,evidence=synthetic(source)
+            (source/'evidence.json').write_text(json.dumps(evidence),encoding='utf8')
+            client=MetadataClient(root/'papers')
+            with patch.object(client.discovery,'discover',side_effect=AssertionError('must reuse original')):
+                self.assertEqual(client.prepare(record)[0]['source'],'ICLR官方论文集')
     def test_no_doi_keeps_actual_url_and_order_without_roles(self):
         with tempfile.TemporaryDirectory() as temp:
             folder=Path(temp);record,evidence=synthetic(folder)

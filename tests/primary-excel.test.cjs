@@ -28,10 +28,13 @@ const base=()=>({expires:Date.now()+60000,sa_id:'demo-001',instructions:'SA补�
   // Fragments are not sent in HTTP; this explicit local fixture route owns SA.
   await sa.route('**/*',r=>r.fulfill({status:200,contentType:'text/html',body:saFixture}));
   await sa.goto('http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list');
-  for(let n=1;n<=7;n++){
+  for(let n=1;n<=8;n++){
    const c=structuredClone(candidate);c.title+=' '+n;c.fields['题名']=c.title;
    c.primary_url=c.fields['相关网址']='https://proceedings.mlr.press/v306/test26'+String.fromCharCode(96+n)+'.html';
-   if(n>5){
+   if(n===8){
+    c.source='ACL官方论文集';c.doi='10.18653/v1/2025.acl-long.1';c.fields['DOI']=c.doi;
+    c.primary_url=c.fields['相关网址']='https://aclanthology.org/2025.acl-long.1/';
+   }else if(n>5){
     c.source=n===6?'Nature出版社':'SciOpen出版社';c.model_name='期刊论文';c.document_type='journal-article';
     c.doi=n===6?'10.1038/s99999-025-00001-1':'10.26599/test.2025.1';
     c.primary_url=n===6?'https://www.nature.com/articles/s99999-025-00001-1':'https://www.sciopen.com/article/10.26599/TEST.2025.1';
@@ -40,7 +43,9 @@ const base=()=>({expires:Date.now()+60000,sa_id:'demo-001',instructions:'SA补�
       '卷号':'2','期号':'5','页码':'10-19','ISSN':'1234-5678'});
    }
    const p={...base(),candidate:c,sa_id:'primary-'+n,instructions:'SA补充-primary-'+n,
-    ...(n>5?{model_id:'journal-test',primary_fields:{'URL':'url','年份':'year','发表期刊':'source'}}:{})};
+    ...(n>5&&n!==8?{model_id:'journal-test',primary_fields:{'URL':'url','年份':'year','发表期刊':'source'}}:{})};
+   const scan=await page.evaluate(runImportCommand,{...p,action:'import_scan'});
+   assert.equal(scan.ok,true,JSON.stringify(scan));assert.deepEqual(scan.data.batches,[]);
    await page.evaluate(c=>testConfig.candidate=c,c);
    const probe=await page.evaluate(runExcelCommand,{...p,action:'import_excel_probe'});
    assert.equal(probe.ok,true,JSON.stringify(probe));assert.equal(probe.data.model_id,p.model_id);
@@ -87,7 +92,7 @@ const base=()=>({expires:Date.now()+60000,sa_id:'demo-001',instructions:'SA补�
    assert.equal(done.ok,true,JSON.stringify(done));assert.equal(done.data.row.markStatus,'已处理');assert.equal(done.data.row.remark,'已入库');
    console.log('PASS isolated official proceedings/journal pipeline '+n);
   }
-  assert.deepEqual(await page.evaluate(()=>({uploads,imports,pushes})),{uploads:7,imports:7,pushes:7});
+  assert.deepEqual(await page.evaluate(()=>({uploads,imports,pushes})),{uploads:8,imports:8,pushes:8});
   await page.goto('about:blank');await page.goto('http://admin.ir.lib.sjtu.edu.cn/#/collectItem/batchManage');
   await page.evaluate(c=>testConfig.candidate=c,candidate);
   const bad=structuredClone(candidate);bad.primary_url=bad.fields['相关网址']='https://evil.example/paper';
