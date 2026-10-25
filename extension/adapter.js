@@ -119,7 +119,8 @@ async function runSACommand(command) {
       return {ok: true, data: {row, non_sjtu_completion_protocol: 1, import_completion_protocol: 1,
         metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 1,
         publisher_journal_protocol: 2, publisher_correspondent_protocol: 1,
-        native_claim_response_protocol:typeof vm.$http?.request==='function'?1:0}};
+        native_claim_response_protocol:typeof vm.$http?.request==='function'?1:0,
+        claim_queue_protocol:4, non_institution_author_protocol:1}};
     }
     const drawer = vm.$refs?.compareDetailDrawer;
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");
@@ -230,7 +231,11 @@ async function runSACommand(command) {
         command.authorization?.approved === true && command.authorization.sa_id === command.sa_id &&
         command.authorization.item_id === previousClaim.ids &&
         equal(previousClaim.__saReassignment, command.authorization);
-      if (previousClaim.__saAssistant !== command.sa_id && !recoveryRead || previousClaim.loading ||
+      const ownedPreviousRead = command.action === "search" &&
+        typeof previousClaim.__saAssistant === "string" && previousClaim.__saAssistant &&
+        previousClaim.__saAssistant === drawer.currentSaLzkId &&
+        previousClaim.tableData?.id === previousClaim.ids;
+      if (previousClaim.__saAssistant !== command.sa_id && !ownedPreviousRead && !recoveryRead || previousClaim.loading ||
           previousClaim.tableData?.metadata?.author?.some(author => author.data))
         stop("认领窗口存在人工操作或未保存选择，请先人工处理并关闭");
     };
@@ -308,6 +313,14 @@ async function runSACommand(command) {
       vm.showItemId(row);
       await vm.$nextTick();
       await wait(() => drawer.dialogVisible && !drawer.dialogLoading, "读取对比详情");
+      // Modern details load staff cards through a second asynchronous native
+      // reader. Await that public reader so closure never compares a half-
+      // refreshed card with a completed preflight snapshot.
+      if (Array.isArray(drawer.compareRows) && typeof drawer.refreshCompareData === "function") {
+        const read = drawer.refreshCompareData();
+        if (read && typeof read.then === "function") await read;
+        await wait(() => drawer.dialogVisible && !drawer.dialogLoading, "等待读取完整作者详情");
+      }
       if (detailSurface.unrendered)
         await wait(() => detailSurface.ui.rendered === true ||
           !!detailSurface.ui.$refs?.drawer?.matches?.(".el-drawer") ||
@@ -401,6 +414,7 @@ async function runSACommand(command) {
         metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 1, publisher_journal_protocol: 2,
         staff_claim_protocol: 1, claim_identity: claimIdentity, publisher_correspondent_protocol: 1,
         native_claim_response_protocol:typeof vm.$http?.request==='function'?1:0,
+        claim_queue_protocol:4, non_institution_author_protocol:1,
         detail_released: command.close_detail === true}};
     }
     if (command.action === "repair_correspondent") {
@@ -568,22 +582,28 @@ async function runSACommand(command) {
         const relations = claim.tableData.itemAuthorRelationVOs?.[String(author.order)] ?? [];
         if (!Array.isArray(relations) || relations.some(relation => typeof relation.scholarId !== "string" ||
             !Number.isInteger(relation.status) || relation.status < 0 || relation.status > 10)) stop("作者认领关系格式未知");
+        const orders = author.institutionOrderNums;
+        const institutions = claim.tableData.metadata.authorInstitution;
+        const foreign = claim.getShows(orders) === false && Array.isArray(orders) && orders.length > 0 &&
+          Array.isArray(institutions) && orders.every(order => Number.isInteger(order) && order > 0 &&
+            typeof institutions[order - 1]?.address === "string" && institutions[order - 1].address.trim() &&
+            !/Shanghai\s+(?:Jiao\s*Tong|Jiaotong)\s+Univ|上海交通大学/i.test(institutions[order - 1].address));
         return {index, id: author.id ?? "", order: author.order, fullname: author.fullname,
           scholarId: author.scholarId ?? "", eligible: author.belongToCurrentInstitution !== false &&
             claim.getShows(author.institutionOrderNums) === true,
+          ...(foreign ? {non_institution: true, institution_orders: [...orders]} : {}),
           relations: relations.map(r => ({scholarId: r.scholarId, status: r.status}))};
       });
       const authors = authorsSnapshot();
       if (new Set(authors.map(author => String(author.order))).size !== authors.length) stop("作者序号重复，不能自动认领");
       if (claim.tableData.metadata.author.some(author => author.data)) stop("已有未提交的学者选择，请人工核对");
       const available = authors.filter(author => author.eligible && !author.scholarId);
-      if (!available.length && !reassignment && !inspecting) stop("没有可认领的作者行，请人工核验现有认领");
       // Selecting a row here only opens the search dialog. No scholar is bound
       // until the second, explicitly confirmed command revalidates everything.
       const target = reassignment ? authors.find(author => author.order === authorization.author_order) :
-        inspecting ? authors.find(author => author.eligible) :
-        submitting ? authors.find(author => author.index === command.author_index) : available[0];
-      if (!target || !target.eligible || !reassignment && !inspecting && target.scholarId)
+        inspecting ? authors.find(author => author.eligible) || authors[0] :
+        submitting ? authors.find(author => author.index === command.author_index) : available[0] || authors[0];
+      if (!target || (submitting || reassignment) && !target.eligible || !reassignment && !inspecting && target.scholarId)
         stop("所选作者不可认领或已有认领，不能覆盖");
       claim.handleSelect(target.index, claim.index, claim.tableData.metadata.author[target.index]);
       await vm.$nextTick();
@@ -645,7 +665,8 @@ async function runSACommand(command) {
       if (typeof name !== "string" || !name.trim()) stop("人员姓名为空");
       if (JSON.stringify(authorsSnapshot()) !== JSON.stringify(authors)) stop("查找期间作者数据发生变化");
       const prepared = {item_id: ids[0], staff_id: staffId, sa_text: saText,
-        person: {id: person.id, wno: person.wno, name, names: [...new Set(names)]}, authors};
+        person: {id: person.id, wno: person.wno, name, names: [...new Set(names)]}, authors,
+        ...(authors.some(a => a.non_institution) ? {institutions:canonical(claim.tableData.metadata.authorInstitution)} : {})};
       const closePicker = async () => {
         modal.dialogModalVisible = false;
         await vm.$nextTick();
@@ -753,7 +774,15 @@ async function runSACommand(command) {
         return {ok: true, data: {row: before, comparison, prepared,
           suggested_index: exact.length === 1 ? exact[0].index : null}};
       }
-      if (!reassignment && !equal(prepared, command.prepared)) stop("人员或作者数据已变化，请重新查找并确认");
+      const claimFacts = value => {
+        if (!value || !Array.isArray(value.authors)) return null;
+        return {item_id:value.item_id,staff_id:value.staff_id,sa_text:value.sa_text,
+          person:{id:value.person?.id,wno:value.person?.wno},
+          authors:value.authors.map(a=>({...a,relations:[...(a.relations||[])].sort((l,r)=>
+            String(l.scholarId).localeCompare(String(r.scholarId))||l.status-r.status)}))};
+      };
+      if (!reassignment && !equal(claimFacts(prepared), claimFacts(command.prepared)))
+        stop("人员或作者数据已变化，请重新查找并确认");
       if (target.relations.some(r => r.scholarId === person.id && r.status >= 1 && r.status <= 5))
         stop("该作者已有非本人作品记录，需人工核查，不能自动覆盖");
       if (target.relations.some(r => r.status >= 6)) stop("该作者已有其他有效认领关系，不能自动覆盖");
@@ -842,14 +871,41 @@ async function runSACommand(command) {
     const noteParts = note.split(/[；;]/).map(part => part.trim()).filter(Boolean);
     const knownShortNote = noteParts.length > 0 && noteParts.every(part => presetNotes.includes(part));
     const nonSJTU = note === "非交大";
+    const nonInstitutionAuthor = note === "非交大作者";
     const imported = note === "已入库";
-    if (!command.reviewed || !note || (note.length < 6 && !knownShortNote && !nonSJTU && !imported) || note.length > 2000)
+    if (!command.reviewed || !note || (note.length < 6 && !knownShortNote && !nonSJTU && !nonInstitutionAuthor && !imported) || note.length > 2000)
       stop("缺少人工核验及处理备注");
     const processedImport = command.action === "complete" && imported &&
       !!command.metadata_imported_evidence && row.markStatus === "已处理";
     const processedClaim = command.action === "complete" && note === "已认领" &&
       !!command.staff_claim_evidence && row.markStatus === "已处理";
     if (row.markStatus !== "待处理" && !processedImport && !processedClaim) stop("记录已经处理，禁止再次切换状态");
+    if (nonInstitutionAuthor) {
+      const proof=command.non_institution_author_evidence, p=proof?.prepared, a=proof?.author;
+      if (command.action!=="complete" || command.owner!=="谭勋策" || Number(row.matchCount)!==1 ||
+          !p || p.staff_id!==row.gh || p.person?.wno!==row.gh || !p.person?.id ||
+          p.item_id!==String(row.itemId||"").replace(/^,/,"") || a?.non_institution!==true ||
+          a.eligible!==false || a.scholarId!=="" || !Array.isArray(p.authors) ||
+          p.authors.filter(x=>equal(x,a)).length!==1 || !Array.isArray(p.institutions) ||
+          !Array.isArray(a.institution_orders) || !a.institution_orders.length || row.remark && row.remark!==note)
+        stop("非交大作者证据未完整确认，未结案");
+      const comparison=await showDetail();
+      const native=drawer.itemData?.metadata, target=native?.author?.[a.index];
+      const identityFields = fields => (Array.isArray(fields)?fields:[]).filter(x=>
+        ["题名","DOI","WOS记录号"].includes(x.label));
+      const unitFor = (units,order) => Array.isArray(units)?units.filter(x=>String(x.order)===String(order)):[];
+      if (!equal(identityFields(comparison),identityFields(command.expected_comparison)) || !target || target.order!==a.order ||
+          target.fullname!==a.fullname || target.scholarId ||
+          !equal(target.institutionOrderNums,a.institution_orders) ||
+          !a.institution_orders.every(order=>Number.isInteger(order) && order>0 &&
+            unitFor(native.authorInstitution,order).length===1 && unitFor(p.institutions,order).length===1 &&
+            typeof unitFor(native.authorInstitution,order)[0].address==="string" &&
+            unitFor(native.authorInstitution,order)[0].address.trim() &&
+            unitFor(native.authorInstitution,order)[0].address===unitFor(p.institutions,order)[0].address &&
+            !/Shanghai\s+(?:Jiao\s*Tong|Jiaotong)\s+Univ|上海交通大学/i.test(unitFor(native.authorInstitution,order)[0].address)))
+        stop("非交大作者或单位资料已变化，未结案");
+      await closeReadOnlyDetail();
+    }
     if (imported) {
       const metadata=!!command.metadata_imported_evidence;
       if(metadata&&command.imported_evidence)stop("结案证明来源冲突");

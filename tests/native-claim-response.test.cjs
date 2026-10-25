@@ -34,10 +34,22 @@ test('one native-client request carries identical body and query and verifies ac
  assert.deepEqual(requests[0].data,requests[0].params);assert.equal(requests[0].params.scholarId,'scholar-001');
  assert.equal(requests[0].accepts400,true);assert.equal(requests[0].rejects401,true);assert.equal(requests[0].rejects500,true);
 });
+test('alias ordering and display-name changes do not change a full-staff scholar identity',async()=>{
+ const input=await setup('ok');
+ await page.evaluate(()=>testConfig.people=[{id:'scholar-001',wno:'00001',nameCn:'测试名称更新',nameEn:'Tester',
+  aliases:[{nameAlias:'Demo'},{nameAlias:'Other registered alias'}]}]);
+ const r=await page.evaluate(runSACommand,input);assert.equal(r.ok,true,JSON.stringify(r));
+ assert.equal(r.data.claimed,true);assert.equal(await page.evaluate(()=>nativeClaimRequests.length),1);
+});
 test('decoded explicit rejection returns immediately after unchanged native relationship read, no retry',async()=>{
  const input=await setup('reject');const r=await page.evaluate(runSACommand,input);assert.equal(r.ok,true,JSON.stringify(r));
  assert.equal(r.data.rejected,true);assert.equal(r.data.unchanged,true);assert.equal(r.data.verified,false);
  assert.equal(r.data.rejection.status,400);assert.equal(await page.evaluate(()=>nativeClaimRequests.length),1);
+ await page.evaluate(()=>{synthetic.saLzkId='demo-next';});
+ const next=await page.evaluate(runSACommand,{...command('search'),sa_id:'demo-next'});
+ assert.equal(next.ok,true,JSON.stringify(next));
+ assert.equal(next.data.row.saLzkId,'demo-next');
+ assert.equal(await page.evaluate(()=>nativeClaimRequests.length),1);
 });
 test('a rejection with changed authors is uncertain and cannot advance the queue',async()=>{
  const input=await setup('changed');const r=await page.evaluate(runSACommand,input);

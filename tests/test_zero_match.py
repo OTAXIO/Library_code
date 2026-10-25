@@ -53,6 +53,8 @@ class Backend:
             prepared = {'staff_id': row['gh'], 'sa_text': payload['sa_text'],
                         'person': {'id': 'scholar-1', 'wno': row['gh'], 'name': '测试员', 'names': ['Test, Alice']},
                         'authors': [{'index': 0, 'order': 2, 'fullname': 'Test, Alice', 'eligible': True, 'scholarId': ''}]}
+            if self.ambiguous_author:
+                prepared['authors'].append({**prepared['authors'][0],'index':1,'order':3})
             return {**current, 'prepared': prepared, 'suggested_index': None if self.ambiguous_author else 0}
         if action == 'submit_claim':
             self.comparison_override['认领状态'] = {'library': '已认领'}

@@ -1,9 +1,15 @@
 // Heartbeats only. Pairing secrets stay in the extension's trusted session storage.
-if (!globalThis.__saAssistantHeartbeat) {
-  globalThis.__saAssistantHeartbeat = true;
-  const stop = () => {
+{
+  // A fresh pairing may run before a retired extension context notices reload.
+  // Replace its interval immediately instead of trusting a stale boolean.
+  if (globalThis.__saAssistantHeartbeatTimer != null)
     clearInterval(globalThis.__saAssistantHeartbeatTimer);
-    globalThis.__saAssistantHeartbeat = false;
+  globalThis.__saAssistantHeartbeat = true;
+  let timer;
+  const stop = () => {
+    clearInterval(timer);
+    if (globalThis.__saAssistantHeartbeatTimer === timer)
+      globalThis.__saAssistantHeartbeat = false;
   };
   const tick = () => {
     // Reloading an unpacked extension invalidates old content-script contexts.
@@ -16,6 +22,7 @@ if (!globalThis.__saAssistantHeartbeat) {
       });
     } catch (_) { stop(); }
   };
-  globalThis.__saAssistantHeartbeatTimer = setInterval(tick, 1500);
+  timer = setInterval(tick, 1500);
+  globalThis.__saAssistantHeartbeatTimer = timer;
   tick();
 }

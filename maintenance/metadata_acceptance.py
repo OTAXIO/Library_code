@@ -47,6 +47,33 @@ def control_stamp(path):
     return path.stat().st_mtime_ns if path and path.exists() else None
 
 
+def claim_outcomes(selected, claim):
+    done=set(claim.completed_ids)|set(claim.synced_ids)
+    attempted={r.sa_id for r in [r for r in selected if not r.done][:claim.checked]}
+    return [{'sa_id':r.sa_id,
+        'status':'done' if r.sa_id in done else 'review' if r.sa_id in attempted else 'unexecuted',
+        'message':'网页与名单已核验' if r.sa_id in done else
+            claim.skipped.get(r.sa_id,claim.reason or '待核验') if r.sa_id in attempted else '尚未执行'}
+        for r in selected]
+
+
+def verify_completed(bridge, records):
+    verified, errors = {}, {}
+    for record in records:
+        if not record.done:
+            continue
+        try:
+            found=bridge.call('search',{'sa_id':record.sa_id,'close_detail':True},timeout=75)
+            row=found.get('row',{})
+            if (row.get('saLzkId')!=record.sa_id or row.get('gh')!=record.staff_id or
+                    row.get('markStatus')!='已处理' or row.get('remark')!=record.remark):
+                raise SafetyStop('网页完成状态或备注与名单不一致。')
+            verified[record.sa_id]=found
+        except Exception as exc:
+            errors[record.sa_id]=str(exc)
+    return verified, errors
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sa-ids',nargs='+',required=True)
@@ -123,17 +150,15 @@ def main():
                     'status':'done','message':'按完整工号核验认领，网页与名单已认领批注结案'}],remaining=0,halted=False,reason='')
             elif args.claim_only:
                 from types import SimpleNamespace
-                capability=bridge.call('status',{'sa_id':selected[0].sa_id})
-                if type(capability.get('native_claim_response_protocol')) is not int or capability['native_claim_response_protocol']!=1:
-                    raise SafetyStop('请加载扩展 0.4.49 后继续原生认领回执验收；未提交认领。')
+                capability=bridge.call('search',{'sa_id':selected[0].sa_id})
+                if (capability.get('native_claim_response_protocol')!=1 or
+                        capability.get('claim_queue_protocol')!=4 or capability.get('non_institution_author_protocol')!=1):
+                    raise SafetyStop('请加载扩展 0.4.53 后继续原生认领回执验收；未提交认领。')
                 if len({r.skipped for r in selected if not r.done})>1:
                     raise SafetyStop('认领验收仅接受同一待处理或跳过范围。')
                 claim=run_claim_batch(current,selected,bridge,cancel=stop.is_set,progress=events.put,
                     audit=log.record,limit=len(selected),retry_skipped=any(r.skipped for r in selected))
-                done=set(claim.completed_ids)|set(claim.synced_ids)
-                outcomes=[{'sa_id':r.sa_id,'status':'done' if r.sa_id in done else 'review',
-                    'message':'网页与名单已核验' if r.sa_id in done else claim.skipped.get(r.sa_id,claim.reason or '未执行')}
-                    for r in selected]
+                outcomes=claim_outcomes(selected,claim)
                 result=SimpleNamespace(roster=claim.roster,outcomes=outcomes,
                     remaining=max(0,len(selected)-claim.checked),halted=claim.halted,reason=claim.reason)
             else:
@@ -143,13 +168,11 @@ def main():
                         cancel=stop.is_set,audit=log.record)
                 result=run_metadata_batch(BASE,current,selected,bridge,stop,events.put,log.record,
                     retry_skipped=args.retry_skipped)
-            verified={}
-            for item in result.outcomes:
-                if item['status']=='done':
-                    verified[item['sa_id']]=bridge.call('status',{'sa_id':item['sa_id']},timeout=75)
+            verified,readback_errors=verify_completed(bridge,[r for r in result.roster.records
+                if r.sa_id in {item['sa_id'] for item in result.outcomes if item['status']=='done'}])
             report={'started_roster_sha256':before,'final_roster_sha256':result.roster.sha256,
                 'outcomes':result.outcomes,'remaining':result.remaining,'halted':result.halted,'reason':result.reason,
-                'website_readback':verified,'excel':[{'sa_id':r.sa_id,'done':r.done,'skipped':r.skipped,
+                'website_readback':verified,'readback_errors':readback_errors,'excel':[{'sa_id':r.sa_id,'done':r.done,'skipped':r.skipped,
                     'remark':r.remark,'source':r.source} for r in result.roster.records if r.sa_id in args.sa_ids]}
             folder=BASE/'runtime/live-acceptance';folder.mkdir(parents=True,exist_ok=True)
             path=folder/(datetime.now().strftime('%Y%m%d-%H%M%S-%f')+'-metadata.json')
@@ -160,6 +183,20 @@ def main():
         except Exception as exc:
             message=str(exc) if isinstance(exc,SafetyStop) else f'验收异常 {type(exc).__name__}；未自动重复操作。'
             print(json.dumps({'error':message},ensure_ascii=False),flush=True);events.put(('finish',message))
+    def readback():
+        try:
+            current=read_roster(BASE/'list.xlsx');selected=select(current)
+            verified,errors=verify_completed(bridge,selected)
+            report={'readonly':True,'website_readback':verified,'readback_errors':errors,
+                'excel':[{'sa_id':r.sa_id,'done':r.done,'skipped':r.skipped,'remark':r.remark} for r in selected]}
+            folder=BASE/'runtime/live-acceptance';folder.mkdir(parents=True,exist_ok=True)
+            path=folder/(datetime.now().strftime('%Y%m%d-%H%M%S-%f')+'-readonly.json')
+            path.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf8')
+            print(json.dumps({'readonly_report':str(path),'verified':list(verified),'errors':errors},ensure_ascii=False),flush=True)
+            events.put(('finish','已完成只读核验，未提交业务写入。'))
+        except Exception as exc:
+            print(json.dumps({'readonly_error':str(exc)},ensure_ascii=False),flush=True)
+            events.put(('finish','只读核验结束，未提交业务写入。'))
     def probe_staff():
         """Read-only native preparation; diagnose snapshot drift without cancelling."""
         try:
@@ -196,6 +233,8 @@ def main():
             elif command=='STATUS':print(json.dumps({'online':bridge.online,'busy':busy}),flush=True)
             elif command=='PROBE_STAFF' and authorization and not busy:
                 busy=True;threading.Thread(target=probe_staff,daemon=True).start()
+            elif command=='READBACK' and not busy:
+                busy=True;threading.Thread(target=readback,daemon=True).start()
             elif command=='PAUSE':stop.set()
             elif command=='QUIT' and not busy:close();return
         while not events.empty():

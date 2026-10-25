@@ -38,8 +38,70 @@ class _ClaimInterrupted(SafetyStop):
         self.cancelled = cancelled
 
 
-def automatic_claim_selection(record, before, comparison, result):
-    """Exact staff identity; a unique registered alias may differ in formatting."""
+def _name_forms(value):
+    """Return conservative family/given-name forms for one registered alias."""
+    value = unicodedata.normalize('NFKC', str(value or '')).casefold().strip()
+    compact = ''.join(re.findall(r'[^\W_]+', value, flags=re.UNICODE))
+    forms = []
+    if ',' in value:
+        family, given = value.split(',', 1)
+        family = ''.join(re.findall(r'[^\W_]+', family, flags=re.UNICODE))
+        given = ''.join(re.findall(r'[^\W_]+', given, flags=re.UNICODE))
+        if family and given:
+            forms.append((family, given))
+    else:
+        parts = re.findall(r'[^\W_]+', value, flags=re.UNICODE)
+        if len(parts) >= 2:
+            # Registered aliases occur in both family-given and given-family
+            # order.  We do not choose between those orders here; uniqueness
+            # across the actual eligible author rows decides the result.
+            forms.extend(((parts[0], ''.join(parts[1:])),
+                          (parts[-1], ''.join(parts[:-1]))))
+    return compact, tuple(dict.fromkeys(forms))
+
+
+def _one_edit_apart(left, right):
+    if abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) > len(right):
+        left, right = right, left
+    if len(left) == len(right):
+        return sum(a != b for a, b in zip(left, right)) == 1
+    offset = differences = 0
+    for index, char in enumerate(left):
+        if char != right[index + offset]:
+            differences += 1
+            offset += 1
+            if differences > 1 or char != right[index + offset]:
+                return False
+    return True
+
+
+def _alias_score(author_name, aliases):
+    """Score one author by general name rules; never use display name as identity."""
+    author_compact, author_forms = _name_forms(author_name)
+    best = 0
+    for alias in aliases:
+        alias_compact, alias_forms = _name_forms(alias)
+        if author_compact and author_compact == alias_compact:
+            best = max(best, 100)
+        for family, given in author_forms:
+            for alias_family, alias_given in alias_forms:
+                if family != alias_family or not given or not alias_given or given[0] != alias_given[0]:
+                    continue
+                if given == alias_given:
+                    best = max(best, 100)
+                elif min(len(given), len(alias_given)) >= 4 and _one_edit_apart(given, alias_given):
+                    best = max(best, 85)
+                elif min(len(given), len(alias_given)) == 1:
+                    best = max(best, 75)
+                elif (given.startswith(alias_given) or alias_given.startswith(given)) and min(len(given), len(alias_given)) <= 2:
+                    best = max(best, 70)
+    return best
+
+
+def automatic_claim_selection(record, before, comparison, result, include_non_institution=False):
+    """Use full staff identity, then one unique high-confidence author name."""
     if not isinstance(result, dict) or result.get("row") != before or result.get("comparison") != comparison:
         raise SafetyStop("人员查找前后条目或比对详情发生变化。")
     source, staff_id = sa_claim_source(comparison)
@@ -58,22 +120,24 @@ def automatic_claim_selection(record, before, comparison, result):
     authors = prepared.get("authors")
     if isinstance(suggested, bool) or suggested is not None and not isinstance(suggested, int) or not isinstance(authors, list):
         raise SafetyStop("人员姓名与论文署名不能唯一对应。")
-    def alias_key(value):
-        # Do not derive initials, reorder names, transliterate or correct spelling.
-        value = ' '.join(unicodedata.normalize('NFKC', value).casefold().split())
-        return re.sub(r'\s*,\s*', ',', value)
-    aliases = {alias_key(name) for name in person['names']}
-    matches = [author for author in authors if isinstance(author, dict) and
-               type(author.get('index')) is int and author.get("eligible") is True and
-               author.get("scholarId") == "" and isinstance(author.get("fullname"), str) and
-               alias_key(author["fullname"]) in aliases and
-               not isinstance(author.get("order"), bool) and
-               str(author.get("order", "")).isdigit() and int(author["order"]) > 0]
-    if len(matches) != 1 or suggested is not None and matches[0]['index'] != suggested:
+    aliases = tuple(person['names'])
+    candidates = []
+    for author in authors:
+        if (not isinstance(author, dict) or type(author.get('index')) is not int or
+                (author.get('eligible') is not True and not (include_non_institution and
+                    author.get('eligible') is False and author.get('non_institution') is True)) or author.get('scholarId') != '' or
+                not isinstance(author.get('fullname'), str) or
+                isinstance(author.get('order'), bool) or
+                not str(author.get('order', '')).isdigit() or int(author['order']) <= 0):
+            continue
+        score = _alias_score(author['fullname'], aliases)
+        if score >= 70:
+            candidates.append((score, author))
+    if not candidates:
         raise SafetyStop("唯一建议署名不可认领或已存在认领关系。")
-    if suggested is None and matches[0]['fullname'].strip() in person['names']:
-        # A missing hint despite an exact literal match is inconsistent; this
-        # fallback is only for an observed, unique formatting difference.
+    best = max(score for score, _ in candidates)
+    matches = [author for score, author in candidates if score == best]
+    if len(matches) != 1 or suggested is not None and matches[0]['index'] != suggested:
         raise SafetyStop("人员姓名与论文署名不能唯一对应。")
     return prepared, person, matches[0], source, staff_id
 
@@ -235,7 +299,7 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
             note("自动认领列表条目", "已跳过", sa_id)
             continue
 
-        if claim_state != CLAIMED and record.remark in {'认领回执待核','认领结案待核','认领接口400待核'}:
+        if claim_state != CLAIMED and record.remark in {'认领回执待核','认领结案待核','认领接口400待核','非交大作者结案待核'}:
             skipped[sa_id]=record.remark
             note('旧认领写入结果未确认，仅回读，不重复提交','已跳过',sa_id)
             continue
@@ -311,7 +375,7 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
             continue
         try:
             prepared, person, author, _, _ = automatic_claim_selection(
-                record, before, comparison, prepared_result)
+                record, before, comparison, prepared_result, include_non_institution=True)
         except Exception as exc:
             skipped[sa_id] = str(exc)
             note("自动认领列表条目", "已跳过", sa_id)
@@ -323,6 +387,27 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
                 halted = True
                 note("恢复认领工作页", "已暂停", sa_id)
                 break
+            continue
+        if author.get('non_institution') is True and author.get('eligible') is False:
+            from approval import complete_non_institution_author
+            try:
+                check_current()
+                closed=complete_non_institution_author(current_roster, record, bridge, before,
+                    comparison, prepared, author)
+            except _ClaimInterrupted as exc:
+                return interrupted(exc)
+            except Exception as exc:
+                if isinstance(exc,BrowserRejected) and '【已暂停】' in str(exc) and '已发出写入' not in str(exc):
+                    skipped[sa_id]='非交大作者资料待核'
+                    note('非交大作者结案前只读校验：'+str(exc),'已跳过',sa_id)
+                    continue
+                halted=True; halt_reason='非交大作者结案结果待核：'+str(exc)
+                skipped[sa_id]='非交大作者结案待核'
+                note('非交大作者结案','已暂停',sa_id)
+                break
+            current_roster=closed.completion.roster
+            completed.append(sa_id)
+            note('非交大作者批注及结案','已执行',sa_id)
             continue
         submit = {**payload, "prepared": prepared, "author_index": author["index"], "confirmed": True}
         note("自动认领提交意图", "已执行", sa_id)
@@ -341,6 +426,17 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
         except _ClaimInterrupted as exc:
             return interrupted(exc)
         except Exception as exc:
+            if isinstance(exc,BrowserRejected) and '【已暂停】' in str(exc) and '已发出写入' not in str(exc):
+                skipped[sa_id]=str(exc)
+                note('认领提交前校验未通过，未发出写入','已跳过',sa_id)
+                try:
+                    bridge.call('search',{'sa_id':sa_id})
+                except _ClaimInterrupted as interrupted_error:
+                    return interrupted(interrupted_error)
+                except Exception as recovery_error:
+                    halted=True;halt_reason='恢复认领只读页失败：'+str(recovery_error)
+                    break
+                continue
             skipped[sa_id] = "认领结果不确定，禁止继续或重试：" + str(exc)
             note("自动认领列表条目", "已暂停", sa_id)
             halted = True

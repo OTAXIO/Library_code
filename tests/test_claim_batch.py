@@ -49,13 +49,13 @@ def persist_skips(roster, records):
 
 
 class ClaimBatchTests(unittest.TestCase):
-    def test_selection_requires_one_exact_suggested_signature(self):
+    def test_selection_requires_one_unique_suggested_signature(self):
         rec = record()
         search = found(rec)
         result = prepared(search)
         selected = automatic_claim_selection(rec, search["row"], search["comparison"], result)
         self.assertEqual(selected[2]["fullname"], "Tester")
-        for change in (None, True, 9):
+        for change in (True, 9):
             bad = copy.deepcopy(result)
             bad["suggested_index"] = change
             with self.assertRaises(SafetyStop):
@@ -106,17 +106,66 @@ class ClaimBatchTests(unittest.TestCase):
             result['prepared']['authors'][0]['fullname']=name
             self.assertEqual(automatic_claim_selection(rec,search['row'],search['comparison'],result)[2]['index'],0)
 
-    def test_alias_formatting_never_guesses_initials_spelling_or_ambiguous_rows(self):
+    def test_unique_initial_or_one_character_alias_is_accepted_but_ambiguity_is_not(self):
         rec=record();search=found(rec);result=prepared(search)
         result['prepared']['person']['names']=['Family, Given']
         result['suggested_index']=None
-        for name in ('Family, G','Family, Givin','Given, Family'):
+        for name in ('Family, G','Family, Givin'):
             result['prepared']['authors'][0]['fullname']=name
-            with self.assertRaises(SafetyStop):automatic_claim_selection(rec,search['row'],search['comparison'],result)
+            self.assertEqual(automatic_claim_selection(rec,search['row'],search['comparison'],result)[2]['index'],0)
+        result['prepared']['authors'][0]['fullname']='Given, Family'
+        with self.assertRaises(SafetyStop):automatic_claim_selection(rec,search['row'],search['comparison'],result)
         result['prepared']['authors'][0]['fullname']='Family,Given'
         second=copy.deepcopy(result['prepared']['authors'][0]);second.update(index=1,order=2,fullname='Family, Given')
         result['prepared']['authors'].append(second)
         with self.assertRaises(SafetyStop):automatic_claim_selection(rec,search['row'],search['comparison'],result)
+
+    def test_unique_initial_and_transliteration_patterns(self):
+        rec=record();search=found(rec);result=prepared(search);result['suggested_index']=None
+        for aliases, author in ((['测试甲','Family, Given'],'Family,G'),
+                                (['测试乙','Example, Liyang'],'Example,Liyng'),
+                                (['测试丙','Person, Xi-Hao'],'Person,Xihao')):
+            result['prepared']['person']['names']=aliases
+            result['prepared']['authors']=[{'index':0,'order':1,'fullname':author,
+                'scholarId':'','eligible':True,'relations':[]}]
+            self.assertEqual(automatic_claim_selection(rec,search['row'],search['comparison'],result)[2]['index'],0)
+
+    def test_unique_eligible_author_never_overrides_a_different_surname(self):
+        rec=record();search=found(rec);result=prepared(search);result['suggested_index']=None
+        result['prepared']['person']['names']=['陆佩佩','Lu, Peipei']
+        result['prepared']['authors']=[{'index':7,'order':8,'fullname':'An,Qinlong',
+            'scholarId':'','eligible':True,'relations':[]}]
+        with self.assertRaises(SafetyStop):
+            automatic_claim_selection(rec,search['row'],search['comparison'],result)
+
+    def test_positive_non_institution_author_closes_task_without_a_claim(self):
+        rec=record();search=found(rec);prep=prepared(search)
+        prep['prepared']['authors'][0].update(eligible=False,non_institution=True,institution_orders=[1])
+        prep['prepared']['institutions']=[{'order':1,'address':'Example Foreign University'}]
+        prep['suggested_index']=None
+        bridge=Mock();bridge.call.side_effect=[search,prep]
+        updated=FakeRoster([replace(rec,done=True,skipped=False,remark='非交大作者')])
+        with patch('approval.complete_non_institution_author',return_value=SimpleNamespace(
+                completion=SimpleNamespace(roster=updated))) as close:
+            result=run_claim_batch(FakeRoster([rec]),[rec],bridge,skip_writer=persist_skips)
+        self.assertFalse(result.halted);self.assertEqual(result.completed_ids,(rec.sa_id,))
+        self.assertEqual([c.args[0] for c in bridge.call.call_args_list],['search','prepare_claim'])
+        close.assert_called_once()
+
+    def test_non_eligible_without_positive_institution_evidence_is_still_deferred(self):
+        rec=record();search=found(rec);prep=prepared(search)
+        prep['prepared']['authors'][0]['eligible']=False
+        with self.assertRaises(SafetyStop):
+            automatic_claim_selection(rec,search['row'],search['comparison'],prep,include_non_institution=True)
+
+    def test_foreign_author_read_rejection_continues_and_is_not_an_unknown_write(self):
+        rec=record();search=found(rec);prep=prepared(search)
+        prep['prepared']['authors'][0].update(eligible=False,non_institution=True,institution_orders=[1])
+        bridge=Mock();bridge.call.side_effect=[search,prep]
+        with patch('approval.complete_non_institution_author',side_effect=BrowserRejected('complete',
+                '[扩展 test] 【已暂停】非交大作者或单位资料已变化，未结案')):
+            result=run_claim_batch(FakeRoster([rec]),[rec],bridge,skip_writer=persist_skips)
+        self.assertFalse(result.halted);self.assertEqual(result.skipped[rec.sa_id],'非交大作者资料待核')
 
     def test_explicit_unchanged_backend_rejection_does_not_retry_or_stop_the_next_paper(self):
         first,second=record('demo-rejected'),record('demo-next');roster=FakeRoster([first,second])
@@ -134,12 +183,22 @@ class ClaimBatchTests(unittest.TestCase):
         self.assertEqual([c.args[0] for c in bridge.call.call_args_list].count('submit_claim'),2)
 
     def test_unknown_old_claim_can_be_read_but_is_never_submitted_again(self):
-        for label in ('认领回执待核','认领结案待核','认领接口400待核'):
+        for label in ('认领回执待核','认领结案待核','认领接口400待核','非交大作者结案待核'):
             rec=record(skipped=True,remark=label);roster=FakeRoster([rec]);bridge=Mock()
             bridge.call.return_value=found(rec)
             result=run_claim_batch(roster,[rec],bridge,retry_skipped=True,skip_writer=persist_skips)
             self.assertFalse(result.halted);self.assertEqual(result.skipped[rec.sa_id],label)
             self.assertEqual([c.args[0] for c in bridge.call.call_args_list],['search'])
+
+    def test_submit_preflight_rejection_is_not_marked_as_an_unknown_write(self):
+        rec=record();search=found(rec);bridge=Mock()
+        bridge.call.side_effect=[search,prepared(search),BrowserRejected('submit_claim',
+            '[扩展 test] 【已暂停】人员或作者数据已变化，请重新查找并确认'),search]
+        result=run_claim_batch(FakeRoster([rec]),[rec],bridge,skip_writer=persist_skips)
+        self.assertFalse(result.halted)
+        self.assertNotIn('认领结果不确定',result.skipped[rec.sa_id])
+        self.assertEqual([c.args[0] for c in bridge.call.call_args_list],
+            ['search','prepare_claim','submit_claim','search'])
 
     def test_ambiguous_author_closes_owned_drawer_and_continues(self):
         first, second = record("demo-a"), record("demo-b")
@@ -147,6 +206,9 @@ class ClaimBatchTests(unittest.TestCase):
         search_a, search_b = found(first), found(second)
         ambiguous = prepared(search_a)
         ambiguous["suggested_index"] = None
+        duplicate = copy.deepcopy(ambiguous['prepared']['authors'][0])
+        duplicate.update(index=1, order=2)
+        ambiguous['prepared']['authors'].append(duplicate)
         cleanup = copy.deepcopy(search_a)
         prep_b = prepared(search_b)
         proof = {"row": search_b["row"], "verified": True, "claimed": True, "staff_id": "00001",

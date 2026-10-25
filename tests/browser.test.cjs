@@ -817,7 +817,10 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     let prepared=await prepare();
     await page.evaluate(()=>claimedUsers[1]='another-scholar');
     assert.equal((await submit(prepared)).ok,false);
-    for(const config of [{nonInstitution:true},{wrongClaimItem:'wrong'}]){
+    await reset();await page.evaluate(()=>testConfig.nonInstitution=true);
+    prepared=await prepare();assert.equal(prepared.ok,true,JSON.stringify(prepared));
+    assert.equal((await submit(prepared,{author_index:0})).ok,false);
+    for(const config of [{wrongClaimItem:'wrong'}]){
       await reset();await page.evaluate(value=>Object.assign(testConfig,value),config);
       assert.equal((await prepare()).ok,false);assert.equal(await page.evaluate(()=>writeCount),0);
     }

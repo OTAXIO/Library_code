@@ -20,6 +20,26 @@ class ClaimCompletion:
     already_processed: bool
 
 
+def complete_non_institution_author(roster, record, bridge, before, comparison, prepared, author):
+    """Close the user's author task from positive native foreign-affiliation evidence."""
+    if (record.owner!='谭勋策' or record not in roster.records or record.done or record.matches!=1
+            or before.get('saLzkId')!=record.sa_id or before.get('gh')!=record.staff_id
+            or prepared.get('staff_id')!=record.staff_id or prepared.get('person',{}).get('wno')!=record.staff_id
+            or author.get('non_institution') is not True or author.get('eligible') is not False
+            or author.get('scholarId')!='' or author not in prepared.get('authors',[])):
+        raise SafetyStop('非交大作者身份或机构证据未确认。')
+    roster.assert_unchanged()
+    result=bridge.call('complete', {'sa_id':record.sa_id,'expected':before,
+        'expected_comparison':comparison,'reviewed':True,'owner':record.owner,'note':'非交大作者',
+        'non_institution_author_evidence':{'prepared':prepared,'author':author}})
+    row=result.get('row',{})
+    if (result.get('verified') is not True or row.get('saLzkId')!=record.sa_id or row.get('gh')!=record.staff_id or
+            row.get('itemId')!=before.get('itemId') or
+            row.get('markStatus')!='已处理' or row.get('remark')!='非交大作者'):
+        raise SafetyStop('非交大作者结案回执未确认，禁止重复提交。')
+    return ClaimCompletion(reconcile_processed(roster, record, row),row,False)
+
+
 def _norm(value):
     return " ".join(unicodedata.normalize("NFKC", str(value or "")).casefold().split())
 

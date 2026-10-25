@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from approval import COMBINED_MISSING_IDS_CLAIM, auto_complete_claim, complete_claim, claim_completion_note
+from approval import COMBINED_MISSING_IDS_CLAIM, auto_complete_claim, complete_claim, claim_completion_note, complete_non_institution_author
 from core import SafetyStop
 
 
@@ -56,6 +56,22 @@ class ClaimCompletionTests(unittest.TestCase):
         self.assertEqual(payload["note"], "已认领")
         self.assertEqual(payload["expected_comparison"], self.comparison)
         self.write.assert_called_once_with(self.roster, self.record)
+
+    def test_foreign_author_closure_requires_verified_backend_before_roster_sync(self):
+        author={'index':0,'order':1,'fullname':'Tester','scholarId':'','eligible':False,'non_institution':True}
+        prepared={'staff_id':'00001','person':{'wno':'00001'},'authors':[author]}
+        done={**self.done,'remark':'非交大作者'}
+        self.bridge.call.side_effect=[{'row':done,'verified':True}]
+        result=complete_non_institution_author(self.roster,self.record,self.bridge,self.row,
+            self.comparison,prepared,author)
+        self.assertEqual(result.row['remark'],'非交大作者');self.write.assert_called_once()
+        self.assertEqual(self.bridge.call.call_args.args[0],'complete')
+        self.bridge.call.side_effect=[{'row':done,'verified':False}]
+        self.write.reset_mock()
+        with self.assertRaises(SafetyStop):
+            complete_non_institution_author(self.roster,self.record,self.bridge,self.row,
+                self.comparison,prepared,author)
+        self.write.assert_not_called()
 
     def test_unclaimed_empty_role_card_allows_identity_lookup_but_never_closure(self):
         self.comparison[0]['library']='未认领'

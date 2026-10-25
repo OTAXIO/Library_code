@@ -12,10 +12,10 @@ test('old extension context stops its timer without throwing on every tick',()=>
   assert.equal(cleared,1);
   assert.equal(sandbox.__saAssistantHeartbeat,false);
 });
-test('same live context installs only one heartbeat',()=>{
-  let timers=0,calls=0;
+test('pairing replaces the prior interval and retains only one active heartbeat',()=>{
+  let timers=0,calls=0;const active=new Set();
   const sandbox={chrome:{runtime:{id:'test',sendMessage:()=>{calls++;return Promise.resolve();}}},
-    setInterval:()=>{timers++;return 17;},clearInterval:()=>assert.fail('live timer stopped')};
+    setInterval:()=>{const id=++timers;active.add(id);return id;},clearInterval:id=>active.delete(id)};
   vm.createContext(sandbox);vm.runInContext(code,sandbox);vm.runInContext(code,sandbox);
-  assert.equal(timers,1);assert.equal(calls,1);
+  assert.equal(active.size,1);assert.equal(calls,2);
 });
