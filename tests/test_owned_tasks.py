@@ -23,7 +23,7 @@ class OwnedTaskTests(unittest.TestCase):
     def test_quota_threshold_freshness_and_manual_stop(self):
         with tempfile.TemporaryDirectory() as folder:
             path=Path(folder)/'quota.json';pause=Path(folder)/'pause'
-            for remaining,observed,expected in [(65,100,False),(50,100,False),(49.9,100,True),(65,-90,True),(65,101,True),(True,100,True)]:
+            for remaining,observed,expected in [(65,100,False),(50,100,True),(49.9,100,True),(65,-90,True),(65,101,True),(True,100,True)]:
                 path.write_text(json.dumps({'remaining_percent':remaining,'observed_at':observed}),encoding='utf8')
                 self.assertEqual(QuotaStop(path,now=lambda:100).is_set(),expected)
             path.write_text('{broken',encoding='utf8');self.assertTrue(QuotaStop(path).is_set())

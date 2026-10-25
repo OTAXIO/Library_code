@@ -137,10 +137,11 @@ def _yellow_id(data, reference, styles, restore=False):
     return (raw[:match.start()]+opening+'>'+rest+raw[match.end():]).encode('utf-8'),True
 
 
-def annotate_roster(roster, *, notes=None, new_admissions=None, unresolved=None, resolved_ids=(), backup_dir=None):
+def annotate_roster(roster, *, notes=None, new_admissions=None, unresolved=None, resolved_ids=(), status_ids=(), backup_dir=None):
     """Explicit notes keep flags unchanged; ID yellow requires saved new proof."""
     notes=dict(notes or {});new_admissions=dict(new_admissions or {});unresolved=dict(unresolved or {})
     resolved_ids=set(resolved_ids)
+    status_ids=set(status_ids)
     if unresolved and new_admissions:
         raise SafetyStop('失败项填红和新增项填黄请分别保存。')
     if set(notes)&set(unresolved):
@@ -148,9 +149,11 @@ def annotate_roster(roster, *, notes=None, new_admissions=None, unresolved=None,
     by_id={r.sa_id:r for r in roster.records}
     if roster.path.name.lower()!='list.xlsx' or not roster.status_separate or not roster.remark_column:
         raise SafetyStop('仅允许原名单的独立备注和 ID 填充。')
-    if (set(notes)|set(new_admissions)|set(unresolved)|resolved_ids)-set(by_id):raise SafetyStop('备注或填充目标不在当前名单。')
-    for sid in set(notes)|set(new_admissions)|set(unresolved)|resolved_ids:
+    if (set(notes)|set(new_admissions)|set(unresolved)|resolved_ids|status_ids)-set(by_id):raise SafetyStop('备注或填充目标不在当前名单。')
+    for sid in set(notes)|set(new_admissions)|set(unresolved)|resolved_ids|status_ids:
         if by_id[sid].owner!=OWNER:raise SafetyStop('仅允许处理谭勋策的名单。')
+    if any(not (by_id[sid].done or by_id[sid].skipped) for sid in status_ids):
+        raise SafetyStop('未处理项不能通过填色变成已完成或已跳过。')
     if any(not by_id[sid].done or by_id[sid].skipped for sid in resolved_ids):
         raise SafetyStop('只能给已核验完成项清除失败红色。')
     intended={}
@@ -178,7 +181,7 @@ def annotate_roster(roster, *, notes=None, new_admissions=None, unresolved=None,
             roster.assert_unchanged()
             with zipfile.ZipFile(path) as original:
                 member=worksheet_member(original,roster.sheet_name);changed=original.read(member)
-                styles=YellowStyles(original.read('xl/styles.xml'), 'FFFF0000' if unresolved else 'FFFFFF00') if new_admissions or unresolved or resolved_ids else None
+                styles=YellowStyles(original.read('xl/styles.xml'), 'FFFF0000' if unresolved else 'FFFFFF00') if new_admissions or unresolved or resolved_ids or status_ids else None
                 # Resolve the actual ID header, never assume a fixed column.
                 from openpyxl import load_workbook
                 book=load_workbook(path,read_only=True,data_only=False)
@@ -198,6 +201,11 @@ def annotate_roster(roster, *, notes=None, new_admissions=None, unresolved=None,
                 for sid in resolved_ids:
                     ref=id_column+str(by_id[sid].row);changed,did_change=_yellow_id(changed,ref,styles,restore=True)
                     if did_change:restored_cells.append(ref)
+                for sid in sorted(status_ids,key=lambda key:by_id[key].row):
+                    completed=by_id[sid].done
+                    styles.fill.find(f'{{{NS}}}patternFill/{{{NS}}}fgColor').set('rgb','FFFFFF00' if completed else 'FFFF0000')
+                    ref=id_column+str(by_id[sid].row);changed,did_change=_yellow_id(changed,ref,styles)
+                    if did_change:(yellow_cells if completed else red_cells).append(ref)
                 if not note_cells and not yellow_cells and not red_cells and not restored_cells:return AnnotationUpdate(roster,None,(),())
                 ET.fromstring(changed)
                 if styles:ET.fromstring(styles.raw)
@@ -229,3 +237,11 @@ def highlight_new_admission(roster, record, proof):
     if current is None or not verified_new_admission(current,proof):
         return AnnotationUpdate(roster,None,(),())
     return annotate_roster(roster,new_admissions={current.sa_id:proof})
+
+
+def format_owned_status(roster, ids=None):
+    """User-requested unified display: 1 yellow, 2 red; no data/status changes."""
+    selected=set(ids) if ids is not None else {r.sa_id for r in roster.records if r.owner==OWNER}
+    targets={r.sa_id for r in roster.records if r.sa_id in selected and r.owner==OWNER and (r.done or r.skipped)}
+    if not targets:return AnnotationUpdate(roster,None,(),())
+    return annotate_roster(roster,status_ids=targets)

@@ -9,7 +9,7 @@ import zipfile
 from openpyxl import load_workbook
 from core import SafetyStop,read_roster,file_hash
 from roster_write import migrate_status_column
-from roster_annotations import annotate_roster,highlight_new_admission,verified_new_admission
+from roster_annotations import annotate_roster,highlight_new_admission,verified_new_admission,format_owned_status
 from tests.test_roster_write import make_roster
 
 
@@ -102,6 +102,16 @@ class AnnotationTests(unittest.TestCase):
         result=annotate_roster(yellow.roster,resolved_ids=[self.record.sa_id])
         self.assertEqual(result.roster.sha256,yellow.roster.sha256)
         self.assertEqual(result.restored_cells,())
+
+    def test_unified_status_color_does_not_claim_new_admission_or_change_data(self):
+        from roster_write import mark_complete,mark_skipped_many
+        completed=mark_complete(self.roster,self.record,note='已认领').roster
+        result=format_owned_status(completed)
+        self.assertEqual(result.roster.records,completed.records)
+        book=load_workbook(self.path);self.assertEqual(book.active['C2'].fill.fgColor.rgb,'FFFFFF00');book.close()
+        self.assertEqual(result.yellow_cells,('C2',))
+        self.assertIsNone(format_owned_status(result.roster).backup)
+        self.assertFalse(verified_new_admission(result.roster.records[0],{}))
 
 
 if __name__=='__main__':unittest.main()

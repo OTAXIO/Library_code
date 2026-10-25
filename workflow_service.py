@@ -281,6 +281,8 @@ class WorkflowService:
             resolved_ids={sid for sid in messages if sid in by_id and by_id[sid].done}
             if resolved_ids:
                 result.roster=annotate_roster(result.roster,resolved_ids=resolved_ids).roster
+        from roster_annotations import format_owned_status
+        result.roster=format_owned_status(result.roster,ids=messages).roster
         return TaskResult(result.roster, messages, summary, halted=bool(result.halted),
                           reason=getattr(result, "reason", ""), cancelled=bool(getattr(result, "cancelled", False)),
                           deferred_count=deferred)

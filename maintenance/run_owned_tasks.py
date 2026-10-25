@@ -43,8 +43,8 @@ class QuotaStop:
             if (type(remaining) not in (int, float) or not 0 <= remaining <= 100
                     or type(observed) not in (int, float) or not 0 <= self.now()-observed <= self.max_age):
                 self.reason = '额度读数失效，停止新操作并保存断点。'
-            elif remaining < 50:
-                self.reason = '剩余额度低于 50%，停止新操作并保存断点。'
+            elif remaining <= 50:
+                self.reason = '剩余额度达到或低于 50%，停止新操作并保存断点。'
             elif self.pause_path and Path(self.pause_path).exists():
                 self.reason = '已请求暂停，保存原断点。'
         except (OSError, ValueError, KeyError, TypeError):

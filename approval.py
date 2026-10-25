@@ -1,5 +1,5 @@
 """Narrow, reviewed claim closure: backend readback precedes Excel completion."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import unicodedata
 import re
 
@@ -18,6 +18,19 @@ class ClaimCompletion:
     completion: object
     row: dict
     already_processed: bool
+
+
+def current_claim_record(record, row, enabled=False):
+    """Use verified live routing facts; keep the original roster/key for writes."""
+    if type(enabled) is not bool:raise SafetyStop('当前匹配核验开关无效。')
+    if not enabled:return record
+    from zero_match import verify_sa
+    verify_sa(record,row)
+    item=row.get('itemId','').strip(',') if isinstance(row.get('itemId'),str) else ''
+    if (record.owner!='谭勋策' or record.matches!=0 or str(row.get('matchCount'))!='1'
+            or not re.fullmatch(r'\d{1,40}',item) or not isinstance(row.get('reason'),str)):
+        raise SafetyStop('原零匹配记录未确认变成唯一单匹配，未切换认领。')
+    return replace(record,matches=1,item_ids=row['itemId'],reason=row['reason'])
 
 
 def complete_non_institution_author(roster, record, bridge, before, comparison, prepared, author):
@@ -126,12 +139,13 @@ def verified_claim_rejection(result, before, person, author):
 
 
 def auto_complete_claim(roster, record, bridge, before, comparison, proof, person, author,
-                        confirmed=False, note=None):
+                        confirmed=False, note=None, current_match=False):
     """Continue only the just-verified claim, never an uncertain retry."""
+    context=current_claim_record(record,before,current_match)
     if (confirmed is not True or record.owner != "谭勋策" or record not in roster.records or record.done
-            or record.matches != 1):
+            or context.matches != 1):
         raise SafetyStop("自动批注只允许本次确认的谭勋策单匹配作者认领。")
-    expected_note = claim_completion_note(record, comparison, claimed=False)
+    expected_note = claim_completion_note(context, comparison, claimed=False)
     note = expected_note if note is None else note
     if note != expected_note:
         raise SafetyStop("自动认领备注与本次差异证据不一致。")
@@ -172,21 +186,22 @@ def auto_complete_claim(roster, record, bridge, before, comparison, proof, perso
     if stable_fields(comparison) != stable_fields(current):
         raise SafetyStop("认领前后 SA 或论文信息发生变化，停止自动批注。")
     # Re-read once more inside complete_claim, immediately before submitting.
-    return complete_claim(roster, record, bridge, row, current, reviewed=True, note=note)
+    return complete_claim(roster, record, bridge, row, current, reviewed=True, note=note,current_match=current_match)
 
 
-def complete_claim(roster, record, bridge, expected, comparison, reviewed=False, note=None):
+def complete_claim(roster, record, bridge, expected, comparison, reviewed=False, note=None,current_match=False):
     if record.owner != "谭勋策" or record not in roster.records or record.done:
         raise SafetyStop("认领结案只允许谭勋策名单中的未完成记录。")
     if reviewed is not True:
         raise SafetyStop("请先核对当前记录、认领结果和处理备注。")
-    if record.matches != 1 or not isinstance(expected, dict) or expected.get("saLzkId") != record.sa_id:
+    context=current_claim_record(record,expected,current_match)
+    if context.matches != 1 or not isinstance(expected, dict) or expected.get("saLzkId") != record.sa_id:
         raise SafetyStop("本按钮仅处理单匹配的认领结案，请重新定位。")
-    expected_note = claim_completion_note(record, comparison, claimed=True)
+    expected_note = claim_completion_note(context, comparison, claimed=True)
     note = expected_note if note is None else note
     if note != expected_note:
         raise SafetyStop("认领结案备注与当前差异证据不一致。")
-    validate_note(note, comparison, record.reason, record.matches)
+    validate_note(note, comparison, context.reason, context.matches)
     roster.assert_unchanged()
     # Search reads the current status first and can safely reconcile the owned
     # read-only detail. Never switch an already-processed row back to pending.
@@ -199,7 +214,7 @@ def complete_claim(roster, record, bridge, expected, comparison, reviewed=False,
         return ClaimCompletion(completion, row, True)
     if row != expected or latest.get("comparison") != comparison:
         raise SafetyStop("网页在核对后发生变化，请重新定位并核对，未提交结案。")
-    if str(row.get("matchCount")) != "1" or row.get("reason") != record.reason:
+    if str(row.get("matchCount")) != "1" or row.get("reason") != context.reason:
         raise SafetyStop("后台匹配数或待处理原因与名单不一致，不能认领结案。")
     if row.get("remark", "") not in ("", note):
         raise SafetyStop("后台已有其他备注，保留原文，请人工核对后结案。")
