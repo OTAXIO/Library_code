@@ -1,4 +1,4 @@
-"""Two-task UI; all production browser actions use the paired extension."""
+"""Two-task UI (claim, zero-match 需导入); all browser actions use the paired extension."""
 from __future__ import annotations
 
 import queue
@@ -9,14 +9,14 @@ from pathlib import Path
 from tkinter import ttk
 
 from bridge import Bridge
-from core import SafetyStop
+from core import SafetyStop, is_assigned_owner
 from notices import messages
 from pairing_ui import copy_pairing_code
 from ui_theme import P, install_theme, style_text
 from workflow_service import WorkflowService
 
 BASE = Path(__file__).resolve().parent
-VERSION = "0.4.59"
+VERSION = "0.4.60"
 SA_URL = "http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list"
 SCOPES = {"待处理": "pending", "重试跳过项": "skipped", "已完成": "done"}
 
@@ -32,12 +32,11 @@ class App:
         self.owner = tk.StringVar()
         self.scope = tk.StringVar(value="待处理")
         self.limit = tk.StringVar(value="5")
-        self.import_style = tk.StringVar(value="Crossref＋OpenAlex（Excel）")
         self.status = tk.StringVar(value="读取名单后，连接浏览器并开始。")
         self.connection = tk.StringVar(value="浏览器未连接")
         self.counts = tk.StringVar()
         install_theme(root)
-        root.title(f"机构知识库 · 自动认领 / 自动导入 {VERSION}")
+        root.title(f"机构知识库 · 自动认领 / 零匹配需导入 {VERSION}")
         root.geometry("760x540")
         root.minsize(660, 430)
         root.attributes("-topmost", True)
@@ -80,7 +79,7 @@ class App:
         self.pages, self.trees, self.details = {}, {}, {}
         explanations = {
             "claim": ("自动认领", "单匹配任务：核对人员编号与署名 → 认领 → 网页批注 → 回写名单。"),
-            "import": ("自动导入", "零匹配任务：获取元数据 → 核验交大署名及本库缺失 → 入库 → 批注并结案。"),
+            "import": ("零匹配 · 需导入", "零匹配任务：只读核对网页匹配数仍为 0 → 网页备注“需导入”并设为已处理 → 名单备注“需导入”、是否识别 1。不入库、不认领。"),
         }
         for mode, (title, explanation) in explanations.items():
             page = ttk.Frame(self.notebook, padding=(2, 4))
@@ -91,15 +90,6 @@ class App:
             intro = ttk.Frame(page)
             intro.grid(row=0, column=0, sticky="ew", pady=(0, 8))
             ttk.Label(intro, text=explanation, style="Muted.TLabel", wraplength=620).pack(anchor="w")
-            if mode == "import":
-                style_row = ttk.Frame(intro)
-                style_row.pack(fill="x", pady=(6, 0))
-                ttk.Label(style_row, text="导入方式").pack(side="left")
-                self.import_style_box = ttk.Combobox(style_row, textvariable=self.import_style,
-                    values=["Crossref＋OpenAlex（Excel）", "自动导出并入库", "手动导出（一次一篇）"], state="readonly", width=27)
-                self.import_style_box.pack(side="left", padx=8)
-                self.import_style_box.bind("<<ComboboxSelected>>", lambda _: self.render())
-                ttk.Label(style_row, text="Excel 模式不依赖 WOS。", style="Muted.TLabel").pack(side="left")
             table = ttk.Frame(page)
             table.grid(row=1, column=0, sticky="nsew")
             tree = ttk.Treeview(table, columns=("id", "title", "status"), show="headings", height=6)
@@ -126,8 +116,6 @@ class App:
         actions.pack(fill="x")
         self.start_button = ttk.Button(actions, text="开始自动认领", style="Primary.TButton", command=self.start)
         self.start_button.pack(side="left")
-        self.manual_import_button = ttk.Button(actions, text="② 接回 TXT 并入库", style="Primary.TButton",
-            command=lambda: self.start(manual_intake=True))
         self.pause_button = ttk.Button(actions, text="暂停", command=self.pause, state="disabled")
         self.pause_button.pack(side="left", padx=8)
         self.skip_button = ttk.Button(actions, text="跳过所选数据", command=self.skip_selected, state="disabled")
@@ -141,46 +129,30 @@ class App:
     def mode(self):
         return "import" if self.notebook.select() == str(self.pages["import"]) else "claim"
 
-    def manual_mode(self):
-        return self.mode() == "import" and self.import_style.get() == "手动导出（一次一篇）"
-
-    def metadata_mode(self):
-        return self.mode() == "import" and self.import_style.get() == "Crossref＋OpenAlex（Excel）"
-
     def configure_actions(self):
-        manual = self.manual_mode()
         disabled = self.busy or self.scope.get() == "已完成"
         retry=self.scope.get()=='重试跳过项'
-        self.start_button.configure(text="① 定位 WOS 文献" if manual else '重新检查全部跳过项' if retry else
-            "开始自动导入" if self.mode() == "import" else "开始自动认领",
+        self.start_button.configure(text='重新检查全部跳过项' if retry else
+            "开始标注需导入" if self.mode() == "import" else "开始自动认领",
             state="disabled" if disabled else "normal")
-        self.limit_box.configure(state="disabled" if self.busy or manual or retry else "normal")
-        self.import_style_box.configure(state="disabled" if self.busy else "readonly")
+        self.limit_box.configure(state="disabled" if self.busy or retry else "normal")
+        owned = is_assigned_owner(self.owner.get())
         selected = self.trees[self.mode()].selection()
-        can_skip = (not self.busy and self.scope.get() == "待处理" and
-                    self.owner.get() == "谭勋策" and len(selected) == 1)
+        can_skip = not self.busy and self.scope.get() == "待处理" and owned and len(selected) == 1
         self.skip_button.configure(state="normal" if can_skip else "disabled")
-        self.review_button.configure(state="normal" if not self.busy and self.roster and
-                                     self.owner.get() == "谭勋策" else "disabled")
-        if manual:
-            self.counts_label.pack_forget()
-            self.manual_import_button.pack(side="left", after=self.start_button, padx=(8, 0))
-            self.manual_import_button.configure(state="disabled" if disabled else "normal")
-        else:
-            self.manual_import_button.pack_forget()
-            self.counts_label.pack(anchor="e", pady=(4, 0))
+        self.review_button.configure(state="normal" if not self.busy and self.roster and owned else "disabled")
 
     def reload_roster(self):
         if self.busy:
             return
         try:
             self.roster = self.service.load()
-            owners = sorted({r.owner for r in self.roster.records if r.owner})
+            owners = sorted({r.owner for r in self.roster.records if is_assigned_owner(r.owner)})
             self.owner_box["values"] = owners
             if self.owner.get() not in owners:
-                self.owner.set("谭勋策" if "谭勋策" in owners else "")
+                self.owner.set(owners[0] if len(owners) == 1 else "")
             self.last_results.clear()
-            self.status.set("名单已读取；当前仅自动处理谭勋策的任务。")
+            self.status.set("名单已读取；请选择负责人，只处理所选负责人的任务。")
         except (SafetyStop, OSError) as exc:
             self.roster = None
             self.status.set(str(exc))
@@ -231,7 +203,7 @@ class App:
                 raise SafetyStop("请先在列表中只选中一条待处理数据。")
             record = self.service.select_skip(self.roster, mode, owner, scope, selected[0])
             if not messages.askyesno("跳过所选数据", f"仅跳过这一条？\n\n{record.title}\n名单 ID：{record.sa_id}\n\n"
-                "是否识别将写为 2。保留已有备注，不导入、不认领、不在网页结案。\n"
+                "是否识别将写为 2；备注为空时写“手动跳过”，已有备注保留。不认领、不在网页结案。\n"
                 "普通批次会跳过它；以后可在“重试跳过项”中处理。", parent=self.root):
                 return
             self.set_busy(True)
@@ -266,13 +238,13 @@ class App:
             window.window.lift()
             return
         try:
-            if not self.roster or self.owner.get() != '谭勋策':
-                raise SafetyStop('请先读取名单，并选择负责人谭勋策。')
+            if not self.roster or not is_assigned_owner(self.owner.get()):
+                raise SafetyStop('请先读取名单，并选择负责人。')
             self.roster.assert_unchanged()
             from manual_review_ui import ManualReviewDialog
             selected = self.trees[self.mode()].selection()
             self.review_dialog = ManualReviewDialog(self.root, self.roster, self.apply_manual_review,
-                                                     selected[0] if len(selected) == 1 else '')
+                                                     selected[0] if len(selected) == 1 else '', self.owner.get())
         except (SafetyStop, OSError) as exc:
             self.status.set(str(exc))
             messages.showwarning('无法手动核验', str(exc), parent=self.root)
@@ -291,45 +263,29 @@ class App:
             self.set_busy(False)
             self.render()
 
-    def start(self, *, manual_intake=False):
+    def start(self):
         if self.busy:
             return
         try:
             mode, scope = self.mode(), SCOPES[self.scope.get()]
-            manual = self.manual_mode()
-            if manual_intake and not manual:
-                raise SafetyStop("接回 TXT 仅用于手动导出的一篇模式。")
-            if manual:
-                selected = self.trees["import"].selection()
-                if len(selected) != 1:
-                    raise SafetyStop("请先在列表中选中一篇论文；手动模式不会处理其他记录。")
-                records = [self.service.select_manual(self.roster, self.owner.get(), scope, selected[0])]
-            else:
-                if scope!='skipped' and not self.limit.get().strip().isdigit():
-                    raise SafetyStop("本轮条数须为 1–100 的整数。")
-                records = self.service.select(self.roster, mode, self.owner.get(),
-                    100 if scope=='skipped' else int(self.limit.get()), scope)
+            if scope!='skipped' and not self.limit.get().strip().isdigit():
+                raise SafetyStop("本轮条数须为 1–100 的整数。")
+            records = self.service.select(self.roster, mode, self.owner.get(),
+                100 if scope=='skipped' else int(self.limit.get()), scope)
             if not self.bridge or not self.bridge.online:
-                raise SafetyStop("请连接 SA 比对页并绑定后台导入页；只有 WOS 模式还需绑定 WOS 页。")
+                raise SafetyStop("请先连接浏览器：在 SA 比对结果页扩展中配对。")
         except (SafetyStop, KeyError) as exc:
             messages.showwarning("尚未开始", str(exc), parent=self.root)
             return
         self.stop.clear()
         self.set_busy(True)
-        self.status.set("正在定位所选这一篇；定位完成后再手动 Export。" if manual and not manual_intake else
-            f"开始{'导入' if mode == 'import' else '认领'} {len(records)} 条，运行中请勿手动操作工作页。")
+        self.status.set(f"开始{'标注需导入' if mode == 'import' else '认领'} {len(records)} 条，运行中请勿手动操作工作页。")
         roster, bridge, owner = self.roster, self.bridge, self.owner.get()
-        metadata = self.metadata_mode()
         def work():
             try:
                 progress = lambda text: self.events.put(("progress", text))
-                if manual and not manual_intake:
-                    result = self.service.locate_import(roster, records[0], owner, scope,
-                                                        bridge, self.stop, progress)
-                else:
-                    result = self.service.run(roster, records, mode, scope, bridge, self.stop, progress,
-                                              **({"manual_export": True} if manual else
-                                                 {"metadata_import": True} if metadata else {}))
+                result = self.service.run(roster, records, mode, scope, bridge, self.stop, progress,
+                                          need_import=mode == "import", owner=owner)
                 self.events.put(("result", result))
             except Exception as exc:
                 from run_diagnostics import safe_text
@@ -398,9 +354,8 @@ class App:
         frame = ttk.Frame(window, padding=16)
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="1. 在 SA 比对结果页打开扩展，粘贴配对码并连接。\n"
-                  "2. Excel 导入：另绑定后台导入页，不需要 WOS。\n"
-                  "3. WOS 导入：另绑定 WOS 页和后台导入页。\n"
-                  "保留所需工作页；认领只需要第一步。", wraplength=425).pack(anchor="w", pady=(0, 12))
+                  "2. 保持该比对页打开。认领和零匹配“需导入”标注都只需要这一页，\n"
+                  "   不需要 WOS 或后台导入页。", wraplength=425).pack(anchor="w", pady=(0, 12))
         token = tk.StringVar(value=self.bridge.token)
         token_entry = ttk.Entry(frame, textvariable=token, state="readonly")
         token_entry.pack(fill="x")

@@ -6,13 +6,13 @@ import sqlite3
 
 from automation import ImportStore
 from claim_batch import run_claim_batch
-from core import SafetyStop, fixed_roster_path, read_roster
+from core import SafetyStop, fixed_roster_path, read_roster, require_owner
 from operation_log import OperationLog
-from roster_write import mark_skipped_many, mark_skipped_without_note, migrate_status_column
+from roster_write import mark_skipped_many, migrate_status_column
 from skip_notes import brief_skip_note
 from wos_batch import WOSDownload, default_store
 from wos_policy import WOSPolicyStop, match_count, require_no_author_review, zero_result_note
-from zero_match import OWNER, SerialWOS, WorkflowStore, run_batch, verify_sa
+from zero_match import SerialWOS, WorkflowStore, run_batch, verify_sa
 
 
 @dataclass
@@ -58,8 +58,7 @@ class WorkflowService:
             raise SafetyStop("请先读取 code/list.xlsx。")
         if not owner:
             raise SafetyStop("请选择负责人。")
-        if owner != OWNER:
-            raise SafetyStop("本次自动化仅处理谭勋策，其他负责人的记录不会修改。")
+        require_owner(owner)
         if scope!='skipped' and (type(limit) is not int or not 1 <= limit <= 100):
             raise SafetyStop("本轮条数须为 1–100 的整数。")
         if mode not in ("claim", "import") or scope not in ("pending", "skipped"):
@@ -68,14 +67,14 @@ class WorkflowService:
         visible=self.visible(roster,mode,owner,scope)
         records=visible if scope=='skipped' else visible[:limit]
         if not records:
-            raise SafetyStop("当前范围没有可执行的" + ("零匹配导入" if mode == "import" else "单匹配认领") + "任务。")
+            raise SafetyStop("当前范围没有可执行的" + ("零匹配" if mode == "import" else "单匹配认领") + "任务。")
         return records
 
     def select_manual(self, roster, owner, scope, sa_id):
         self.select(roster, "import", owner, 1, scope)  # Same ownership/range guards.
         selected = [r for r in self.visible(roster, "import", owner, scope) if r.sa_id == sa_id]
         if len(selected) != 1:
-            raise SafetyStop("请在当前范围中选择一篇谭勋策的未完成零匹配任务。")
+            raise SafetyStop("请在当前范围中选择一篇所选负责人的未完成零匹配任务。")
         return selected[0]
 
     def select_skip(self, roster, mode, owner, scope, sa_id):
@@ -116,15 +115,17 @@ class WorkflowService:
                 raise SafetyStop("本地断点无法核验，未跳过；请检查原操作记录。") from exc
 
     def skip_selected(self, roster, mode, owner, scope, sa_id, bridge=None):
-        """Persist only numeric 2 for one owned row. No browser commands."""
+        """Persist numeric 2 and a visible reason for one owned row. No browser commands."""
         record = self.select_skip(roster, mode, owner, scope, sa_id)
         if not roster.status_separate or roster.path.resolve() != fixed_roster_path(self.base).resolve():
             raise SafetyStop("请重读当前 code/list.xlsx，确认末尾独立的是否识别列后再跳过。")
         if bridge is not None and getattr(bridge, "pending", None):
             raise SafetyStop("浏览器命令仍在执行，未跳过；请等待当前操作结束。")
         self._check_skip_journals(record)
-        saved = mark_skipped_without_note(roster, [record])
-        text = "已手动跳过这一条；仅将是否识别写为 2，备注和网页未修改。普通批次不再处理它。"
+        # A red row must always explain itself; an existing note is kept as is.
+        saved = mark_skipped_many(roster, [record], reasons={record.sa_id: record.remark or "手动跳过"})
+        text = ("已手动跳过这一条；是否识别写为 2" + ("，原备注保留" if record.remark else "，备注写“手动跳过”")
+                + "，网页未修改。普通批次不再处理它。")
         try:
             self.operation_log.record("手动跳过所选数据（仅名单标记）", "已跳过", record.sa_id)
         except Exception:
@@ -197,13 +198,15 @@ class WorkflowService:
                 "已定位这一篇。请在 WOS 手动导出制表符文件、Full Record，下载完成后点“接回 TXT 并入库”。")
         return TaskResult(roster, {record.sa_id: text}, text)
 
-    def run(self, roster, records, mode, scope, bridge, stop, progress, *, manual_export=False, metadata_import=False):
+    def run(self, roster, records, mode, scope, bridge, stop, progress, *, manual_export=False,
+            metadata_import=False, need_import=False, owner=None):
         records = list(records)
-        workflow = ("metadata-import" if metadata_import else "wos-manual-import" if manual_export else
-                    "wos-import" if mode == "import" else mode)
+        workflow = ("need-import" if need_import else "metadata-import" if metadata_import else
+                    "wos-manual-import" if manual_export else "wos-import" if mode == "import" else mode)
         return self._diagnosed(workflow, scope, records, bridge, progress,
             lambda observed, updates: self._run(roster, records, mode, scope, observed, stop, updates,
-                manual_export=manual_export, metadata_import=metadata_import))
+                manual_export=manual_export, metadata_import=metadata_import,
+                need_import=need_import, owner=owner))
 
     def _diagnosed(self, workflow, scope, records, bridge, progress, execute):
         from run_diagnostics import RunDiagnostics, TracedBridge
@@ -223,13 +226,21 @@ class WorkflowService:
                 result.summary += "\n诊断：runtime/run-reports/" + diagnostic.path.name
         return result
 
-    def _run(self, roster, records, mode, scope, bridge, stop, progress, *, manual_export=False, metadata_import=False):
+    def _run(self, roster, records, mode, scope, bridge, stop, progress, *, manual_export=False,
+             metadata_import=False, need_import=False, owner=None):
         if type(metadata_import) is not bool or metadata_import and (mode != "import" or manual_export):
             raise SafetyStop("跨来源 Excel 模式仅用于零匹配导入，不能与 WOS 手动模式混用。")
         if type(manual_export) is not bool or manual_export and (mode != "import" or len(records) != 1):
             raise SafetyStop("手动导出模式仅允许一篇零匹配导入任务。")
-        expected = ([self.select_manual(roster, OWNER, scope, records[0].sa_id)] if manual_export else
-                    self.select(roster, mode, OWNER, len(records), scope))
+        if type(need_import) is not bool or need_import and (mode != "import" or manual_export or metadata_import):
+            raise SafetyStop("需导入标注仅用于零匹配任务，不能与导入模式混用。")
+        if owner is None:
+            owners = {record.owner for record in records}
+            owner = owners.pop() if len(owners) == 1 else None
+        if not owner or any(record.owner != owner for record in records):
+            raise SafetyStop("运行队列须只包含所选负责人的记录，未开始。")
+        expected = ([self.select_manual(roster, owner, scope, records[0].sa_id)] if manual_export else
+                    self.select(roster, mode, owner, len(records), scope))
         if list(records) != expected:
             raise SafetyStop("运行队列与当前名单范围不一致，未开始。")
         if not bridge or not bridge.online:
@@ -239,13 +250,24 @@ class WorkflowService:
         deferred=0
         if mode == "claim":
             result = run_claim_batch(roster, records, bridge, cancel=stop.is_set,
-                progress=progress, audit=audit, limit=len(records), retry_skipped=scope == "skipped")
+                progress=progress, audit=audit, limit=len(records), retry_skipped=scope == "skipped",
+                owner=owner)
             messages = {sa_id: "已认领并完成网页批注及名单回写" for sa_id in result.completed_ids}
             messages.update({sa_id: "后台原已处理，仅同步名单" for sa_id in result.synced_ids})
             messages.update(result.skipped)
             tail = "已暂停，请核验网页；不重复提交。" if result.halted else "已按请求暂停。" if result.cancelled else "本轮结束。"
             tail = getattr(result, "reason", "") or tail
             summary = f"完成 {len(result.completed_ids)} · 原已处理 {len(result.synced_ids)} · 跳过 {len(result.skipped)}。{tail}"
+        elif need_import:
+            from need_import import run_need_import_batch
+            result = run_need_import_batch(roster, records, bridge, owner, cancel=stop.is_set,
+                progress=progress, audit=audit, retry_skipped=scope == "skipped")
+            messages = {sa_id: "网页及名单已标注需导入" for sa_id in result.completed_ids}
+            messages.update({sa_id: "后台原已处理，仅同步名单" for sa_id in result.synced_ids})
+            messages.update(result.skipped)
+            tail = result.reason or ("已按请求暂停。" if result.cancelled else "本轮结束。")
+            summary = (f"标注需导入 {len(result.completed_ids)} · 原已处理 {len(result.synced_ids)} · "
+                       f"跳过 {len(result.skipped)}。{tail}")
         else:
             if metadata_import:
                 from metadata_pipeline import run_metadata_batch

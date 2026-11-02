@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from core import Record, Roster, SOURCE_HEADER, STATUS_HEADER, SafetyStop, file_hash, read_roster
+from core import Record, Roster, SOURCE_HEADER, STATUS_HEADER, SafetyStop, file_hash, is_assigned_owner, read_roster
 
 NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -584,22 +584,23 @@ def cleanup_skipped_notes(roster, clear_records, short_notes, backup_dir=None):
     if set(short_notes) - set(by_id) or not roster.status_separate or roster.remark_column != 1:
         raise SafetyStop("无法确认第一列备注、独立状态或清理目标，未回写。")
     targets = clear_records + [by_id[sa_id] for sa_id in short_notes]
-    if any(record not in roster.records or record.owner != '谭勋策' or
+    if any(record not in roster.records or not is_assigned_owner(record.owner) or
            record.done or not record.skipped for record in targets):
-        raise SafetyStop("只允许清理谭勋策已跳过记录，完成项和其他负责人不变。")
+        raise SafetyStop("只允许清理具体负责人的已跳过记录，完成项和未分配记录不变。")
     return _mark_values(roster, [(record, None) for record in clear_records] +
                         [(by_id[sa_id], 2) for sa_id in short_notes], backup_dir,
                         {**short_notes, **{sa_id: '' for sa_id in clear_ids}})
 
 
-def reconcile_processed(roster, record, remote_row, owner="谭勋策"):
+def reconcile_processed(roster, record, remote_row, owner=None):
     """Mirror an already-processed backend row; never change backend state here.
 
     Returns ``None`` only when the exact remote row is still pending. All
     unfamiliar or conflicting states stop before touching the workbook.
     """
-    if record.owner != owner or record not in roster.records:
-        raise SafetyStop("自动核验只允许处理谭勋策本人名单中的记录。")
+    if (not is_assigned_owner(record.owner) or owner is not None and record.owner != owner
+            or record not in roster.records):
+        raise SafetyStop("自动核验只允许处理所选负责人名单中的记录。")
     if record.done:
         raise SafetyStop("本地名单已经完成，请重新读取后跳过。")
     if not isinstance(remote_row, dict) or remote_row.get("saLzkId") != record.sa_id:

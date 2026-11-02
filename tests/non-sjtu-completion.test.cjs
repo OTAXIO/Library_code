@@ -29,7 +29,7 @@ else if(fs.existsSync(edge))options.executablePath=edge;
       {name:'existing human remark cannot be overwritten',row:{remark:'人工已有说明'}},
       {name:'first-author judgement remains deferred',row:{reason:'第一作者不一致'}},
       {name:'matched platform record cannot use zero-match closure',row:{matchCount:1,itemId:'1234567890123456789'}},
-      {name:'other owner cannot authorize a negative',owner:'其他人'},
+      {name:'unassigned owner cannot authorize a negative',owner:'（未分配）'},
       {name:'bad server readback remains uncertain',config:{badRemark:true},uncertain:true},
       {name:'an identifier-only strong match with complete addresses can close',row:{doiValue:'',wosValue:'000123456789012'},ok:true},
     ];

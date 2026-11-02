@@ -43,13 +43,19 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual([r.sa_id for r in visible(self.roster, "import", "谭勋策", "skipped")], ["zero-skip"])
 
     def test_invalid_range_or_other_owner_never_runs(self):
-        for owner, count, scope in (("", 1, "pending"), ("其他人", 1, "pending"),
+        for owner, count, scope in (("", 1, "pending"), ("（未分配）", 1, "pending"), (" 谭勋策", 1, "pending"),
                                     ("谭勋策", 0, "pending"), ("谭勋策", True, "pending"),
                                     ("谭勋策", 101, "pending"), ("谭勋策", 1, "done")):
             with self.assertRaises(SafetyStop):
                 self.service.select(self.roster, "claim", owner, count, scope)
         with self.assertRaisesRegex(SafetyStop, "请选择负责人"):
             self.service.select(self.roster, "claim", "", 1, "pending")
+
+    def test_selected_owner_scopes_queue_to_that_owner_only(self):
+        self.assertEqual([r.sa_id for r in self.service.select(self.roster, "claim", "其他人", 5, "pending")],
+                         ["other-owner"])
+        self.assertEqual([r.sa_id for r in self.service.select(self.roster, "claim", "谭勋策", 5, "pending")],
+                         ["claim-pending"])
 
     def test_stale_roster_blocked(self):
         self.roster.assert_unchanged.side_effect = SafetyStop("名单已改变")
@@ -79,9 +85,11 @@ class ServiceTests(unittest.TestCase):
         self.assertIn('完成 0', saved.summary)
 
     def test_offline_or_tampered_queue_cannot_dispatch(self):
-        for selected, online in (([self.roster.records[5]], True), ([self.roster.records[0]], False)):
+        for selected, online in (([self.roster.records[5]], True), ([self.roster.records[0]], False),
+                                 ([self.roster.records[0], self.roster.records[5]], True)):
             with patch("workflow_service.run_claim_batch") as run, self.assertRaises(SafetyStop):
-                self.service.run(self.roster, selected, "claim", "pending", Mock(online=online), threading.Event(), Mock())
+                self.service.run(self.roster, selected, "claim", "pending", Mock(online=online), threading.Event(), Mock(),
+                                 owner="谭勋策")
             run.assert_not_called()
 
     def test_manual_selection_can_select_one_nonfirst_owned_zero_match(self):
@@ -272,15 +280,15 @@ class ManualSkipTests(unittest.TestCase):
             parts = {name: archive.read(name) for name in archive.namelist()}
             member = worksheet_member(archive, self.roster.sheet_name)
         result = self.skip()
-        expected = replace(self.selected, skipped=True)
+        # A manual skip leaves a visible reason instead of an empty red row.
+        expected = replace(self.selected, skipped=True, remark="手动跳过")
         self.assertEqual(result.roster.records, [self.roster.records[0], expected] + self.roster.records[2:])
         self.assertEqual(self.sa.calls, [])
         self.assertEqual(self.download.calls, [])
         with zipfile.ZipFile(self.path) as archive:
             for name, raw in parts.items():
-                wanted = (patch_cell(raw, f"{column_name(self.roster.completion_column)}{self.selected.row}",
-                                     self.selected.row, 2) if name == member else raw)
-                self.assertEqual(archive.read(name), wanted, name)
+                if name != member:
+                    self.assertEqual(archive.read(name), raw, name)
         backup = self.folder / "runtime" / "backups" / f"list-{self.roster.sha256}.xlsx"
         self.assertEqual(read_roster(backup).records, self.roster.records)
         self.assertNotIn(self.selected.sa_id,
@@ -407,7 +415,7 @@ class MinimalUITests(unittest.TestCase):
         self.root.update_idletasks()
 
     def test_only_two_tabs_topmost_and_no_runtime_created_by_opening(self):
-        self.assertEqual([self.app.notebook.tab(t, "text") for t in self.app.notebook.tabs()], ["自动认领", "自动导入"])
+        self.assertEqual([self.app.notebook.tab(t, "text") for t in self.app.notebook.tabs()], ["自动认领", "零匹配 · 需导入"])
         self.assertTrue(self.root.attributes("-topmost"))
         self.assertFalse((self.service.base / "runtime").exists())
 
@@ -495,7 +503,7 @@ class MinimalUITests(unittest.TestCase):
         with self.assertRaises(SafetyStop):
             self.app.apply_manual_review('claim-pending', 'done')
         self.app.set_busy(False)
-        self.app.owner.set('其他人')
+        self.app.owner.set('（未分配）')
         self.app.render()
         self.assertEqual(str(self.app.review_button['state']), 'disabled')
         with patch('app.messages.showwarning'):
@@ -552,7 +560,7 @@ class MinimalUITests(unittest.TestCase):
 
     def test_threaded_dispatch_finishes_on_main_thread_without_second_start(self):
         held = threading.Event()
-        def run(*args):
+        def run(*args, **kwargs):
             held.wait(2)
             return TaskResult(self.app.roster, {"claim-pending": "fixture complete"}, "完成 1")
         with patch.object(self.service, "run", side_effect=run) as job:
@@ -568,7 +576,7 @@ class MinimalUITests(unittest.TestCase):
         self.assertEqual(self.app.status.get(), "完成 1")
 
     def test_other_owner_and_invalid_count_never_start(self):
-        for owner, count in (("其他人", "5"), ("", "5"), ("谭勋策", "0"), ("谭勋策", "101")):
+        for owner, count in (("（未分配）", "5"), ("", "5"), ("谭勋策", "0"), ("谭勋策", "101")):
             self.app.owner.set(owner)
             self.app.limit.set(count)
             with patch("app.messages.showwarning"), patch.object(self.service, "run") as run:
@@ -576,36 +584,35 @@ class MinimalUITests(unittest.TestCase):
             run.assert_not_called()
             self.assertFalse(self.app.busy)
 
-    def test_manual_import_buttons_require_one_selection_and_disable_batch_limit(self):
+    def test_zero_match_tab_dispatches_need_import_for_selected_owner(self):
         self.app.notebook.select(self.app.pages["import"])
-        self.app.import_style.set("手动导出（一次一篇）")
         self.app.render()
-        self.root.update_idletasks()
-        self.assertEqual(str(self.app.limit_box["state"]), "disabled")
-        self.assertIn("定位", self.app.start_button["text"])
-        self.assertIn("接回 TXT", self.app.manual_import_button["text"])
-        with patch("app.messages.showwarning"), patch.object(self.service, "locate_import") as locate:
-            self.app.start()
-        locate.assert_not_called()
-        self.assertFalse(self.app.busy)
-
-    def test_manual_selected_second_row_dispatches_only_that_record(self):
-        later = replace(self.app.roster.records[3], sa_id="zero-later", row=9)
-        self.app.roster.records.append(later)
-        self.app.notebook.select(self.app.pages["import"])
-        self.app.import_style.set("手动导出（一次一篇）")
-        self.app.render()
-        self.app.trees["import"].selection_set(later.sa_id)
-        done = TaskResult(self.app.roster, {later.sa_id: "等待手动导出"}, "等待手动导出")
-        with patch.object(self.service, "locate_import", return_value=done) as locate:
+        self.assertIn("需导入", self.app.start_button["text"])
+        self.assertEqual(str(self.app.limit_box["state"]), "normal")
+        done = TaskResult(self.app.roster, {"zero-pending": "网页及名单已标注需导入"}, "标注需导入 1")
+        with patch.object(self.service, "run", return_value=done) as run:
             self.app.start()
             deadline = time.monotonic() + 3
             while self.app.busy and time.monotonic() < deadline:
                 self.root.update()
                 time.sleep(.01)
-        self.assertEqual(locate.call_args.args[1].sa_id, later.sa_id)
-        self.assertEqual(locate.call_count, 1)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual([r.sa_id for r in run.call_args.args[1]], ["zero-pending"])
+        self.assertEqual(run.call_args.kwargs, {"need_import": True, "owner": "谭勋策"})
         self.assertFalse(self.app.busy)
+
+    def test_claim_tab_dispatches_claim_for_selected_owner_only(self):
+        self.app.owner.set("其他人")
+        self.app.render()
+        done = TaskResult(self.app.roster, {}, "完成 0")
+        with patch.object(self.service, "run", return_value=done) as run:
+            self.app.start()
+            deadline = time.monotonic() + 3
+            while self.app.busy and time.monotonic() < deadline:
+                self.root.update()
+                time.sleep(.01)
+        self.assertEqual([r.sa_id for r in run.call_args.args[1]], ["other-owner"])
+        self.assertEqual(run.call_args.kwargs, {"need_import": False, "owner": "其他人"})
 
     def test_small_window_keeps_actions_and_selected_detail_visible(self):
         self.root.attributes("-alpha", 0)
@@ -619,28 +626,6 @@ class MinimalUITests(unittest.TestCase):
             right = widget.winfo_rootx() - self.root.winfo_rootx() + widget.winfo_width()
             self.assertLessEqual(bottom, self.root.winfo_height())
             self.assertLessEqual(right, self.root.winfo_width())
-        self.root.withdraw()
-
-    def test_manual_small_window_keeps_both_steps_visible_and_locked_during_run(self):
-        self.app.notebook.select(self.app.pages["import"])
-        self.app.import_style.set("手动导出（一次一篇）")
-        self.app.render()
-        self.root.attributes("-alpha", 0)
-        self.root.deiconify()
-        self.root.geometry("660x430")
-        self.root.update()
-        for widget in (self.app.start_button, self.app.manual_import_button, self.app.pause_button, self.app.skip_button,
-                       self.app.import_style_box, self.app.details["import"]):
-            self.assertTrue(widget.winfo_ismapped())
-            self.assertLessEqual(widget.winfo_rooty() - self.root.winfo_rooty() + widget.winfo_height(),
-                                 self.root.winfo_height())
-            self.assertLessEqual(widget.winfo_rootx() - self.root.winfo_rootx() + widget.winfo_width(),
-                                 self.root.winfo_width())
-        self.app.set_busy(True)
-        self.assertEqual(str(self.app.import_style_box["state"]), "disabled")
-        self.assertEqual(str(self.app.manual_import_button["state"]), "disabled")
-        self.app.set_busy(False)
-        self.assertEqual(str(self.app.limit_box["state"]), "disabled")
         self.root.withdraw()
 
     def test_manual_skip_requires_selection_confirmation_and_only_dispatches_that_id(self):

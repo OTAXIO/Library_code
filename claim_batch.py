@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from approval import auto_complete_claim, claim_completion_note, complete_claim, verify_claim_result, verified_claim_rejection
 from automation import classify
 from claim import inspect_staff_claim, sa_claim_source
-from core import SafetyStop
+from core import SafetyStop, require_owner
 from bridge import BrowserRejected
 import re
 import unicodedata
@@ -144,8 +144,12 @@ def automatic_claim_selection(record, before, comparison, result, include_non_in
 
 def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lambda text: None,
                     audit=lambda action, result, sa_id: None, limit=100,
-                    retry_skipped=False, skip_writer=None):
-    """Retry the skipped snapshot once; ordinary batches keep their limit."""
+                    retry_skipped=False, skip_writer=None, owner=None):
+    """Retry the skipped snapshot once; ordinary batches keep their limit.
+
+    ``owner`` is the operator-selected roster owner. Without it, the batch owner
+    is the single owner of the given records; mixed batches are refused.
+    """
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= (max(100,len(roster.records)) if retry_skipped is True else 100):
         raise SafetyStop("单次自动认领数量必须为 1–100。")
     if type(retry_skipped) is not bool:
@@ -157,6 +161,10 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
         if not record.done and record.skipped == retry_skipped and record.sa_id not in ids:
             ids.append(record.sa_id)
     ids = ids if retry_skipped else ids[:limit]
+    if owner is None:
+        owners = {record.owner for record in records}
+        owner = owners.pop() if len(owners) == 1 else None
+    owner = require_owner(owner)
     current_roster = roster
     completed, synced, skipped = [], [], {}
     checked = 0
@@ -196,7 +204,7 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
             item = next((candidate for candidate in current_roster.records
                          if candidate.sa_id == sa_id), None)
             # Never modify another owner's row. A retry row already contains 2.
-            if item and item.owner == "谭勋策" and not item.done and (not item.skipped or getattr(current_roster,'status_separate',False)):
+            if item and item.owner == owner and not item.done and (not item.skipped or getattr(current_roster,'status_separate',False)):
                 targets.append(item)
         if targets:
             writer = skip_writer or mark_skipped_many
@@ -231,8 +239,8 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
             continue
         checked += 1
         progress(f"自动认领 {checked}/{len(ids)}：{sa_id}")
-        if record.owner != "谭勋策":
-            skipped[sa_id] = "不是谭勋策负责的记录。"
+        if record.owner != owner:
+            skipped[sa_id] = "不是所选负责人的记录。"
             note("自动认领列表条目", "已跳过", sa_id)
             continue
         reason = str(record.reason or "")

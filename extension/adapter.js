@@ -36,6 +36,8 @@ async function runSACommand(command) {
   const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
     ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
   const equal = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
+  // The desktop selects and verifies the roster owner; the page cannot see it.
+  const assignedOwner = owner => typeof owner === "string" && !!owner && owner === owner.trim() && owner !== "（未分配）";
   const keys = ["id", "saLzkId", "itemId", "matchCount", "markStatus", "reason", "title", "titleValue",
     "doi", "doiValue", "wos", "wosValue", "claimStatus", "gh", "qr", "updateTime", "updateUsername", "remark"];
   const snap = row => {
@@ -120,7 +122,7 @@ async function runSACommand(command) {
         metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 2,
         publisher_journal_protocol: 2, publisher_correspondent_protocol: 2,
         native_claim_response_protocol:typeof vm.$http?.request==='function'?1:0,
-        claim_queue_protocol:4, non_institution_author_protocol:1}};
+        claim_queue_protocol:4, non_institution_author_protocol:1, need_import_protocol:1}};
     }
     const drawer = vm.$refs?.compareDetailDrawer;
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");
@@ -879,16 +881,24 @@ async function runSACommand(command) {
     const nonSJTU = note === "非交大";
     const nonInstitutionAuthor = note === "非交大作者";
     const imported = note === "已入库";
-    if (!command.reviewed || !note || (note.length < 6 && !knownShortNote && !nonSJTU && !nonInstitutionAuthor && !imported) || note.length > 2000)
+    const needImport = note === "需导入";
+    if (!command.reviewed || !note || (note.length < 6 && !knownShortNote && !nonSJTU && !nonInstitutionAuthor && !imported && !needImport) || note.length > 2000)
       stop("缺少人工核验及处理备注");
     const processedImport = command.action === "complete" && imported &&
       !!command.metadata_imported_evidence && row.markStatus === "已处理";
     const processedClaim = command.action === "complete" && note === "已认领" &&
       !!command.staff_claim_evidence && row.markStatus === "已处理";
     if (row.markStatus !== "待处理" && !processedImport && !processedClaim) stop("记录已经处理，禁止再次切换状态");
+    if (needImport) {
+      // Hand-off note only: a still-pending zero-match row with no library item.
+      // No import, claim or metadata change; the status dialog writes once.
+      if (command.action !== "complete" || !assignedOwner(command.owner) || Number(row.matchCount) !== 0 ||
+          String(row.itemId ?? "").replace(/^,/, "") || row.markStatus !== "待处理" || row.remark && row.remark !== note)
+        stop("不是未处理的零匹配记录或已有其他备注，未标注需导入");
+    }
     if (nonInstitutionAuthor) {
       const proof=command.non_institution_author_evidence, p=proof?.prepared, a=proof?.author;
-      if (command.action!=="complete" || command.owner!=="谭勋策" || Number(row.matchCount)!==1 ||
+      if (command.action!=="complete" || !assignedOwner(command.owner) || Number(row.matchCount)!==1 ||
           !p || p.staff_id!==row.gh || p.person?.wno!==row.gh || !p.person?.id ||
           p.item_id!==String(row.itemId||"").replace(/^,/,"") || a?.non_institution!==true ||
           a.eligible!==false || a.scholarId!=="" || !Array.isArray(p.authors) ||
@@ -944,7 +954,7 @@ async function runSACommand(command) {
         !journal&&c.source==='ICLR官方论文集'&&/^https:\/\/proceedings\.iclr\.cc\/paper_files\/paper\/\d{4}\/hash\/[a-f0-9]{32}-Abstract-Conference\.html$/.test(c.primary_url)||
         !journal&&c.source==='PMLR官方论文集'&&/^https:\/\/proceedings\.mlr\.press\/v\d+\/[a-z0-9]+\.html$/.test(c.primary_url)||
         !journal&&c.source==='ACL官方论文集'&&/^https:\/\/aclanthology\.org\/\d{4}\.[a-z0-9-]+\.\d+\/$/.test(c.primary_url)&&c.doi==='10.18653/v1/'+c.primary_url.slice(25,-1));
-      if (command.action !== "complete" || command.owner !== "谭勋策" || Number(row.matchCount) !== 1 ||
+      if (command.action !== "complete" || !assignedOwner(command.owner) || Number(row.matchCount) !== 1 ||
           !proof || !/^\d{1,40}$/.test(proof.item_id??"") ||
           String(row.itemId??"").replace(/^,/,"") !== proof.item_id || !c ||
           ["title","doi","wos","sha256","affiliation","authors"].some(key=>typeof c[key]!=="string") ||
@@ -1011,7 +1021,7 @@ async function runSACommand(command) {
         if(empty(v))return ""; if(!/^10\.\d{4,9}\/\S+$/.test(v))stop("非交大核验 DOI 格式不明确"); return v;};
       const wos = value => {const v=norm(value).toUpperCase(); if(empty(norm(value)))return "";
         if(!/^(?:WOS:)?\d{15}$/.test(v))stop("非交大核验 WOS 号格式不明确"); return "WOS:"+v.replace(/^WOS:/, "");};
-      if (command.action !== "complete" || command.owner !== "谭勋策" || Number(row.matchCount) !== 0 || row.itemId ||
+      if (command.action !== "complete" || !assignedOwner(command.owner) || Number(row.matchCount) !== 0 || row.itemId ||
           !c || ["title", "doi", "wos", "authors", "affiliation", "sha256"].some(key => typeof c[key] !== "string") ||
           !/^[a-f0-9]{64}$/.test(c.sha256) || !/^WOS:\d{15}$/.test(c.wos)) stop("缺少未处理零匹配任务的完整非交大证据");
       const d=doi(row.doiValue), u=wos(row.wosValue);
@@ -1050,7 +1060,7 @@ async function runSACommand(command) {
         if (command.staff_claim_evidence) {
           const p = command.staff_claim_evidence;
           const native = drawer.itemData?.metadata?.author;
-          if (command.owner !== "谭勋策" || !p || p.verified !== true || p.claimed !== true ||
+          if (!assignedOwner(command.owner) || !p || p.verified !== true || p.claimed !== true ||
               p.row?.saLzkId !== command.sa_id || p.row?.gh !== row.gh || p.row?.itemId !== row.itemId || p.staff_id !== row.gh ||
               typeof p.scholar_id !== "string" || !p.scholar_id || !Array.isArray(native) ||
               claimIdentity?.state !== "已认领" || claimIdentity.library_staff_id !== p.staff_id ||

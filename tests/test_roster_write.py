@@ -66,7 +66,7 @@ class RosterWriteTests(unittest.TestCase):
         before = file_hash(self.path)
         with self.assertRaises(SafetyStop):
             reconcile_processed(roster, roster.records[0], {
-                'saLzkId': 'demo-001', 'markStatus': '已处理'})
+                'saLzkId': 'demo-001', 'markStatus': '已处理'}, owner='谭勋策')
         roster = self.tan_roster()
         tan_hash = file_hash(self.path)
         for row in ({'saLzkId': 'different', 'markStatus': '已处理'},

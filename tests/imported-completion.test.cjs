@@ -23,7 +23,7 @@ else if(fs.existsSync(edge))options.executablePath=edge;
       {name:'verified import closes with exact 已入库 and never claims',ok:true},
       {name:'author or first-unit reason does not block confirmed intake',row:{reason:'第一单位不一致；作者不一致'},ok:true},
       {name:'missing receipt cannot close',missing:true},
-      {name:'other owner cannot close',owner:'其他人'},
+      {name:'unassigned owner cannot close',owner:'（未分配）'},
       {name:'download-only cannot close',batch:{status:0,actual:0}},
       {name:'import submitted but unpushed cannot close',batch:{status:1,actual:0}},
       {name:'failed batch cannot close',batch:{fail:1}},

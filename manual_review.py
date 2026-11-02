@@ -8,8 +8,8 @@ import tempfile
 import zipfile
 from xml.etree import ElementTree as ET
 
-from core import SafetyStop, file_hash, read_roster
-from roster_annotations import OWNER, YellowStyles, _yellow_id
+from core import SafetyStop, file_hash, read_roster, require_owner
+from roster_annotations import YellowStyles, _yellow_id
 from roster_write import (NS, RosterUpdate, _commit_verified, column_name, patch_cell,
                           worksheet_member, write_lock)
 
@@ -23,11 +23,10 @@ def state_of(record):
 def select_review(roster, owner, sa_id):
     if not roster:
         raise SafetyStop('请先读取 code/list.xlsx。')
-    if owner != OWNER:
-        raise SafetyStop('手动核验仅修改谭勋策的名单。')
+    require_owner(owner)
     selected = [r for r in roster.records if r.sa_id == sa_id]
-    if not sa_id or len(selected) != 1 or selected[0].owner != OWNER:
-        raise SafetyStop('请选择一条 ID 唯一的谭勋策记录。')
+    if not sa_id or len(selected) != 1 or selected[0].owner != owner:
+        raise SafetyStop(f'请选择一条 ID 唯一的{owner}记录。')
     roster.assert_unchanged()
     return selected[0]
 
@@ -40,7 +39,7 @@ def write_review(roster, record, state, backup_dir=None):
     """
     if not isinstance(state, str) or state not in STATES:
         raise SafetyStop('核验状态只能是已完成、未完成或已跳过。')
-    if select_review(roster, OWNER, record.sa_id) != record:
+    if select_review(roster, record.owner, record.sa_id) != record:
         raise SafetyStop('所选记录已变化，请重读名单。')
     if (roster.path.name.lower() != 'list.xlsx' or not roster.status_separate
             or not roster.completion_column or not roster.remark_column
