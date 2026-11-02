@@ -94,7 +94,7 @@ class ClaimCompletionTests(unittest.TestCase):
         self.write.assert_called_once()
 
     def test_wrong_owner_multi_match_and_missing_review_stop_before_browser(self):
-        for attr, value in (("owner", "其他人"), ("matches", 2), ("reason", "通讯作者不一致"), ("done", True)):
+        for attr, value in (("owner", "（未分配）"), ("matches", 2), ("reason", "通讯作者不一致"), ("done", True)):
             original = getattr(self.record, attr)
             setattr(self.record, attr, value)
             with self.assertRaises(SafetyStop):
@@ -262,7 +262,7 @@ class AutomaticClaimCompletionTests(unittest.TestCase):
     def test_other_owner_or_missing_confirmation_cannot_start(self):
         with self.assertRaises(SafetyStop):
             self.finish(confirmed=False)
-        self.record.owner = "其他人"
+        self.record.owner = "（未分配）"
         with self.assertRaises(SafetyStop):
             self.finish()
         self.bridge.call.assert_not_called()

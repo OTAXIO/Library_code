@@ -61,7 +61,7 @@ class AnnotationTests(unittest.TestCase):
             with self.assertRaises(SafetyStop):annotate_roster(self.roster,new_admissions={self.record.sa_id:bad})
         for change in [{'phase':'push_intent'},{'item_id':1234},{'batch':None}]:
             self.assertFalse(verified_new_admission(self.record,{**proof,**change}))
-        for record in [replace(self.record,owner='其他人'),replace(self.record,done=False),replace(self.record,remark='已认领')]:
+        for record in [replace(self.record,owner='（未分配）'),replace(self.record,done=False),replace(self.record,remark='已认领')]:
             self.assertFalse(verified_new_admission(record,proof))
 
     def test_note_targets_cannot_include_completed_other_owners_or_unknown_ids(self):

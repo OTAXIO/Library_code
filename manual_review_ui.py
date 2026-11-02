@@ -3,16 +3,16 @@ import tkinter as tk
 from tkinter import ttk
 
 from core import SafetyStop
-from manual_review import OWNER, STATES, state_of
+from manual_review import STATES, state_of
 from notices import messages
 from ui_theme import P, style_text
 
 
 class ManualReviewDialog:
-    def __init__(self, parent, roster, on_save, selected_id=''):
-        self.roster, self.on_save = roster, on_save
+    def __init__(self, parent, roster, on_save, selected_id='', owner=''):
+        self.roster, self.on_save, self.owner = roster, on_save, owner
         self.window = tk.Toplevel(parent)
-        self.window.title('手动核验名单 · 谭勋策')
+        self.window.title('手动核验名单 · ' + owner)
         self.window.transient(parent)
         self.window.attributes('-topmost', True)
         self.window.geometry('720x500')
@@ -73,7 +73,7 @@ class ManualReviewDialog:
         self.query.trace_add('write', lambda *_: self.render())
         self.scope.trace_add('write', lambda *_: self.render())
         self.render()
-        selected = [r for r in roster.records if r.owner == OWNER and r.sa_id == selected_id]
+        selected = [r for r in roster.records if r.owner == owner and r.sa_id == selected_id]
         if len(selected) == 1 and self.tree.exists(str(selected[0].row)):
             self.tree.selection_set(str(selected[0].row))
             self.tree.see(str(selected[0].row))
@@ -82,7 +82,7 @@ class ManualReviewDialog:
 
     def selected(self):
         selected = self.tree.selection()
-        return next((r for r in self.roster.records if r.owner == OWNER and selected
+        return next((r for r in self.roster.records if r.owner == self.owner and selected
                      and str(r.row) == selected[0]), None)
 
     def render(self):
@@ -91,7 +91,7 @@ class ManualReviewDialog:
         query = self.query.get().strip().casefold()
         for r in self.roster.records:
             state = state_of(r)
-            if (r.owner != OWNER or self.scope.get() not in ('全部', STATES[state][0])
+            if (r.owner != self.owner or self.scope.get() not in ('全部', STATES[state][0])
                     or query and query not in (r.sa_id + ' ' + r.title).casefold()):
                 continue
             self.tree.insert('', 'end', iid=str(r.row), values=(r.sa_id, r.title, STATES[state][0]), tags=(state,))

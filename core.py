@@ -26,8 +26,22 @@ STATUS_HEADER = "是否识别"
 ROSTER_FILENAME = "list.xlsx"
 
 
+UNASSIGNED_OWNER = "（未分配）"
+
+
 def text(value):
     return "" if value is None else str(value).strip()
+
+
+def is_assigned_owner(owner):
+    """A named roster owner; the unassigned placeholder never authorizes writes."""
+    return isinstance(owner, str) and bool(owner) and owner == owner.strip() and owner != UNASSIGNED_OWNER
+
+
+def require_owner(owner):
+    if not is_assigned_owner(owner):
+        raise SafetyStop("请选择名单中的具体负责人；未分配记录不会自动处理。")
+    return owner
 
 
 def digest(value):
@@ -199,7 +213,7 @@ def read_roster(path):
             if count < 0 or count != len(ids) or len(ids) != len(set(ids)):
                 raise SafetyStop(f"第 {number} 行匹配数量与平台唯一号不一致。")
             if not values["owner"]:
-                values["owner"] = "（未分配）"
+                values["owner"] = UNASSIGNED_OWNER
             values["matches"] = count
             records.append(Record(row=number, done=done, skipped=skipped,
                                   remark=text(note_cell.value), source=source, **values))

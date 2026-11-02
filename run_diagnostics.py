@@ -49,7 +49,7 @@ class RunDiagnostics:
         self.data = {"version": 1, "run_id": self.run_id, "mode": mode, "scope": scope,
                      "started_at": self.now(), "status": "running", "stage": self.stage,
                      "records": [{"sa_id": r.sa_id, "row": r.row, "title": r.title}
-                                 for r in records if r.owner == "谭勋策"], "commands": []}
+                                 for r in records], "commands": []}
         self.save()
 
     @staticmethod

@@ -323,6 +323,22 @@ class ClaimBatchTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in bridge.call.call_args_list],
                          ["search", "prepare_claim", "submit_claim"])
 
+    def test_selected_owner_rows_are_skipped_with_a_written_mark(self):
+        # The skip writer must use the batch owner, not a fixed person, or the
+        # row stays blank in the roster after a failed claim.
+        target = record("demo-other-owner", owner="测试员", reason="通讯作者不一致")
+        stranger = record("demo-stranger", owner="其他人")
+        writer = Mock(side_effect=persist_skips)
+        result = run_claim_batch(FakeRoster([target, stranger]), [target, stranger], Mock(),
+                                 skip_writer=writer, owner="测试员")
+        self.assertEqual([item.sa_id for item in writer.call_args.args[1]], [target.sa_id])
+        self.assertTrue(result.roster.records[0].skipped)
+        self.assertIn(stranger.sa_id, result.skipped)
+        with self.assertRaises(SafetyStop):
+            run_claim_batch(FakeRoster([target, stranger]), [target, stranger], Mock())
+        with self.assertRaises(SafetyStop):
+            run_claim_batch(FakeRoster([target]), [target], Mock(), owner="（未分配）")
+
     def test_skip_marker_write_failure_halts_and_preserves_reason(self):
         target = record("demo-write-two", reason="通讯作者不一致")
         roster = FakeRoster([target])

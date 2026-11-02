@@ -4,7 +4,7 @@ import unicodedata
 import re
 
 from claim import sa_claim_source
-from core import SafetyStop
+from core import SafetyStop, is_assigned_owner
 from remarks import CLAIMED, SA_MISSING_IDS, detail_value, validate_note
 from roster_write import reconcile_processed
 
@@ -27,7 +27,7 @@ def current_claim_record(record, row, enabled=False):
     from zero_match import verify_sa
     verify_sa(record,row)
     item=row.get('itemId','').strip(',') if isinstance(row.get('itemId'),str) else ''
-    if (record.owner!='谭勋策' or record.matches!=0 or str(row.get('matchCount'))!='1'
+    if (not is_assigned_owner(record.owner) or record.matches!=0 or str(row.get('matchCount'))!='1'
             or not re.fullmatch(r'\d{1,40}',item) or not isinstance(row.get('reason'),str)):
         raise SafetyStop('原零匹配记录未确认变成唯一单匹配，未切换认领。')
     return replace(record,matches=1,item_ids=row['itemId'],reason=row['reason'])
@@ -35,7 +35,7 @@ def current_claim_record(record, row, enabled=False):
 
 def complete_non_institution_author(roster, record, bridge, before, comparison, prepared, author):
     """Close the user's author task from positive native foreign-affiliation evidence."""
-    if (record.owner!='谭勋策' or record not in roster.records or record.done or record.matches!=1
+    if (not is_assigned_owner(record.owner) or record not in roster.records or record.done or record.matches!=1
             or before.get('saLzkId')!=record.sa_id or before.get('gh')!=record.staff_id
             or prepared.get('staff_id')!=record.staff_id or prepared.get('person',{}).get('wno')!=record.staff_id
             or author.get('non_institution') is not True or author.get('eligible') is not False
@@ -142,9 +142,9 @@ def auto_complete_claim(roster, record, bridge, before, comparison, proof, perso
                         confirmed=False, note=None, current_match=False):
     """Continue only the just-verified claim, never an uncertain retry."""
     context=current_claim_record(record,before,current_match)
-    if (confirmed is not True or record.owner != "谭勋策" or record not in roster.records or record.done
+    if (confirmed is not True or not is_assigned_owner(record.owner) or record not in roster.records or record.done
             or context.matches != 1):
-        raise SafetyStop("自动批注只允许本次确认的谭勋策单匹配作者认领。")
+        raise SafetyStop("自动批注只允许本次确认的负责人单匹配作者认领。")
     expected_note = claim_completion_note(context, comparison, claimed=False)
     note = expected_note if note is None else note
     if note != expected_note:
@@ -190,8 +190,8 @@ def auto_complete_claim(roster, record, bridge, before, comparison, proof, perso
 
 
 def complete_claim(roster, record, bridge, expected, comparison, reviewed=False, note=None,current_match=False):
-    if record.owner != "谭勋策" or record not in roster.records or record.done:
-        raise SafetyStop("认领结案只允许谭勋策名单中的未完成记录。")
+    if not is_assigned_owner(record.owner) or record not in roster.records or record.done:
+        raise SafetyStop("认领结案只允许所选负责人名单中的未完成记录。")
     if reviewed is not True:
         raise SafetyStop("请先核对当前记录、认领结果和处理备注。")
     context=current_claim_record(record,expected,current_match)

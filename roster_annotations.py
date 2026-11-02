@@ -14,10 +14,9 @@ import tempfile
 import zipfile
 from xml.etree import ElementTree as ET
 
-from core import SafetyStop, file_hash, read_roster
+from core import SafetyStop, file_hash, is_assigned_owner, read_roster
 from roster_write import NS, column_name, patch_text_cell, worksheet_member, write_lock, _commit_verified
 
-OWNER='谭勋策'
 FILL=Path(__file__).with_name('resources')/'intake-yellow-fill.xml'
 
 
@@ -47,7 +46,7 @@ class AnnotationUpdate:
 
 def verified_new_admission(record, proof):
     """A completed task alone is insufficient: require a counted NEW batch."""
-    if (record.owner!=OWNER or not record.done or record.skipped or record.remark!='已入库'
+    if (not is_assigned_owner(record.owner) or not record.done or record.skipped or record.remark!='已入库'
             or not isinstance(proof,dict) or proof.get('phase')!='done'
             or not isinstance(proof.get('item_id'),str) or not re.fullmatch(r'\d{1,40}',proof['item_id'])):
         return False
@@ -156,7 +155,7 @@ def annotate_roster(roster, *, notes=None, new_admissions=None, unresolved=None,
         raise SafetyStop('仅允许原名单的独立备注和 ID 填充。')
     if (set(notes)|set(new_admissions)|set(unresolved)|resolved_ids|status_ids)-set(by_id):raise SafetyStop('备注或填充目标不在当前名单。')
     for sid in set(notes)|set(new_admissions)|set(unresolved)|resolved_ids|status_ids:
-        if by_id[sid].owner!=OWNER:raise SafetyStop('仅允许处理谭勋策的名单。')
+        if not is_assigned_owner(by_id[sid].owner):raise SafetyStop('仅允许处理具体负责人的名单。')
     if any(not (by_id[sid].done or by_id[sid].skipped) for sid in status_ids):
         raise SafetyStop('未处理项不能通过填色变成已完成或已跳过。')
     if any(not by_id[sid].done or by_id[sid].skipped for sid in resolved_ids):
@@ -246,7 +245,7 @@ def highlight_new_admission(roster, record, proof):
 
 def format_owned_status(roster, ids=None):
     """User-requested unified display: 1 yellow, 2 red; no data/status changes."""
-    selected=set(ids) if ids is not None else {r.sa_id for r in roster.records if r.owner==OWNER}
-    targets={r.sa_id for r in roster.records if r.sa_id in selected and r.owner==OWNER and (r.done or r.skipped)}
+    selected=set(ids) if ids is not None else {r.sa_id for r in roster.records if is_assigned_owner(r.owner)}
+    targets={r.sa_id for r in roster.records if r.sa_id in selected and is_assigned_owner(r.owner) and (r.done or r.skipped)}
     if not targets:return AnnotationUpdate(roster,None,(),())
     return annotate_roster(roster,status_ids=targets)
