@@ -339,6 +339,42 @@ class ClaimBatchTests(unittest.TestCase):
         with self.assertRaises(SafetyStop):
             run_claim_batch(FakeRoster([target]), [target], Mock(), owner="（未分配）")
 
+    def test_current_match_claims_a_just_linked_zero_row_by_its_live_single_match(self):
+        # A roster zero linked this session: routing uses the live row, while
+        # writes and closure keep the roster record and the current-match flag.
+        target = record("demo-linked", matches=0, item_ids="", reason="")
+        search = found(target)
+        search["row"].update(saLzkId=target.sa_id, itemId="1234567890", titleValue="Synthetic",
+                             doiValue="", wosValue="")
+        prep = prepared(search)
+        proof = {"row": search["row"], "verified": True, "claimed": True, "staff_id": "00001",
+                 "scholar_id": "scholar-1", "author": "Tester", "order": 1}
+        bridge = Mock()
+        bridge.call.side_effect = [search, prep, proof]
+        roster = FakeRoster([target])
+        closure = SimpleNamespace(completion=SimpleNamespace(roster=FakeRoster([replace(target, done=True)])))
+        with patch("claim_batch.auto_complete_claim", return_value=closure) as close:
+            result = run_claim_batch(roster, [target], bridge, owner="谭勋策", current_match=True)
+        self.assertEqual(result.completed_ids, (target.sa_id,))
+        self.assertIs(close.call_args.args[1], target)
+        self.assertIs(close.call_args.kwargs["current_match"], True)
+        # Ordinary batches still never claim a roster zero, and a zero that is
+        # not yet a live single match is not claimed in current-match mode.
+        bridge = Mock()
+        ordinary = run_claim_batch(FakeRoster([target]), [target], bridge)
+        self.assertIn(target.sa_id, ordinary.skipped)
+        bridge.call.assert_not_called()
+        stale = found(target)
+        stale["row"].update(saLzkId=target.sa_id, matchCount=0, itemId="", titleValue="Synthetic",
+                            doiValue="", wosValue="")
+        bridge = Mock()
+        bridge.call.side_effect = [stale]
+        result = run_claim_batch(FakeRoster([target]), [target], bridge, owner="谭勋策", current_match=True,
+                                 skip_writer=persist_skips)
+        self.assertEqual(result.completed_ids, ())
+        self.assertIn(target.sa_id, result.skipped)
+        self.assertEqual([call.args[0] for call in bridge.call.call_args_list], ["search"])
+
     def test_skip_marker_write_failure_halts_and_preserves_reason(self):
         target = record("demo-write-two", reason="通讯作者不一致")
         roster = FakeRoster([target])

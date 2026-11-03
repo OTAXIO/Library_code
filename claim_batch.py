@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from approval import auto_complete_claim, claim_completion_note, complete_claim, verify_claim_result, verified_claim_rejection
+from approval import (auto_complete_claim, claim_completion_note, complete_claim, current_claim_record,
+                      verify_claim_result, verified_claim_rejection)
 from automation import classify
 from claim import inspect_staff_claim, sa_claim_source
 from core import SafetyStop, require_owner
@@ -142,17 +143,24 @@ def automatic_claim_selection(record, before, comparison, result, include_non_in
     return prepared, person, matches[0], source, staff_id
 
 
+def supported_reason(reason):
+    reason = str(reason or "")
+    return reason == "作者不一致" or ("DOI" in reason and "WOS" in reason)
+
+
 def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lambda text: None,
                     audit=lambda action, result, sa_id: None, limit=100,
-                    retry_skipped=False, skip_writer=None, owner=None):
+                    retry_skipped=False, skip_writer=None, owner=None, current_match=False):
     """Retry the skipped snapshot once; ordinary batches keep their limit.
 
     ``owner`` is the operator-selected roster owner. Without it, the batch owner
     is the single owner of the given records; mixed batches are refused.
+    ``current_match`` claims roster zero-match rows that this session has just
+    linked: routing uses the live single match, writes keep the roster row.
     """
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= (max(100,len(roster.records)) if retry_skipped is True else 100):
         raise SafetyStop("单次自动认领数量必须为 1–100。")
-    if type(retry_skipped) is not bool:
+    if type(retry_skipped) is not bool or type(current_match) is not bool:
         raise SafetyStop("跳过任务处理模式无效。")
     ids = []
     for record in records:
@@ -243,9 +251,7 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
             skipped[sa_id] = "不是所选负责人的记录。"
             note("自动认领列表条目", "已跳过", sa_id)
             continue
-        reason = str(record.reason or "")
-        supported_reason = reason == "作者不一致" or ("DOI" in reason and "WOS" in reason)
-        if record.matches != 1 or not supported_reason:
+        if record.matches != (0 if current_match else 1) or not current_match and not supported_reason(record.reason):
             skipped[sa_id] = "仅处理单匹配的作者认领或 DOI/WOSID 双缺失认领；本条保留人工核验。"
             note("自动认领列表条目", "已跳过", sa_id)
             continue
@@ -299,7 +305,10 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
             continue
         try:
             before, comparison = found["row"], found.get("comparison")
-            if before.get("reason") != record.reason or str(before.get("matchCount")) != str(record.matches):
+            context = current_claim_record(record, before, current_match)
+            if current_match and not supported_reason(context.reason):
+                raise SafetyStop("关联后的待处理原因不是作者认领类，保留人工核验。")
+            if before.get("reason") != context.reason or str(before.get("matchCount")) != str(context.matches):
                 raise SafetyStop("网页待处理原因或匹配数与名单不一致，本条保留人工核验。")
             claim_state = detail_value(comparison, "认领状态", "library")
         except Exception as exc:
@@ -317,7 +326,7 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
         if claim_state == CLAIMED:
             try:
                 inspect_staff_claim(record, bridge, before, comparison)
-                completion_note = claim_completion_note(record, comparison, claimed=True)
+                completion_note = claim_completion_note(context, comparison, claimed=True)
             except Exception as exc:
                 skipped[sa_id] = str(exc)
                 note("已认领记录核验", "已跳过", sa_id)
@@ -326,7 +335,7 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
             try:
                 check_current()
                 closed = complete_claim(current_roster, record, bridge, before, comparison,
-                                        reviewed=True, note=completion_note)
+                                        reviewed=True, note=completion_note, current_match=current_match)
             except _ClaimInterrupted as exc:
                 return interrupted(exc)
             except Exception as exc:
@@ -340,10 +349,10 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
             continue
 
         try:
-            plan = classify(record, found)
+            plan = classify(context, found)
             if plan.route != "claim":
                 raise SafetyStop(plan.reason)
-            completion_note = claim_completion_note(record, comparison, claimed=False)
+            completion_note = claim_completion_note(context, comparison, claimed=False)
             source, staff_id = sa_claim_source(comparison)
             payload = {"sa_id": sa_id, "expected": before, "sa_text": source,
                        "staff_id": staff_id, "roster_staff_id": record.staff_id}
@@ -395,6 +404,10 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
                 halted = True
                 note("恢复认领工作页", "已暂停", sa_id)
                 break
+            continue
+        if author.get('non_institution') is True and author.get('eligible') is False and current_match:
+            skipped[sa_id] = '非交大作者待核'
+            note('关联后的非交大作者不自动结案', '已跳过', sa_id)
             continue
         if author.get('non_institution') is True and author.get('eligible') is False:
             from approval import complete_non_institution_author
@@ -453,7 +466,8 @@ def run_claim_batch(roster, records, bridge, cancel=lambda: False, progress=lamb
         try:
             check_current()
             closed = auto_complete_claim(current_roster, record, bridge, before, comparison,
-                                         proof, person, author, confirmed=True, note=completion_note)
+                                         proof, person, author, confirmed=True, note=completion_note,
+                                         current_match=current_match)
         except _ClaimInterrupted as exc:
             return interrupted(exc)
         except Exception as exc:

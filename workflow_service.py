@@ -263,11 +263,12 @@ class WorkflowService:
             result = run_need_import_batch(roster, records, bridge, owner, cancel=stop.is_set,
                 progress=progress, audit=audit, retry_skipped=scope == "skipped")
             messages = {sa_id: "网页及名单已标注需导入" for sa_id in result.completed_ids}
+            messages.update({sa_id: "本库已有：已关联平台号并认领结案" for sa_id in result.claimed_ids})
             messages.update({sa_id: "后台原已处理，仅同步名单" for sa_id in result.synced_ids})
             messages.update(result.skipped)
             tail = result.reason or ("已按请求暂停。" if result.cancelled else "本轮结束。")
-            summary = (f"标注需导入 {len(result.completed_ids)} · 原已处理 {len(result.synced_ids)} · "
-                       f"跳过 {len(result.skipped)}。{tail}")
+            summary = (f"本库已有并认领 {len(result.claimed_ids)} · 标注需导入 {len(result.completed_ids)} · "
+                       f"原已处理 {len(result.synced_ids)} · 跳过 {len(result.skipped)}。{tail}")
         else:
             if metadata_import:
                 from metadata_pipeline import run_metadata_batch

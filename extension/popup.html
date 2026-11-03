@@ -16,7 +16,7 @@
       <h1>论文助手</h1>
     </div>
   </header>
-  <p class="intro">自动认领 / 自动导入。在这里连接网页，在桌面开始任务。</p>
+  <p class="intro">自动认领 / 零匹配前台查重。在这里连接网页，在桌面开始任务。</p>
   <main>
     <section class="card pairing" aria-labelledby="pairing-title">
       <div class="section-heading">
@@ -38,9 +38,17 @@
       <h2 id="status-title"><span class="status-dot" aria-hidden="true"></span>连接状态</h2>
       <p id="status" role="status">请先粘贴桌面助手中的配对码，连接当前工作页。</p>
     </section>
+    <section class="card front" aria-labelledby="front-title">
+      <div class="section-heading">
+        <h2 id="front-title">2. 零匹配：绑定前台检索页</h2>
+        <span class="pill">只读检索</span>
+      </div>
+      <p class="hint">另开标签页登录 www.ir.lib.sjtu.edu.cn 前台，在该页点击下方按钮。零匹配先在前台查本库，查到才关联认领，查不到才标“需导入”。</p>
+      <button id="front" class="secondary full-width">绑定当前前台页</button>
+    </section>
     <details class="card workflow">
       <summary>
-        <span>2. 自动导入：绑定后台导入页</span>
+        <span>3. 原自动导入：绑定后台导入页</span>
         <span class="summary-trailing"><span class="optional">展开</span><span class="chevron" aria-hidden="true">›</span></span>
       </summary>
       <div class="workflow-content">

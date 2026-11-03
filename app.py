@@ -1,4 +1,4 @@
-"""Two-task UI (claim, zero-match 需导入); all browser actions use the paired extension."""
+"""Two-task UI (claim, zero-match frontend lookup / 需导入); all browser actions use the paired extension."""
 from __future__ import annotations
 
 import queue
@@ -16,7 +16,7 @@ from ui_theme import P, install_theme, style_text
 from workflow_service import WorkflowService
 
 BASE = Path(__file__).resolve().parent
-VERSION = "0.4.60"
+VERSION = "0.4.61"
 SA_URL = "http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list"
 SCOPES = {"待处理": "pending", "重试跳过项": "skipped", "已完成": "done"}
 
@@ -79,7 +79,7 @@ class App:
         self.pages, self.trees, self.details = {}, {}, {}
         explanations = {
             "claim": ("自动认领", "单匹配任务：核对人员编号与署名 → 认领 → 网页批注 → 回写名单。"),
-            "import": ("零匹配 · 需导入", "零匹配任务：只读核对网页匹配数仍为 0 → 网页备注“需导入”并设为已处理 → 名单备注“需导入”、是否识别 1。不入库、不认领。"),
+            "import": ("零匹配 · 需导入", "零匹配任务：只读核对网页匹配数仍为 0 → 在交大前台按 DOI、WOS号、题名检索本库。本库已有同一文献：编辑填入平台唯一号，核对两边数据后按工号认领并结案；本库没有：网页备注“需导入”并设为已处理，名单是否识别 1。多条或不一致的标 2 并写原因。不入库。"),
         }
         for mode, (title, explanation) in explanations.items():
             page = ttk.Frame(self.notebook, padding=(2, 4))
@@ -350,12 +350,13 @@ class App:
         window.title("连接网页扩展")
         window.transient(self.root)
         window.attributes("-topmost", True)
-        window.geometry("460x295")
+        window.geometry("460x320")
         frame = ttk.Frame(window, padding=16)
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="1. 在 SA 比对结果页打开扩展，粘贴配对码并连接。\n"
-                  "2. 保持该比对页打开。认领和零匹配“需导入”标注都只需要这一页，\n"
-                  "   不需要 WOS 或后台导入页。", wraplength=425).pack(anchor="w", pady=(0, 12))
+                  "2. 保持该比对页打开。自动认领只需要这一页。\n"
+                  "3. 零匹配任务另开标签页登录 www.ir.lib.sjtu.edu.cn 前台，\n"
+                  "   在该页扩展中点击“绑定当前前台页”。不需要 WOS 或后台导入页。", wraplength=425).pack(anchor="w", pady=(0, 12))
         token = tk.StringVar(value=self.bridge.token)
         token_entry = ttk.Entry(frame, textvariable=token, state="readonly")
         token_entry.pack(fill="x")

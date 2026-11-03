@@ -10,7 +10,9 @@
 app.py                    两个标签页、选择范围、线程事件队列、暂停
   workflow_service.py     唯一业务入口、负责人和范围校验、结果汇总
     claim_batch.py        原自动认领、精确人员/署名选择、批注结案
-    need_import.py        零匹配“需导入”：只读核对 → 网页原生状态弹窗备注并结案 → 名单 1（0.4.60 起界面唯一的零匹配入口）
+    need_import.py        零匹配“需导入”：只读核对 → 网页原生状态弹窗备注并结案 → 名单 1（界面唯一的零匹配入口）
+      front_lookup.py     先在交大前台（只读）按 DOI/WOS/精确题名查本库；唯一一致才关联，确认没有才“需导入”
+      claim_batch.py      关联后 current_match=True：按实时单匹配路由，沿用工号认领与结案
     zero_match.py         串行零匹配补录、关联/认领/结案意图和回读
       wos_batch.py        只通过扩展下载真实 TXT
       automation.WOSFlow  上传/导入/推送意图和回读
@@ -19,6 +21,7 @@ app.py                    两个标签页、选择范围、线程事件队列、
       metadata_excel.py   调用本地 Node 表格库创建 Excel，独立核对内容和哈希
   bridge.py               原认证本地端口 8765 通道
     extension             原 SA/WOS/导入控件适配器和公共页面组件
+      front-adapter.js    绑定的前台标签页：复用检索组件事件读取结果，不调接口、不写入
 ```
 
 ## 边界

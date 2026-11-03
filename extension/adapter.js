@@ -122,7 +122,7 @@ async function runSACommand(command) {
         metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 2,
         publisher_journal_protocol: 2, publisher_correspondent_protocol: 2,
         native_claim_response_protocol:typeof vm.$http?.request==='function'?1:0,
-        claim_queue_protocol:4, non_institution_author_protocol:1, need_import_protocol:1}};
+        claim_queue_protocol:4, non_institution_author_protocol:1, need_import_protocol:2}};
     }
     const drawer = vm.$refs?.compareDetailDrawer;
     if (!drawer || typeof drawer.show !== "function") stop("未识别到比对详情组件");

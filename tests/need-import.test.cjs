@@ -11,7 +11,7 @@ async function zeroRow(changes={}){
  await page.goto('about:blank');await page.goto('http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list');
  await page.evaluate(changes=>Object.assign(synthetic,{itemId:'',matchCount:0,reason:''},changes),changes);
  const read=await page.evaluate(runSACommand,command('status'));assert.equal(read.ok,true,JSON.stringify(read));
- assert.equal(read.data.need_import_protocol,1);
+ assert.equal(read.data.need_import_protocol,2);
  return command('complete',{expected:read.data.row,reviewed:true,owner:'测试员',note:'需导入'});
 }
 test('a pending zero-match row is closed once with the 需导入 note for any named owner',async()=>{
