@@ -110,6 +110,10 @@ class App:
             detail.configure(state="disabled")
             self.trees[mode], self.details[mode] = tree, detail
             tree.bind("<<TreeviewSelect>>", lambda _, selected=mode: self.show_selected(selected))
+        from cross_review_ui import CrossReviewPanel
+        self.cross_review = CrossReviewPanel(self.notebook, self)
+        self.pages["cross"] = self.cross_review
+        self.notebook.add(self.cross_review, text="交叉核验")
         self.notebook.bind("<<NotebookTabChanged>>", lambda _: self.render())
         bottom = ttk.Frame(frame)
         bottom.grid(row=3, column=0, sticky="ew", pady=(10, 6))
@@ -131,6 +135,17 @@ class App:
         return next((mode for mode, page in self.pages.items() if str(page) == self.notebook.select()), "claim")
 
     def configure_actions(self):
+        self.cross_review.controls()
+        cross = self.mode() == "cross"
+        for widget in (self.owner_box, self.scope_box):
+            widget.configure(state="disabled" if self.busy or cross else "readonly")
+        if cross:
+            self.limit_box.configure(state="disabled")
+            self.start_button.configure(text="开始核验", state="normal" if self.cross_review.review and
+                                        not self.busy else "disabled")
+            self.skip_button.configure(state="disabled")
+            self.review_button.configure(state="disabled")
+            return
         evidence = self.mode() == "evidence"
         disabled = self.busy or (not evidence and self.scope.get() == "已完成")
         retry = self.scope.get() == '重试跳过项' and not evidence
@@ -175,6 +190,10 @@ class App:
                 tree.selection_set(selection[0])
             self.show_selected(mode)
         mode = self.mode()
+        if mode == "cross":
+            self.counts.set("交叉核验 · 独立复核进度")
+            self.configure_actions()
+            return
         rows = self.service.visible(self.roster, mode, self.owner.get(), "all")
         self.counts.set(f"待处理 {sum(not r.done and not r.skipped for r in rows)}  ·  "
                         f"已跳过 {sum(r.skipped and not r.done for r in rows)}  ·  已完成 {sum(r.done for r in rows)}")
@@ -268,6 +287,9 @@ class App:
     def start(self):
         if self.busy:
             return
+        if self.mode() == "cross":
+            self.cross_review.start()
+            return
         try:
             mode, scope = self.mode(), SCOPES[self.scope.get()]
             if (scope != 'skipped' or mode == "evidence") and not self.limit.get().strip().isdigit():
@@ -321,6 +343,10 @@ class App:
             except queue.Empty:
                 break
             if kind == "progress":
+                self.status.set(value)
+            elif kind == "cross_result":
+                self.set_busy(False)
+                self.cross_review.render()
                 self.status.set(value)
             elif kind == "result":
                 self.roster, self.last_results = value.roster, value.messages

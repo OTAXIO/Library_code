@@ -58,8 +58,9 @@ async function runSACommand(command) {
   const reassignmentActions = ["prepare_reassignment", "inspect_reassignment", "cancel_reassignment", "submit_reassignment"];
   try {
     check();
-    if (!["status", "search", "open_metadata", "open_claim", "inspect_claim", "prepare_claim", "submit_claim", "repair_correspondent", ...reassignmentActions, "link", "complete"].includes(command.action)) stop("不支持的命令");
-    if (typeof command.sa_id !== "string" || !command.sa_id || command.sa_id.length > 160) stop("名单 ID 不合法");
+    const scan = command.action === "cross_review_page";
+    if (![ "cross_review_page", "status", "search", "open_metadata", "open_claim", "inspect_claim", "prepare_claim", "submit_claim", "repair_correspondent", ...reassignmentActions, "link", "complete"].includes(command.action)) stop("不支持的命令");
+    if (!scan && (typeof command.sa_id !== "string" || !command.sa_id || command.sa_id.length > 160)) stop("名单 ID 不合法");
     if (command.close_detail !== undefined &&
         (command.action !== "search" || typeof command.close_detail !== "boolean"))
       stop("只读详情收起参数无效，未操作窗口");
@@ -75,14 +76,14 @@ async function runSACommand(command) {
     if (found.size !== 1) stop("未找到唯一的比对页面组件，可能未登录或页面已升级");
     const vm = [...found][0];
     if (!vm.searchForm || !Array.isArray(vm.tableData) || !vm.page || typeof vm.getData !== "function") stop("页面结构不兼容");
-    const fresh = async () => {
+    const query = async (filters = {}, page = 1) => {
       check();
       const defaults = {saLzkId: command.sa_id, matchCount: null, claimStatus: "", markStatus: "",
         titleValue: "", doiValue: "", wosValue: "", qr: "", gh: "", reason: "", markType: null,
         updateUsername: "", createTimeRange: [], updateTimeRange: []};
       if (Object.keys(vm.searchForm).sort().join() !== Object.keys(defaults).sort().join()) stop("检索字段发生变化，需更新适配器");
-      for (const [key, value] of Object.entries(defaults)) vm.searchForm[key] = value;
-      vm.page.currentPage = 1;
+      Object.assign(vm.searchForm, defaults, filters);
+      vm.page.currentPage = page;
       const previous = vm.tableData;
       const request = vm.getData();
       if (!request || typeof request.then !== "function") stop("查询方法结构发生变化");
@@ -90,6 +91,24 @@ async function runSACommand(command) {
       request.then(() => { finished = true; }, error => { failure = error; finished = true; });
       await wait(() => finished && !vm.loading, "查询记录");
       if (failure || vm.tableData === previous) stop("查询未取得新数据，可能登录失效或后台报错");
+    };
+    if (scan) {
+      if (!assignedOwner(command.owner) || !Number.isInteger(command.page) || command.page < 1 ||
+          command.page > 10000 || vm.loading || visibleAll(".el-dialog, .el-message-box, .el-drawer").length)
+        stop("无法确认复核范围或有打开的操作窗口");
+      const filters = {saLzkId: "", markStatus: "已处理", updateUsername: command.owner};
+      await query(filters, command.page);
+      if (vm.page.currentPage !== command.page ||
+          Object.entries(filters).some(([key, value]) => vm.searchForm[key] !== value))
+        stop("复核查询的筛选条件已变化");
+      const rows = vm.tableData.map(snap);
+      if (rows.some(row => row.updateUsername !== command.owner || row.markStatus !== "已处理" || !row.saLzkId))
+        stop("复核查询混入其他处理人或状态");
+      return {ok: true, data: {protocol: 1, owner: command.owner, page: command.page,
+        total: Number(vm.page.total), page_size: Number(vm.page.pageSize), rows}};
+    }
+    const fresh = async () => {
+      await query();
       if (Number(vm.page.total) !== 1 || vm.tableData.length !== 1) stop("名单 ID 未返回唯一结果，停止自动操作");
       const row = vm.tableData[0];
       if (row.saLzkId !== command.sa_id) stop("网页结果与名单 ID 不完全相同");
