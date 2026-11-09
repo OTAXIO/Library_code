@@ -3,7 +3,10 @@
 Advancing never replays a write or discards its journal. Transport timeouts,
 login/session errors, changed rosters and unfinished commands remain batch stops.
 """
+import json
+from pathlib import Path
 import re
+import sqlite3
 import time
 from bridge import BrowserRejected
 from core import SafetyStop
@@ -18,6 +21,35 @@ MISSING=re.compile(r'(?:未找到本条导入批次|未找到原批次 ID)（完
 
 class UnconfirmedBatch(SafetyStop):
     """A completed original-batch scan found none; NOT permission to upload."""
+
+
+def check_legacy_import_journals(base, record):
+    """Only known pre-write phases allow a new hand-off or a manual skip."""
+    base = Path(base).resolve()
+    for relative, table, safe_phase in (
+        ("wos-imports/imports.sqlite3", "imports", "exported"),
+        ("wos-imports/zero-match.sqlite3", "jobs", "downloaded"),
+        ("metadata-imports/zero-match.sqlite3", "jobs", "prepared"),
+    ):
+        path = base / "runtime" / relative
+        if path.is_symlink() or not path.resolve().is_relative_to(base):
+            raise SafetyStop("断点文件不在当前 code 内，请检查原操作记录。")
+        if not path.exists():
+            continue
+        try:
+            db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+            try:
+                saved = db.execute(f"SELECT record_key,data FROM {table} WHERE sa_id=?", (record.sa_id,)).fetchone()
+            finally:
+                db.close()
+            if not saved:
+                continue
+            state = json.loads(saved[1])
+            if (saved[0] != record.key or not isinstance(state, dict) or
+                    state.get("phase") != safe_phase or state.get("item_id")):
+                raise SafetyStop("所选数据已有入库、关联或结案断点待核验，请先续验原操作。")
+        except (sqlite3.Error, ValueError, TypeError, OSError) as exc:
+            raise SafetyStop("本地断点无法核验，请检查原操作记录。") from exc
 
 
 class RecordReadback:

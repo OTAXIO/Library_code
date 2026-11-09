@@ -10,7 +10,7 @@ from xml.etree import ElementTree as ET
 
 from core import SafetyStop, file_hash, read_roster, require_owner
 from roster_annotations import YellowStyles, _yellow_id
-from roster_write import (NS, RosterUpdate, _commit_verified, column_name, patch_cell,
+from roster_write import (NS, RosterUpdate, _commit_verified, column_name, patch_cell, patch_text_cell,
                           worksheet_member, write_lock)
 
 STATES = {'done': ('已完成', 1), 'pending': ('未完成', None), 'skipped': ('已跳过', 2)}
@@ -46,6 +46,7 @@ def write_review(roster, record, state, backup_dir=None):
             or roster.completion_column == roster.remark_column):
         raise SafetyStop('请重读名单，确认独立的是否识别列。')
     value = STATES[state][1]
+    add_skip_note = state == 'skipped' and not record.remark
     path, temporary = roster.path, None
     try:
         with write_lock(path):
@@ -81,6 +82,9 @@ def write_review(roster, record, state, backup_dir=None):
                 else:
                     changed = patch_cell(changed, flag_ref, record.row, value)
                 flag_changed = changed != sheet
+                note_ref = column_name(roster.remark_column) + str(record.row)
+                if add_skip_note:
+                    changed = patch_text_cell(changed, note_ref, record.row, '手动跳过')
                 styles = YellowStyles(original.read('xl/styles.xml'),
                                       'FFFF0000' if state == 'skipped' else 'FFFFFF00')
                 changed, color_changed = _yellow_id(changed, id_ref, styles, pending=state == 'pending')
@@ -98,7 +102,8 @@ def write_review(roster, record, state, backup_dir=None):
                                 if entry.filename == 'xl/styles.xml' else original.read(entry))
                         output.writestr(copy.copy(entry), data)
             verified = read_roster(temporary)
-            expected = [replace(r, done=state == 'done', skipped=state == 'skipped')
+            expected = [replace(r, done=state == 'done', skipped=state == 'skipped',
+                                remark='手动跳过' if add_skip_note else r.remark)
                         if r == record else r for r in roster.records]
             if verified.records != expected:
                 raise SafetyStop('核验回读发现备注或其他任务变化，原名单未修改。')
@@ -120,6 +125,8 @@ def write_review(roster, record, state, backup_dir=None):
             verified.mtime_ns = path.stat().st_mtime_ns
             verified.assert_unchanged()
             cells = ((flag_ref,) if flag_changed else ()) + ((id_ref,) if color_changed else ())
+            if add_skip_note:
+                cells += (note_ref,)
             return RosterUpdate(verified, backup, cells, {record.sa_id: state_of(record)})
     except PermissionError as exc:
         raise SafetyStop('名单被占用，未保存核验；请关闭 Excel 后重读。') from exc

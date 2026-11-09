@@ -1,6 +1,9 @@
 """Zero-match 需导入 hand-off on a synthetic workbook and a fake SA page."""
+import json
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -113,13 +116,17 @@ class NeedImportTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_prewrite_rejection_skips_one_row_and_continues(self):
-        self.page.fail[("complete", "zero-001")] = BrowserRejected("complete", "【已暂停】网页数据在核验后已变化")
+        self.page.fail[("complete", "zero-001")] = BrowserRejected(
+            "complete", "[扩展 0.4.57] 【已暂停】网页数据在核验后已变化")
         result = self.run_batch()
         self.assertFalse(result.halted)
         self.assertEqual(result.completed_ids, ("zero-002",))
-        saved = read_roster(self.path).records
-        self.assertEqual((saved[0].skipped, saved[0].remark), (True, "需导入未提交"))
-        self.assertTrue(saved[1].done)
+        saved = read_roster(self.path)
+        self.assertEqual((saved.records[0].skipped, saved.records[0].remark), (True, "需导入未提交"))
+        self.assertTrue(saved.records[1].done)
+        self.page.fail.clear()
+        retry = self.run_batch(records=saved.records[:1], roster=saved, retry_skipped=True)
+        self.assertEqual(retry.completed_ids, ("zero-001",))
 
     def test_unknown_write_halts_marks_pending_and_retry_syncs_without_resubmitting(self):
         self.page.fail[("complete", "zero-001")] = BrowserRejected(
@@ -133,6 +140,11 @@ class NeedImportTests(unittest.TestCase):
         self.assertFalse(saved.records[1].done or saved.records[1].skipped)
         # The write actually landed on the site; the retry only reads it back.
         self.page.fail.clear()
+        self.page.calls.clear()
+        pending = self.run_batch(records=saved.records[:1], roster=saved, retry_skipped=True)
+        self.assertEqual([action for action, _ in self.page.calls], ["status"])
+        self.assertEqual(pending.roster.records[0].remark, PENDING_NOTE)
+        saved = pending.roster
         self.page.rows["zero-001"].update(markStatus="已处理", remark=NOTE)
         self.page.calls.clear()
         retry = self.run_batch(records=saved.records[:1], roster=saved, retry_skipped=True)
@@ -141,6 +153,49 @@ class NeedImportTests(unittest.TestCase):
         final = read_roster(self.path).records[0]
         self.assertTrue(final.done)
         self.assertEqual(final.remark, NOTE)
+
+    def test_old_import_intents_block_only_the_affected_record(self):
+        for relative, table, phase in (
+            ("wos-imports/imports.sqlite3", "imports", "push_intent"),
+            ("wos-imports/zero-match.sqlite3", "jobs", "link_intent"),
+            ("metadata-imports/zero-match.sqlite3", "jobs", "import_intent"),
+        ):
+            with self.subTest(phase=phase):
+                base = self.path.parent / phase
+                base.mkdir()
+                roster_path = base / "list.xlsx"
+                make_roster(roster_path, [("测试员", 0), ("测试员", 0)])
+                roster = read_roster(roster_path)
+                first, second = roster.records
+                path = base / "runtime" / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with closing(sqlite3.connect(path)) as db, db:
+                    db.execute(f"CREATE TABLE {table}(sa_id, record_key, data)")
+                    db.execute(f"INSERT INTO {table} VALUES(?,?,?)", (first.sa_id, first.key, json.dumps({"phase": phase})))
+                original = path.read_bytes()
+                page = FakePage(roster)
+                result = run_need_import_batch(roster, roster.records, page, "测试员")
+                self.assertEqual([a for a, _ in page.calls], ["status", "status", "complete"])
+                self.assertEqual(result.completed_ids, (second.sa_id,))
+                self.assertTrue(result.roster.records[0].skipped)
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_interrupted_write_is_blocked_after_restarting_with_original_roster(self):
+        first = self.roster.records[0]
+        self.page.fail[("complete", first.sa_id)] = KeyboardInterrupt()
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_batch(records=[first])
+        self.page = FakePage(self.roster)
+        reloaded = read_roster(self.path)
+        retry = self.run_batch(roster=reloaded, records=reloaded.records[:1])
+        self.assertEqual([action for action, _ in self.page.calls], ["status"])
+        self.assertEqual(retry.roster.records[0].remark, PENDING_NOTE)
+
+    def test_legacy_unknown_remark_without_journal_blocks_submission(self):
+        first = self.roster.records[0]
+        saved = mark_skipped_many(self.roster, [first], reasons={first.sa_id: PENDING_NOTE}).roster
+        self.run_batch(roster=saved, records=saved.records[:1], retry_skipped=True)
+        self.assertEqual([action for action, _ in self.page.calls], ["status"])
 
     def test_existing_site_note_or_mismatched_facts_are_not_overwritten(self):
         self.page.rows["zero-001"]["remark"] = "人工备注"

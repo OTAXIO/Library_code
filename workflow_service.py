@@ -5,6 +5,7 @@ from pathlib import Path
 import sqlite3
 
 from automation import ImportStore
+from batch_recovery import check_legacy_import_journals
 from claim_batch import run_claim_batch
 from core import SafetyStop, fixed_roster_path, read_roster, require_owner
 from operation_log import OperationLog
@@ -87,33 +88,6 @@ class WorkflowService:
             raise SafetyStop("请只选择当前列表中的一条待处理数据，不能跳过其他记录。")
         return selected[0]
 
-    def _check_skip_journals(self, record):
-        # Read existing journals without initializing tables, resetting progress,
-        # or depending on the very SA query the operator is trying to set aside.
-        for relative, table, safe_phase in (("wos-imports/imports.sqlite3", "imports", "exported"),
-                                        ("wos-imports/zero-match.sqlite3", "jobs", "downloaded"),
-                                        ("metadata-imports/zero-match.sqlite3", "jobs", "prepared")):
-            path = self.base / "runtime" / relative
-            if not path.exists():
-                continue
-            if path.is_symlink() or not path.resolve().is_relative_to(self.base.resolve()):
-                raise SafetyStop("断点文件不在当前 code 内，未跳过。")
-            try:
-                db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
-                try:
-                    saved = db.execute(f"SELECT record_key,data FROM {table} WHERE sa_id=?",
-                                       (record.sa_id,)).fetchone()
-                finally:
-                    db.close()
-                if not saved:
-                    continue
-                state = json.loads(saved[1])
-                if (saved[0] != record.key or not isinstance(state, dict) or
-                        state.get("phase") != safe_phase or state.get("item_id")):
-                    raise SafetyStop("所选数据已有入库、关联或结案断点待核验，不能手动跳过；请先续验原操作。")
-            except (sqlite3.Error, ValueError, OSError) as exc:
-                raise SafetyStop("本地断点无法核验，未跳过；请检查原操作记录。") from exc
-
     def skip_selected(self, roster, mode, owner, scope, sa_id, bridge=None):
         """Persist numeric 2 and a visible reason for one owned row. No browser commands."""
         record = self.select_skip(roster, mode, owner, scope, sa_id)
@@ -121,7 +95,7 @@ class WorkflowService:
             raise SafetyStop("请重读当前 code/list.xlsx，确认末尾独立的是否识别列后再跳过。")
         if bridge is not None and getattr(bridge, "pending", None):
             raise SafetyStop("浏览器命令仍在执行，未跳过；请等待当前操作结束。")
-        self._check_skip_journals(record)
+        check_legacy_import_journals(self.base, record)
         # A red row must always explain itself; an existing note is kept as is.
         saved = mark_skipped_many(roster, [record], reasons={record.sa_id: record.remark or "手动跳过"})
         text = ("已手动跳过这一条；是否识别写为 2" + ("，原备注保留" if record.remark else "，备注写“手动跳过”")
@@ -142,10 +116,11 @@ class WorkflowService:
             raise SafetyStop('浏览器命令仍待回读，请等待结束后再手动核验。')
         saved = write_review(roster, record, state)
         label = STATES[state][0]
-        text = f'手动核验已保存：{label}（仅名单）。备注已保留。'
+        note_text = '备注已保留。' if state != 'skipped' or record.remark else '空备注已补为“手动跳过”。'
+        text = f'手动核验已保存：{label}（仅名单）。{note_text}'
         try:
             self.operation_log.record('手动核验名单状态', '已执行', record.sa_id,
-                detail=f'{STATES[state_of(record)][0]} → {label}；仅名单状态及 ID 填色；原备注和业务断点保留。')
+                detail=f'{STATES[state_of(record)][0]} → {label}；{note_text}业务断点保留。')
         except Exception:
             text += 'log.txt 未能保存，请检查日志。'
         return TaskResult(saved.roster, {record.sa_id: text}, text)

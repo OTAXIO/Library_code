@@ -21,7 +21,7 @@ class ManualReviewDialog:
         self.query = tk.StringVar()
         self.scope = tk.StringVar(value='全部')
         self.choice = tk.StringVar()
-        self.result = tk.StringVar(value='只修改所选条目的名单状态和 ID 颜色，保留原备注。')
+        self.result = tk.StringVar(value='保存所选条目的状态和 ID 颜色。标记跳过时，空备注补为“手动跳过”。')
         frame = ttk.Frame(self.window, padding=14)
         frame.pack(fill='both', expand=True)
         frame.columnconfigure(0, weight=1)

@@ -88,6 +88,19 @@ class WorkflowStore:
             db.execute("INSERT INTO jobs VALUES(?,?,?) ON CONFLICT(sa_id) DO UPDATE SET data=excluded.data",
                        (record.sa_id, record.key, json.dumps(state, ensure_ascii=False)))
 
+    def reserve(self, record, state):
+        """Persist a first write intent, unique even across concurrent assistants."""
+        with self.connect() as db:
+            row = db.execute("INSERT INTO jobs VALUES(?,?,?) ON CONFLICT(sa_id) DO NOTHING",
+                             (record.sa_id, record.key, json.dumps(state, ensure_ascii=False)))
+            return row.rowcount == 1
+
+    def release_reservation(self, record, state):
+        """Call only when the command is known to have made no write."""
+        with self.connect() as db:
+            db.execute("DELETE FROM jobs WHERE sa_id=? AND record_key=? AND data=?",
+                       (record.sa_id, record.key, json.dumps(state, ensure_ascii=False)))
+
 
 class SerialWOS:
     """Bounded serial pacing, not an anti-bot bypass. Never retry a Search."""

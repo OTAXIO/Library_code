@@ -7,15 +7,18 @@ note. The roster is completed only from the read-back processed row.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
+from batch_recovery import check_legacy_import_journals
 from bridge import BrowserRejected
 from core import SafetyStop, require_owner
 from roster_write import mark_skipped_many, reconcile_processed
 from wos_policy import match_count
-from zero_match import verify_sa
+from zero_match import WorkflowStore, verify_sa
 
 NOTE = "需导入"
 PENDING_NOTE = "需导入结案待核"
+LEGACY_NOTE = "历史入库断点待核"
 
 
 @dataclass
@@ -54,6 +57,8 @@ def run_need_import_batch(roster, records, bridge, owner, cancel=lambda: False,
     current = roster
     completed, synced, skipped = [], [], {}
     checked, halted, reason = 0, False, ""
+    store = None
+    intent = {"phase": "complete_intent", "note": NOTE}
 
     def note(action, result, sa_id):
         try:
@@ -110,11 +115,12 @@ def run_need_import_batch(roster, records, bridge, owner, cancel=lambda: False,
             note("需导入协议检查", "已暂停", record.sa_id)
             break
         row = fresh.get("row")
+        legacy_unknown = PENDING_NOTE in record.remark
         try:
             verify_sa(record, row)
             count = match_count(row)
         except SafetyStop:
-            skipped[record.sa_id] = "名单与网页不一致"
+            skipped[record.sa_id] = PENDING_NOTE if legacy_unknown else "名单与网页不一致"
             note("零匹配记录与网页不一致", "已跳过", record.sa_id)
             continue
         if row.get("markStatus") == "已处理":
@@ -127,25 +133,52 @@ def run_need_import_batch(roster, records, bridge, owner, cancel=lambda: False,
             synced.append(record.sa_id)
             note("后台原已处理，仅同步名单", "已执行", record.sa_id)
             continue
-        if count or str(row.get("itemId") or "").strip(","):
+        if not legacy_unknown and (count or str(row.get("itemId") or "").strip(",")):
             # The roster's zero is stale. Leave a visible reason instead of an
             # empty red row; claiming waits for a roster that shows the match.
             skipped[record.sa_id] = changed_match_note(count)
             note("网页匹配数已非 0，未标注需导入", "已跳过", record.sa_id)
             continue
-        if row.get("remark") not in ("", None, NOTE):
+        if not legacy_unknown and row.get("remark") not in ("", None, NOTE):
             skipped[record.sa_id] = "待人工核验"
             note("网页已有其他备注，未覆盖", "已跳过", record.sa_id)
+            continue
+        if not legacy_unknown:
+            try:
+                check_legacy_import_journals(current.path.parent, record)
+            except SafetyStop as exc:
+                skipped[record.sa_id] = LEGACY_NOTE
+                note(str(exc), "已跳过", record.sa_id)
+                continue
+        try:
+            guard()
+            if store is None:
+                store = WorkflowStore(current.path.parent / "runtime" / "need-import")
+            reserved = store.reserve(record, intent)
+        except _Interrupted as exc:
+            halted, reason = not exc.cancelled, str(exc)
+            return finish(cancelled=exc.cancelled)
+        except Exception as exc:
+            halted, reason = True, "无法保存需导入结案断点，未提交：" + str(exc)
+            break
+        if legacy_unknown or not reserved:
+            skipped[record.sa_id] = PENDING_NOTE
+            note("已有结案断点，仅只读核验，未重发", "已跳过", record.sa_id)
             continue
         note("需导入结案意图", "已执行", record.sa_id)
         try:
             result = call("complete", {"sa_id": record.sa_id, "expected": row, "reviewed": True,
                                        "owner": owner, "note": NOTE})
         except _Interrupted as exc:
+            store.release_reservation(record, intent)
             halted, reason = not exc.cancelled, str(exc)
             return finish(cancelled=exc.cancelled)
         except Exception as exc:
-            if isinstance(exc, BrowserRejected) and "【已暂停】" in str(exc) and "已发出写入" not in str(exc):
+            prewrite = (isinstance(exc, BrowserRejected) and exc.action == "complete"
+                        and re.match(r"^(?:\[扩展 [\d.]+\] )?【已暂停】", str(exc))
+                        and "已发出写入" not in str(exc))
+            if prewrite:
+                store.release_reservation(record, intent)
                 skipped[record.sa_id] = "需导入未提交"
                 note("需导入提交前校验未通过：" + str(exc), "已跳过", record.sa_id)
                 continue

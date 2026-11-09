@@ -79,6 +79,16 @@ class ManualReviewTests(unittest.TestCase):
                     self.assertIn('仅名单', result.summary)
         self.bridge.call.assert_not_called()
 
+    def test_manual_skip_supplies_a_reason_for_a_blank_remark(self):
+        book = load_workbook(self.path)
+        book.active['A2'] = None
+        book.save(self.path)
+        book.close()
+        self.roster = read_roster(self.path)
+        self.save('skipped')
+        self.assert_state('skipped')
+        self.assertEqual(read_roster(self.path).records[0].remark, '手动跳过')
+
     def test_atomic_status_and_style_change_preserves_other_zip_members(self):
         before_bytes = self.path.read_bytes()
         before = load_workbook(self.path)
