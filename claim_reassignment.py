@@ -34,18 +34,35 @@ def validate_authorization(record, authorization):
         raise SafetyStop('认领纠正必须明确这条 SA、平台号、作者序号和两个不同的完整工号。')
 
 
+def claim_note(remark):
+    """A blank note, or one that already records 已认领 beside other notes."""
+    return isinstance(remark, str) and (remark == '' or '已认领' in
+        [part.strip() for part in re.split(r'[；;，,\s]+', remark)])
+
+
+def claimed_note(remark):
+    return claim_note(remark) and remark != ''
+
+
 def run_reassignment(base, roster, record, bridge, authorization, audit=lambda *args: None,
-                     cancel=lambda: False):
+                     cancel=lambda: False, rework=False):
     """Return refreshed roster only after the site is processed with 已认领.
 
     Original list match count/item ID stay intact. Claim correction is not a new
     admission and deliberately never applies a yellow admission highlight.
+
+    ``rework`` corrects a row the list and site already closed as 已认领 but
+    whose author was claimed by a homonym. Only the author claim changes; the
+    site's processed state and note, and the finished list row, stay as they are.
     """
     validate_authorization(record, authorization)
     if record not in roster.records:
         raise SafetyStop('认领纠正目标不属于当前名单。')
     roster.assert_unchanged()
-    if record.done:
+    if rework:
+        if not record.done or record.skipped or not claimed_note(record.remark):
+            raise SafetyStop('返工纠正只用于名单已按“已认领”结案的记录。')
+    elif record.done:
         return roster
     folder = Path(base).resolve() / 'runtime' / 'claim-reassignments'
     folder.mkdir(parents=True, exist_ok=True)
@@ -95,8 +112,15 @@ def run_reassignment(base, roster, record, bridge, authorization, audit=lambda *
         source, staff = sa_claim_source(result.get('comparison'))
         if staff != record.staff_id:
             raise SafetyStop('SA 认领卡片工号与名单不一致。')
-        return result, {'sa_id': record.sa_id, 'expected': result['row'], 'sa_text': source,
+        return result, {'sa_id': record.sa_id, 'expected': result['row'], 'sa_text': source, 'owner': record.owner,
             'staff_id': staff, 'roster_staff_id': record.staff_id, 'authorization': authorization}
+
+    def finish(row):
+        if rework:
+            if row.get('markStatus') != '已处理' or not claimed_note(row.get('remark')):
+                raise SafetyStop('返工后网页未保持已处理及已认领备注。')
+            return roster  # The list row is already 1 / 已认领; nothing to rewrite.
+        return reconcile_processed(roster, record, row).roster
 
     with write_lock(path):
         state = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
@@ -109,7 +133,8 @@ def run_reassignment(base, roster, record, bridge, authorization, audit=lambda *
         # verified existing claim is a read-only reconciliation, never a reason
         # to cancel/reclaim it again. Its full wno, scholar and order still bind.
         if (state.get('phase') in (None, 'prepared') and result['row'].get('markStatus') == '已处理'
-                and result['row'].get('remark') == '已认领'):
+                and claimed_note(result['row'].get('remark'))
+                and result.get('claim_identity', {}).get('state', '已认领') == '已认领'):
             proof = inspect_staff_claim(record, bridge, result['row'], result['comparison'])
             if (proof.get('order') != authorization['author_order'] or state and
                     proof.get('scholar_id') != state['prepared']['person']['id']):
@@ -125,15 +150,18 @@ def run_reassignment(base, roster, record, bridge, authorization, audit=lambda *
             latest, _ = read()
             if latest['row'] != result['row'] or latest['comparison'] != result['comparison']:
                 raise SafetyStop('认领回读后网页状态改变，未同步名单。')
-            saved = reconcile_processed(roster, record, latest['row'])
+            saved = finish(latest['row'])
             state.update(record_key=record.key, authorization=authorization, phase='done',
                          completion_origin='verified_existing_claim', staff_proof=proof)
             save(state)
             audit('按完整工号核验已有认领并同步已处理名单', '已执行', record.sa_id)
-            return saved.roster
+            return saved
         if not state:
-            if result['row'].get('markStatus') != '待处理':
-                raise SafetyStop('记录已被处理，未新建纠正任务或覆盖备注。')
+            if result['row'].get('markStatus') == '已处理' and (
+                    result['row'].get('updateUsername') != record.owner
+                    or not claim_note(result['row'].get('remark'))
+                    or result.get('claim_identity', {}).get('state') != '认领不一致'):
+                raise SafetyStop('已处理记录的处理人、备注或认领冲突未确认，未修改。')
             prepared = call('prepare_reassignment', payload)
             if (prepared.get('verified') is not True or prepared.get('stage') != 'original'
                     or prepared.get('row') != result['row'] or prepared.get('comparison') != result['comparison']):
@@ -199,9 +227,9 @@ def run_reassignment(base, roster, record, bridge, authorization, audit=lambda *
             raise SafetyStop('没有按 SA 工号确认新的作者认领，未结案。')
         latest, _ = read()
         row = latest['row']
-        if row.get('remark', '') not in ('', '已认领'):
+        if not claim_note(row.get('remark', '')):
             raise SafetyStop('后台已有其他备注，未覆盖。')
-        if row.get('markStatus') != '已处理' or row.get('remark') != '已认领':
+        if row.get('markStatus') != '已处理' or not claimed_note(row.get('remark')):
             if state['phase'] in ('complete_intent', 'done'):
                 raise SafetyStop('原结案结果尚未确认，保留断点；未重复结案。')
             state['phase'] = 'complete_intent'; save(state)
@@ -211,10 +239,10 @@ def run_reassignment(base, roster, record, bridge, authorization, audit=lambda *
                 'note': '已认领', 'staff_claim_evidence': proof})
             latest, _ = read()
             row = latest['row']
-        if row.get('markStatus') != '已处理' or row.get('remark') != '已认领':
+        if row.get('markStatus') != '已处理' or not claimed_note(row.get('remark')):
             raise SafetyStop('网页没有同时确认已认领批注和已处理，名单未标完成。')
         # Native metadata + two wno lookups were independently checked above.
-        saved = reconcile_processed(roster, record, row)
+        saved = finish(row)
         state['phase'] = 'done'; save(state)
         audit('纠正认领后网页和名单批注结案', '已执行', record.sa_id)
-        return saved.roster
+        return saved

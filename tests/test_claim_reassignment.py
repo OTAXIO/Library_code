@@ -32,6 +32,7 @@ class Browser:
 
     def search(self):
         return dict(row=copy.deepcopy(self.row), staff_claim_protocol=1,
+            claim_identity={'state': '已认领' if self.stage == 'claimed' else '认领不一致'},
             comparison=[dict(label='认领状态', sa='Same Name(00001)',
                 library='已认领' if self.stage == 'claimed' else '认领不一致')])
 
@@ -101,6 +102,59 @@ class ReassignmentTests(unittest.TestCase):
         self.assertEqual(REC.matches, 0)
         self.assertEqual(REC.item_ids, '')
         self.assertEqual(self.state()['phase'], 'done')
+
+    def test_corrects_closed_record_without_changing_its_mark_status(self):
+        self.browser.row.update(markStatus='已处理', updateUsername='谭勋策', remark='已认领')
+        self.assertIs(self.run_job(), self.updated)
+        self.assertEqual(self.browser.calls.count('submit_reassignment'), 1)
+        self.assertNotIn('complete', self.browser.calls)
+        self.assertEqual(self.browser.row['markStatus'], '已处理')
+
+    def rework(self, record):
+        roster = SimpleNamespace(records=[record], assert_unchanged=Mock())
+        return roster, run_reassignment(self.base, roster, record, self.browser, copy.deepcopy(AUTH), rework=True)
+
+    def test_rework_of_closed_list_row_keeps_combined_note_and_list(self):
+        done = replace(REC, done=True, skipped=False, remark='已认领')
+        self.browser.row.update(markStatus='已处理', updateUsername='谭勋策', remark='DOI和WOSID SA未提交；已认领')
+        roster, result = self.rework(done)
+        self.assertIs(result, roster)
+        self.assertEqual(self.browser.calls.count('cancel_reassignment'), 1)
+        self.assertEqual(self.browser.calls.count('submit_reassignment'), 1)
+        self.assertNotIn('complete', self.browser.calls)
+        self.assertEqual(self.browser.row['remark'], 'DOI和WOSID SA未提交；已认领')
+        self.saved.assert_not_called()
+        self.assertEqual(self.state()['phase'], 'done')
+
+    def test_rework_of_already_corrected_row_only_reads(self):
+        done = replace(REC, done=True, skipped=False, remark='已认领')
+        self.browser.stage = 'claimed'
+        self.browser.row.update(markStatus='已处理', updateUsername='谭勋策', remark='已认领；DOI和WOSID SA未提交')
+        roster, result = self.rework(done)
+        self.assertIs(result, roster)
+        for action in ('cancel_reassignment', 'submit_reassignment', 'complete'):
+            self.assertNotIn(action, self.browser.calls)
+        self.assertEqual(self.state()['completion_origin'], 'verified_existing_claim')
+
+    def test_rework_needs_list_row_closed_as_claimed(self):
+        for record in (REC, replace(REC, done=True, skipped=False, remark='非交大作者'),
+                       replace(REC, done=True, skipped=True, remark='已认领')):
+            with self.subTest(record=record), self.assertRaises(SafetyStop):
+                self.rework(record)
+        self.assertEqual(self.browser.calls, [])
+
+    def test_rework_never_touches_a_site_note_without_claim(self):
+        done = replace(REC, done=True, skipped=False, remark='已认领')
+        self.browser.row.update(markStatus='已处理', updateUsername='谭勋策', remark='非交大作者')
+        with self.assertRaises(SafetyStop):
+            self.rework(done)
+        self.assertEqual(self.browser.calls, ['search'])
+
+    def test_closed_record_of_other_owner_is_not_changed(self):
+        self.browser.row.update(markStatus='已处理', updateUsername='其他负责人', remark='已认领')
+        with self.assertRaises(SafetyStop):
+            self.run_job()
+        self.assertEqual(self.browser.calls, ['search'])
 
     def test_leading_zero_owner_order_and_explicit_authorization_are_required(self):
         for changes in ({'staff_id':'1'}, {'staff_id':1}, {'previous_staff_id':'00001'},

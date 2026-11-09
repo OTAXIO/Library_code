@@ -91,6 +91,19 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     assert.equal(await page.evaluate(()=>detail.$refs.itemEdit.drawer),true);
     assert.equal(await page.evaluate(()=>writeCount),0);
   });
+  test('a rejected comparison releases its detail so the next status can run',async()=>{
+    await page.evaluate(()=>{
+      const show=vm.showItemId;
+      vm.showItemId=function(row){show.call(this,row);detail.compareData=[];};
+    });
+    const rejected=await execute(command('search',{close_detail:true}));
+    assert.match(rejected.error,/详情为空/);
+    assert.equal(await page.evaluate(()=>detail.dialogVisible),false);
+    await page.evaluate(()=>synthetic.saLzkId='next-record');
+    const next=await execute(command('status',{sa_id:'next-record'}));
+    assert.equal(next.ok,true,JSON.stringify(next));
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
   test('status does not refresh behind another record or an unbound drawer',async()=>{
     for(const change of ['other-record','other-panel','duplicate-owner','loading']) {
       await reset();assert.equal((await execute(command('search'))).ok,true);

@@ -425,15 +425,18 @@ async function runSACommand(command) {
       });
     };
     if (command.action === "search") {
-      const comparison = await showDetail();
-      // Queue reads must not leave the previous paper's drawer blocking the
-      // next exact-ID status check. Keep interactive/manual reads unchanged.
-      // This is the detail just read by this command; the existing lifecycle
-      // guards refuse editors, claim selections, target changes and strangers.
-      if (command.close_detail === true) await closeReadOnlyDetail();
+      let comparison;
+      try {
+        comparison = await showDetail();
+      } finally {
+        // A rejected comparison can still leave its detail open. Release only
+        // this record, using the same guards as a successful queue read.
+        if (command.close_detail === true && drawer.dialogVisible &&
+            drawer.currentSaLzkId === command.sa_id) await closeReadOnlyDetail();
+      }
       return {ok: true, data: {row: before, comparison, import_completion_protocol: 1,
         metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 2, publisher_journal_protocol: 2,
-        staff_claim_protocol: 1, claim_identity: claimIdentity, publisher_correspondent_protocol: 2,
+        staff_claim_protocol: 1, claim_identity: claimIdentity, closed_rework_protocol: 1, publisher_correspondent_protocol: 2,
         native_claim_response_protocol:typeof vm.$http?.request==='function'?1:0,
         claim_queue_protocol:4, non_institution_author_protocol:1,
         detail_released: command.close_detail === true}};
@@ -564,7 +567,15 @@ async function runSACommand(command) {
       const cancelling = command.action === "cancel_reassignment";
       const submitting = ["submit_claim", "submit_reassignment"].includes(command.action);
       if (submitting && command.confirmed !== true) stop("缺少本条作者认领的人工确认");
-      if (!inspecting && row.markStatus !== "待处理") stop("该记录已处理，不自动认领");
+      // A closed row may be corrected only when its existing note already
+      // records the claim (alone or beside another note such as
+      // "DOI和WOSID SA未提交；已认领"). The note itself is never rewritten.
+      const claimNote = remark => remark === "" ||
+        remark.split(/[；;，,\s]+/).map(part => part.trim()).includes("已认领");
+      const closedReassignment = reassignment && command.owner === "谭勋策" &&
+        row.updateUsername === command.owner && typeof row.remark === "string" && claimNote(row.remark);
+      if (!inspecting && row.markStatus !== "待处理" && !closedReassignment)
+        stop("该记录已处理，不自动认领");
       const ids = String(row.itemId || "").replace(/^,/, "").split(",").filter(Boolean);
       if (Number(row.matchCount) !== 1 || ids.length !== 1) stop("自动认领需要唯一匹配条目");
       const comparison = await showDetail();
