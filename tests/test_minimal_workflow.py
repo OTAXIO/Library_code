@@ -414,8 +414,9 @@ class MinimalUITests(unittest.TestCase):
         self.app.render()
         self.root.update_idletasks()
 
-    def test_only_two_tabs_topmost_and_no_runtime_created_by_opening(self):
-        self.assertEqual([self.app.notebook.tab(t, "text") for t in self.app.notebook.tabs()], ["自动认领", "零匹配 · 需导入"])
+    def test_workflow_tabs_topmost_and_no_runtime_created_by_opening(self):
+        self.assertEqual([self.app.notebook.tab(t, "text") for t in self.app.notebook.tabs()],
+                         ["自动认领", "零匹配 · 需导入", "证据核验"])
         self.assertTrue(self.root.attributes("-topmost"))
         self.assertFalse((self.service.base / "runtime").exists())
 

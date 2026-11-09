@@ -34,7 +34,8 @@ p { margin: 0; }
 main { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 main > * { flex: 0 0 auto; min-width: 0; }
 .card { border: 1px solid var(--line); border-radius: 17px; background: var(--surface); }
-.pairing { padding: 13px; }
+.pairing, .front { padding: 13px; }
+.front .full-width { margin-top: 8px; }
 .section-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .pill { flex-shrink: 0; padding: 3px 7px; border-radius: 6px; color: var(--accent); background: var(--accent-soft); font-size: 10px; }
 .hint { color: var(--muted); font-size: 11px; line-height: 1.7; margin: 10px 0 14px; }
