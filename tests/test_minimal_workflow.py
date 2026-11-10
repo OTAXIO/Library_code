@@ -424,8 +424,7 @@ class MinimalUITests(unittest.TestCase):
         self.app.notebook.select(self.app.pages["cross"])
         self.app.render()
         self.assertEqual(self.app.cross_review.owner.get(), "")
-        self.assertEqual(len(self.app.cross_review.owners["values"]),
-                         len(set(self.app.cross_review.owners["values"])))
+        self.assertEqual(self.app.cross_review.reviewer.get(), "")
         self.assertEqual(str(self.app.start_button["state"]), "disabled")
         self.app.start()
         self.app.bridge.call.assert_not_called()

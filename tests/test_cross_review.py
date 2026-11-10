@@ -140,7 +140,7 @@ class FeedbackTests(unittest.TestCase):
     def persisted(self):
         return json.loads(self.review.path.read_text(encoding="utf-8"))["rows"]
 
-    def panel(self):
+    def panel(self, reviewer="手动校对员"):
         import tkinter as tk
         from cross_review_ui import CrossReviewPanel
         root = tk.Tk()
@@ -152,20 +152,159 @@ class FeedbackTests(unittest.TestCase):
             service=SimpleNamespace(base=self.base), configure_actions=lambda: None,
             roster=SimpleNamespace(path=self.path.with_name("list.xlsx"),
                                    records=[SimpleNamespace(owner="复核对象")]))
+        resolver = patch("core.fixed_roster_path", return_value=self.path.with_name("list.xlsx"))
+        resolver.start()
+        self.addCleanup(resolver.stop)
         panel = CrossReviewPanel(root, app)
+        if reviewer is not None:
+            panel.reviewer.set(reviewer)
         panel.owner.set("复核对象")
         return panel
 
-    def test_panel_load_without_roster_warns_and_clears_review(self):
+    def test_panel_without_roster_loads_trims_and_confirms(self):
+        self.review.save()
+        panel = self.panel()
+        panel.app.roster = None
+        panel.owner.set("  复核对象  ")
+        panel.load()
+        self.assertEqual(panel.review.owner, "复核对象")
+        panel.tree.selection_set("001")
+        panel.note.set("手动确认")
+        panel.reviewer.set("  手动校对员  ")
+        panel.confirm()
+        self.assertEqual(self.values()[1], ("001", "手动确认", "复核对象", "手动校对员"))
+        self.assertTrue(self.persisted()["001"]["feedback_synced"])
+
+    def test_panel_invalid_owner_never_loads(self):
+        panel = self.panel()
+        for name in ("   ", "人" * 41, UNASSIGNED_OWNER):
+            with self.subTest(name=name), patch("cross_review_ui.messages.showwarning") as warning:
+                panel.owner.set(name)
+                panel.load()
+                self.assertIsNone(panel.review)
+                warning.assert_called_once()
+        panel.owner.set("人" * 40)
+        panel.load()
+        self.assertEqual(panel.review.owner, "人" * 40)
+
+    def test_panel_invalid_reviewer_never_confirms(self):
         panel = self.panel()
         panel.review = self.review
-        panel.app.roster = None
-        with patch("cross_review_ui.messages.showwarning") as warning:
+        panel.render()
+        panel.tree.selection_set("001")
+        for name in ("   ", "复核对象", " 复核对象 ", "人" * 41, UNASSIGNED_OWNER):
+            with self.subTest(name=name), patch("cross_review_ui.messages.showwarning") as warning:
+                panel.reviewer.set(name)
+                panel.note.set("问题")
+                panel.confirm()
+                self.assertNotIn("confirmed", self.review.data["rows"]["001"])
+                self.assertEqual(self.values(), [HEADERS])
+                warning.assert_called_once()
+
+    def test_reviewer_prefill_and_corrupt_or_missing_file(self):
+        path = self.base / "runtime/cross-review/reviewer.json"
+        self.assertEqual(self.panel(None).reviewer.get(), "")
+        path.parent.mkdir(parents=True)
+        for content in ("{broken", "[]", '"name"', '{"reviewer": 3}',
+                        json.dumps({"reviewer": UNASSIGNED_OWNER}),
+                        json.dumps({"reviewer": "人" * 41})):
+            path.write_text(content, encoding="utf-8")
+            self.assertEqual(self.panel(None).reviewer.get(), "")
+        path.write_bytes(b"\xff")
+        self.assertEqual(self.panel(None).reviewer.get(), "")
+        path.write_text(json.dumps({"reviewer": "手动校对员"}), encoding="utf-8")
+        self.assertEqual(self.panel(None).reviewer.get(), "手动校对员")
+
+    def test_reviewer_saved_and_save_failure_does_not_block_confirmation(self):
+        panel = self.panel()
+        panel.review = self.review
+        panel.render()
+        panel.tree.selection_set("001")
+        panel.note.set("问题")
+        panel.confirm()
+        self.assertEqual(self.panel(None).reviewer.get(), "手动校对员")
+        path = self.base / "runtime/cross-review/reviewer.json"
+        path.unlink()
+        path.mkdir()  # A directory at the file path makes preference saving fail.
+        panel.reviewer.set("新校对员")
+        panel.note.set("新问题")
+        panel.confirm()
+        self.assertEqual(self.values()[1], ("001", "新问题", "复核对象", "新校对员"))
+        self.assertTrue(self.persisted()["001"]["feedback_synced"])
+        self.assertIn("保存失败", panel.app.status.get())
+        self.assertIn("已确认并同步", panel.app.status.get())
+
+    def test_feedback_path_uses_fixed_location_or_service_base(self):
+        panel = self.panel()
+        panel.app.roster = SimpleNamespace(path=self.base / "wrong/list.xlsx")
+        panel.load()
+        self.assertEqual(panel.review.feedback_path, self.path)
+        with patch("core.fixed_roster_path", side_effect=SafetyStop("名单不存在")):
+            panel.app.roster = None
             panel.load()
-        self.assertIsNone(panel.review)
-        self.assertEqual(panel.tree.get_children(), ())
-        self.assertEqual(panel.owner.get(), "")
-        self.assertIn("名册", warning.call_args.args[1])
+        self.assertEqual(panel.review.feedback_path, self.base / "复核反馈.xlsx")
+
+    def test_app_without_roster_can_start_run_and_confirm(self):
+        import tkinter as tk
+        from app import App
+        from workflow_service import WorkflowService
+        root = tk.Tk()
+        root.withdraw()
+        item = row("001")
+        class Bridge:
+            online = True
+
+            def call(self, action, payload):
+                if action == "cross_review_page":
+                    return dict(protocol=1, owner="复核对象", page=1, total=1, page_size=1,
+                                rows=[item])
+                if action == "status":
+                    return {"row": item}
+                if action == "search":
+                    return detail(item, right="002")
+                raise AssertionError(action)
+
+        app = App(root, service=WorkflowService(self.base), auto_load=False, bridge=Bridge())
+        self.addCleanup(root.destroy)
+        self.addCleanup(lambda: root.after_cancel(app.timer))
+        self.assertIsNone(app.roster)
+        app.notebook.select(app.pages["cross"])
+        panel = app.cross_review
+        panel.owner.set("复核对象")
+        with patch("core.fixed_roster_path", return_value=self.path.with_name("list.xlsx")):
+            panel.load_button.invoke()
+        self.assertEqual(str(app.start_button["state"]), "normal")
+        app.start_button.invoke()
+        while True:
+            kind, value = app.events.get(timeout=5)
+            if kind == "cross_result":
+                self.assertEqual(value, "本轮交叉核验结束。")
+                break
+        app.set_busy(False)
+        panel.render()
+        panel.tree.selection_set("001")
+        panel.note.set("认领工号不一致")
+        panel.reviewer.set("手动校对员")
+        panel.confirm_button.invoke()
+        self.assertEqual(self.values()[1], ("001", "认领工号不一致", "复核对象", "手动校对员"))
+        self.assertTrue(self.persisted()["001"]["feedback_synced"])
+
+    def test_start_requires_input_to_match_loaded_owner(self):
+        panel = self.panel()
+        panel.app.roster = None
+        panel.load()
+        panel.app.bridge = SimpleNamespace(online=True)
+        panel.app.stop = Event()
+        panel.app.set_busy = lambda busy: setattr(panel.app, "busy", busy)
+        panel.owner.set("另一个人")
+        with patch("cross_review_ui.threading.Thread") as thread:
+            panel.start()
+            thread.assert_not_called()
+            self.assertFalse(panel.app.busy)
+            panel.owner.set("复核对象")
+            panel.start()
+            thread.return_value.start.assert_called_once()
+            self.assertTrue(panel.app.busy)
 
     def test_panel_confirm_reports_success_only_after_sync(self):
         panel = self.panel()
@@ -175,7 +314,7 @@ class FeedbackTests(unittest.TestCase):
         panel.note.set("界面确认")
         panel.confirm()
         self.assertEqual(panel.app.status.get(), "已确认并同步到复核反馈.xlsx")
-        self.assertEqual(self.values()[1], ("001", "界面确认", "复核对象", "主界面校对员"))
+        self.assertEqual(self.values()[1], ("001", "界面确认", "复核对象", "手动校对员"))
         panel.app.status.set("等待同步")
         self.path.with_name("~$复核反馈.xlsx").touch()
         with patch("cross_review_ui.messages.showwarning") as warning:
@@ -258,10 +397,10 @@ class FeedbackTests(unittest.TestCase):
             book.close()
 
     def test_invalid_reviewer_does_not_confirm_or_write_json(self):
-        for reviewer in ("", UNASSIGNED_OWNER, " 空格 ", "复核对象", None):
+        for reviewer in ("", UNASSIGNED_OWNER, " 空格 ", "复核对象", "人" * 41, None):
             with self.subTest(reviewer=reviewer):
                 before = self.path.read_bytes()
-                with self.assertRaisesRegex(SafetyStop, "主界面"):
+                with self.assertRaisesRegex(SafetyStop, "校对人"):
                     self.review.confirm("001", "问题", reviewer)
                 self.assertNotIn("confirmed", self.review.data["rows"]["001"])
                 self.assertFalse(self.review.path.exists())
@@ -293,7 +432,7 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual(self.values()[1], ("001", "待补写", "复核对象", "原校对员"))
         self.assertEqual(panel.tree.item("001", "values")[2], "有问题")
 
-    def test_panel_uses_main_owner_and_keeps_failed_confirmation_visible(self):
+    def test_panel_uses_manual_reviewer_and_keeps_failed_confirmation_visible(self):
         self.review.save()
         panel = self.panel()
         panel.load()
@@ -310,7 +449,7 @@ class FeedbackTests(unittest.TestCase):
             self.assertEqual(panel.tree.item("001", "values")[2], "有问题·未同步")
         lock.unlink()
         panel.load()
-        self.assertEqual(self.values()[1], ("001", "从界面确认", "复核对象", "主界面校对员"))
+        self.assertEqual(self.values()[1], ("001", "从界面确认", "复核对象", "手动校对员"))
         self.assertTrue(self.persisted()["001"]["feedback_synced"])
 
     def test_readback_rejects_corruption_in_header_other_rows_sheets_or_target(self):

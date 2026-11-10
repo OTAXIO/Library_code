@@ -2,10 +2,12 @@
 import json
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk
 
+import core
 from core import SafetyStop
-from cross_review import CrossReview, review_owners
+from cross_review import CrossReview
 from notices import messages
 
 
@@ -14,14 +16,21 @@ class CrossReviewPanel(ttk.Frame):
         super().__init__(parent, padding=6)
         self.app = app
         self.owner = tk.StringVar(value="")
+        self.reviewer_path = Path(app.service.base) / "runtime/cross-review/reviewer.json"
+        self.reviewer = tk.StringVar(value=self.saved_reviewer())
         self.note = tk.StringVar()
         self.review = None
         controls = ttk.Frame(self)
         controls.pack(fill="x")
         ttk.Label(controls, text="复核对象").pack(side="left")
-        self.owners = ttk.Combobox(controls, textvariable=self.owner, state="readonly", width=13)
-        self.owners.pack(side="left", padx=6)
-        self.owners.bind("<<ComboboxSelected>>", lambda _: self.load())
+        self.owner_entry = ttk.Entry(controls, textvariable=self.owner, width=13)
+        self.owner_entry.pack(side="left", padx=6)
+        self.owner_entry.bind("<Return>", lambda _: self.load())
+        self.load_button = ttk.Button(controls, text="加载", command=self.load)
+        self.load_button.pack(side="left")
+        ttk.Label(controls, text="校对人").pack(side="left", padx=(12, 0))
+        self.reviewer_entry = ttk.Entry(controls, textvariable=self.reviewer, width=13)
+        self.reviewer_entry.pack(side="left", padx=6)
         self.tree = ttk.Treeview(self, columns=("sid", "title", "status"), show="headings", height=5,
                                  selectmode="browse")
         for key, title, width in (("sid", "SA ID", 190), ("title", "题名", 320), ("status", "复核状态", 90)):
@@ -38,22 +47,39 @@ class CrossReviewPanel(ttk.Frame):
         self.confirm_button = ttk.Button(footer, text="确认问题备注", command=self.confirm)
         self.confirm_button.pack(side="right", padx=(6, 0))
 
+    @staticmethod
+    def validated_name(value, label):
+        name = value.strip()
+        if not core.is_assigned_owner(name) or len(name) > 40:
+            raise SafetyStop(f"请输入 1–40 字的{label}，不能使用未分配占位名。")
+        return name
+
+    def saved_reviewer(self):
+        try:
+            data = json.loads(self.reviewer_path.read_text(encoding="utf-8"))
+            return self.validated_name(data["reviewer"], "校对人")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, SafetyStop):
+            return ""
+
     def controls(self):
-        names = review_owners(self.app.roster)
-        self.owners.configure(values=names, state="disabled" if self.app.busy else "readonly")
-        if self.owner.get() not in names:
-            self.owner.set("")
-            self.review = None
+        for widget in (self.owner_entry, self.load_button, self.reviewer_entry):
+            widget.configure(state="disabled" if self.app.busy else "normal")
         idle = not self.app.busy and self.review is not None
         self.confirm_button.configure(state="normal" if idle else "disabled")
         self.note_entry.configure(state="normal" if idle else "disabled")
 
     def load(self):
+        if self.app.busy:
+            return
         try:
-            if not self.app.roster:
-                raise SafetyStop("请先加载名册，再选择复核对象。")
-            self.review = CrossReview(self.app.service.base, self.owner.get(),
-                feedback_path=self.app.roster.path.parent / "复核反馈.xlsx") if self.owner.get() else None
+            owner = self.validated_name(self.owner.get(), "复核对象")
+            self.owner.set(owner)
+            try:
+                directory = core.fixed_roster_path().parent
+            except (SafetyStop, OSError):
+                directory = Path(self.app.service.base)
+            self.review = CrossReview(self.app.service.base, owner,
+                                      feedback_path=directory / "复核反馈.xlsx")
         except (SafetyStop, OSError, ValueError) as exc:
             self.review = None
             messages.showwarning("无法加载复核进度", str(exc), parent=self)
@@ -85,12 +111,11 @@ class CrossReviewPanel(ttk.Frame):
         self.details.configure(state="normal")
         self.details.delete("1.0", "end")
         self.details.insert("1.0", json.dumps(entry, ensure_ascii=False, indent=2) if entry else
-                            "选择处理人后读取网页已处理队列。确认问题备注即同步到复核反馈.xlsx。")
+                            "输入复核对象并加载后读取网页已处理队列。确认问题备注即同步到复核反馈.xlsx。")
         self.details.configure(state="disabled")
 
     def start(self):
-        if (self.app.busy or not self.review or self.owner.get() != self.review.owner
-                or self.owner.get() not in review_owners(self.app.roster)):
+        if self.app.busy or not self.review or self.owner.get() != self.review.owner:
             return
         bridge = self.app.bridge
         if not bridge or not bridge.online:
@@ -115,11 +140,24 @@ class CrossReviewPanel(ttk.Frame):
         selected = self.tree.selection()
         if self.app.busy or not self.review or not selected:
             return
+        preference_error = None
         try:
-            self.review.confirm(selected[0], self.note.get(), self.app.owner.get())
+            reviewer = self.validated_name(self.reviewer.get(), "校对人")
+            if reviewer == self.review.owner:
+                raise SafetyStop("校对人不能是被复核人。")
+            self.reviewer.set(reviewer)
+            try:
+                self.reviewer_path.parent.mkdir(parents=True, exist_ok=True)
+                self.reviewer_path.write_text(json.dumps({"reviewer": reviewer}, ensure_ascii=False),
+                                              encoding="utf-8")
+            except OSError as exc:
+                preference_error = exc
+            self.review.confirm(selected[0], self.note.get(), reviewer)
         except (SafetyStop, OSError) as exc:
             messages.showwarning("确认或同步未完成", str(exc), parent=self)
         else:
             self.app.status.set("已确认并同步到复核反馈.xlsx")
         finally:
             self.render()
+            if preference_error is not None:
+                self.app.status.set(self.app.status.get() + f"；校对人保存失败：{preference_error}")

@@ -12,10 +12,6 @@ from evidence_review import _comparison, _redact, paper_identity, role_suggestio
 from feedback_write import write_feedback
 
 
-def review_owners(roster):
-    return sorted({r.owner for r in roster.records if is_assigned_owner(r.owner)}) if roster else []
-
-
 def in_scope(row, owner):
     return isinstance(row, dict) and row.get("updateUsername") == owner and row.get("markStatus") == "已处理"
 
@@ -78,8 +74,8 @@ def assess(detail, original=None):
 
 class CrossReview:
     def __init__(self, base, owner, *, feedback_path=None):
-        if not is_assigned_owner(owner):
-            raise SafetyStop("请先选择复核对象。")
+        if not is_assigned_owner(owner) or len(owner) > 40:
+            raise SafetyStop("请输入 1–40 字的复核对象。")
         self.owner = owner
         self.feedback_path = Path(feedback_path) if feedback_path is not None else Path(base) / "复核反馈.xlsx"
         self.backup_dir = Path(base) / "runtime/backups"
@@ -188,8 +184,8 @@ class CrossReview:
             self.save()
 
     def confirm(self, sid, note, reviewer):
-        if not is_assigned_owner(reviewer) or reviewer == self.owner:
-            raise SafetyStop("请先在主界面负责人下拉框选好自己，校对人不能是被复核人。")
+        if not is_assigned_owner(reviewer) or len(reviewer) > 40 or reviewer == self.owner:
+            raise SafetyStop("请输入 1–40 字的校对人，校对人不能是被复核人。")
         note = note.strip()
         if not note or len(note) > 1000:
             raise SafetyStop("请填写 1–1000 字的已确认问题。")
@@ -209,7 +205,7 @@ class CrossReview:
             self.save()
             try:
                 if not entry.get("reviewer"):
-                    raise SafetyStop("历史确认缺少校对人，请在主界面选好自己后重新确认该条。")
+                    raise SafetyStop("历史确认缺少校对人，请在交叉核验页输入校对人后重新确认该条。")
                 write_feedback(self.feedback_path, self.backup_dir, sid, entry["confirmed"],
                                self.owner, entry["reviewer"])
             except SafetyStop as exc:
