@@ -51,6 +51,35 @@ test('library resolution dispatches only to the separately bound import tab', as
   assert.equal(calls[0].world,'MAIN');
 });
 
+test('frontend search runs only in the bound, signed-in frontend tab, moved onto its search route', async()=>{
+  const calls=[],updates=[];
+  let url='http://www.ir.lib.sjtu.edu.cn/itemDetail?id=1';
+  const sandbox={URL,Date,setTimeout,runFrontCommand(){},chrome:{
+    tabs:{get:async()=>({id:4,active:true,status:'complete',url}),
+      update:async(id,change)=>{updates.push([id,change]);if(change.url)url=change.url;}},
+    scripting:{executeScript:async input=>{calls.push(input);return [{result:{ok:true,data:{front_search_protocol:1}}}];}},
+  }};
+  loadPolicy(sandbox);
+  const result=await sandbox.dispatchWorkflow({action:'front_search',field:'doi',text:'10.1/x',expires:Date.now()+30000},
+    {tabId:1,frontTabId:4});
+  assert.equal(result.data.front_search_protocol,1);
+  assert.equal(JSON.stringify(updates),JSON.stringify([[4,{url:'http://www.ir.lib.sjtu.edu.cn/simpleSearch'}]]));
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].target.tabId,4);
+  assert.equal(calls[0].func,sandbox.runFrontCommand);
+  assert.equal(calls[0].world,'MAIN');
+  // Unbound, the SA tab itself, a login page or another host never run it.
+  for(const [pair,page] of [[{tabId:1},url],[{tabId:4,frontTabId:4},url],
+      [{tabId:1,frontTabId:4},'http://www.ir.lib.sjtu.edu.cn/login?redirect=%2F'],
+      [{tabId:1,frontTabId:4},'http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list']]){
+    url=page;
+    await assert.rejects(sandbox.dispatchWorkflow({action:'front_search',expires:Date.now()+30000},pair));
+  }
+  assert.equal(calls.length,1);
+  assert.match(policy.workflowBindingError('http://www.ir.lib.sjtu.edu.cn/login','frontTabId',false),/前台/);
+  assert.equal(policy.workflowBindingError('https://www.ir.lib.sjtu.edu.cn/simpleSearch','frontTabId',false),'');
+});
+
 test('invalid import binding reports a page error without accessing command globals', () => {
   assert.match(policy.workflowBindingError('http://admin.ir.lib.sjtu.edu.cn/#/item/entryManage','importTabId',false),/普通/);
   assert.match(policy.workflowBindingError('http://admin.ir.lib.sjtu.edu.cn/#/wel/index','importTabId',false),/不是后台/);

@@ -1,4 +1,4 @@
-importScripts("adapter.js", "import-adapter.js", "excel-adapter.js", "wos-adapter.js", "workflow-background.js", "page-diagnostics.js", "library-adapter.js");
+importScripts("adapter.js", "import-adapter.js", "excel-adapter.js", "wos-adapter.js", "workflow-background.js", "page-diagnostics.js", "library-adapter.js", "front-adapter.js");
 let polling = false;
 let busy = false;
 let updatingConnection = false;
@@ -82,7 +82,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return withIdleConnection(async () => {
         const pair = await chrome.storage.session.get(["token", "tabId"]);
         if (!pair.token) throw new Error("请先粘贴桌面配对码，连接当前 WOS 或 SA 页");
-        if (!["wosTabId", "importTabId"].includes(message.role)) throw new Error("未知工作页类型");
+        if (!["wosTabId", "importTabId", "frontTabId"].includes(message.role)) throw new Error("未知工作页类型");
         const tab = await chrome.tabs.get(message.tabId);
         const bindingError=workflowBindingError(tab.url,message.role,tab.id===pair.tabId);
         if(bindingError)throw new Error(bindingError);
@@ -105,7 +105,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function pollBridge(senderTab, fromAlarm=false) {
     if (polling || busy || updatingConnection) return {ok: true};
-    const pair = await chrome.storage.session.get(["token", "tabId", "wosTabId", "importTabId", "mode"]);
+    const pair = await chrome.storage.session.get(["token", "tabId", "wosTabId", "importTabId", "frontTabId", "mode"]);
     const primaryValid=url=>pair.mode==="wos"?isWOSPage(url):validPage(url);
     // A background SA tab can throttle its interval; a bound active WOS/import
     // tab may wake the same authenticated client. Unbound/changed tabs cannot.

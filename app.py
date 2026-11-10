@@ -80,6 +80,7 @@ class App:
         explanations = {
             "claim": ("自动认领", "单匹配任务：核对人员编号与署名 → 认领 → 网页批注 → 回写名单。"),
             "import": ("零匹配 · 需导入", "零匹配任务：只读核对网页匹配数仍为 0 → 网页备注“需导入”并设为已处理 → 名单备注“需导入”、是否识别 1。不入库、不认领。"),
+            "evidence": ("证据核验", "读取两侧证据并查找馆藏候选。结果显示在条目详情，报告保存在 runtime/evidence-reviews。"),
         }
         for mode, (title, explanation) in explanations.items():
             page = ttk.Frame(self.notebook, padding=(2, 4))
@@ -103,12 +104,16 @@ class App:
             scroll = ttk.Scrollbar(table, orient="vertical", command=tree.yview)
             scroll.pack(side="right", fill="y")
             tree.configure(yscrollcommand=scroll.set)
-            detail = tk.Text(page, height=3, wrap="word")
+            detail = tk.Text(page, height=8 if mode == "evidence" else 3, wrap="word")
             style_text(detail)
             detail.grid(row=2, column=0, sticky="ew", pady=(8, 0))
             detail.configure(state="disabled")
             self.trees[mode], self.details[mode] = tree, detail
             tree.bind("<<TreeviewSelect>>", lambda _, selected=mode: self.show_selected(selected))
+        from cross_review_ui import CrossReviewPanel
+        self.cross_review = CrossReviewPanel(self.notebook, self)
+        self.pages["cross"] = self.cross_review
+        self.notebook.add(self.cross_review, text="交叉核验")
         self.notebook.bind("<<NotebookTabChanged>>", lambda _: self.render())
         bottom = ttk.Frame(frame)
         bottom.grid(row=3, column=0, sticky="ew", pady=(10, 6))
@@ -127,18 +132,30 @@ class App:
                   style="Muted.TLabel").grid(row=5, column=0, sticky="w", pady=(5, 0))
 
     def mode(self):
-        return "import" if self.notebook.select() == str(self.pages["import"]) else "claim"
+        return next((mode for mode, page in self.pages.items() if str(page) == self.notebook.select()), "claim")
 
     def configure_actions(self):
-        disabled = self.busy or self.scope.get() == "已完成"
-        retry=self.scope.get()=='重试跳过项'
-        self.start_button.configure(text='重新检查全部跳过项' if retry else
+        self.cross_review.controls()
+        cross = self.mode() == "cross"
+        for widget in (self.owner_box, self.scope_box):
+            widget.configure(state="disabled" if self.busy or cross else "readonly")
+        if cross:
+            self.limit_box.configure(state="disabled")
+            self.start_button.configure(text="开始核验", state="normal" if self.cross_review.review and
+                                        not self.busy else "disabled")
+            self.skip_button.configure(state="disabled")
+            self.review_button.configure(state="disabled")
+            return
+        evidence = self.mode() == "evidence"
+        disabled = self.busy or (not evidence and self.scope.get() == "已完成")
+        retry = self.scope.get() == '重试跳过项' and not evidence
+        self.start_button.configure(text="开始只读核验" if evidence else '重新检查全部跳过项' if retry else
             "开始标注需导入" if self.mode() == "import" else "开始自动认领",
             state="disabled" if disabled else "normal")
         self.limit_box.configure(state="disabled" if self.busy or retry else "normal")
         owned = is_assigned_owner(self.owner.get())
         selected = self.trees[self.mode()].selection()
-        can_skip = not self.busy and self.scope.get() == "待处理" and owned and len(selected) == 1
+        can_skip = not evidence and not self.busy and self.scope.get() == "待处理" and owned and len(selected) == 1
         self.skip_button.configure(state="normal" if can_skip else "disabled")
         self.review_button.configure(state="normal" if not self.busy and self.roster and owned else "disabled")
 
@@ -173,6 +190,10 @@ class App:
                 tree.selection_set(selection[0])
             self.show_selected(mode)
         mode = self.mode()
+        if mode == "cross":
+            self.counts.set("交叉核验 · 独立复核进度")
+            self.configure_actions()
+            return
         rows = self.service.visible(self.roster, mode, self.owner.get(), "all")
         self.counts.set(f"待处理 {sum(not r.done and not r.skipped for r in rows)}  ·  "
                         f"已跳过 {sum(r.skipped and not r.done for r in rows)}  ·  已完成 {sum(r.done for r in rows)}")
@@ -266,11 +287,14 @@ class App:
     def start(self):
         if self.busy:
             return
+        if self.mode() == "cross":
+            self.cross_review.start()
+            return
         try:
             mode, scope = self.mode(), SCOPES[self.scope.get()]
-            if scope!='skipped' and not self.limit.get().strip().isdigit():
+            if (scope != 'skipped' or mode == "evidence") and not self.limit.get().strip().isdigit():
                 raise SafetyStop("本轮条数须为 1–100 的整数。")
-            records = self.service.select(self.roster, mode, self.owner.get(),
+            records = None if mode == "evidence" else self.service.select(self.roster, mode, self.owner.get(),
                 100 if scope=='skipped' else int(self.limit.get()), scope)
             if not self.bridge or not self.bridge.online:
                 raise SafetyStop("请先连接浏览器：在 SA 比对结果页扩展中配对。")
@@ -279,13 +303,18 @@ class App:
             return
         self.stop.clear()
         self.set_busy(True)
-        self.status.set(f"开始{'标注需导入' if mode == 'import' else '认领'} {len(records)} 条，运行中请勿手动操作工作页。")
+        limit = int(self.limit.get()) if mode == "evidence" else None
+        self.status.set("开始只读核验。" if mode == "evidence" else
+                        f"开始{'标注需导入' if mode == 'import' else '认领'} {len(records)} 条，运行中请勿手动操作工作页。")
         roster, bridge, owner = self.roster, self.bridge, self.owner.get()
         def work():
             try:
                 progress = lambda text: self.events.put(("progress", text))
-                result = self.service.run(roster, records, mode, scope, bridge, self.stop, progress,
-                                          need_import=mode == "import", owner=owner)
+                if mode == "evidence":
+                    result = self.service.review_evidence(roster, owner, scope, limit, bridge, self.stop, progress)
+                else:
+                    result = self.service.run(roster, records, mode, scope, bridge, self.stop, progress,
+                                              need_import=mode == "import", owner=owner)
                 self.events.put(("result", result))
             except Exception as exc:
                 from run_diagnostics import safe_text
@@ -314,6 +343,10 @@ class App:
             except queue.Empty:
                 break
             if kind == "progress":
+                self.status.set(value)
+            elif kind == "cross_result":
+                self.set_busy(False)
+                self.cross_review.render()
                 self.status.set(value)
             elif kind == "result":
                 self.roster, self.last_results = value.roster, value.messages

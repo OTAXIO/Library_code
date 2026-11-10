@@ -1,5 +1,6 @@
 /* Called only by the authenticated bridge dispatcher, never by webpage messages. */
-const workflowRole = action => action.startsWith("import_") ? "importTabId" : action.startsWith("wos_") ? "wosTabId" : null;
+const workflowRole = action => action.startsWith("import_") ? "importTabId" : action.startsWith("wos_") ? "wosTabId" :
+  action.startsWith("front_") ? "frontTabId" : null;
 const wosOrigins = ["https://www.webofscience.com", "https://webofscience.clarivate.cn"];
 const staleWOSZeroError = "[WOS 已暂停] WOS 检索页保留上一条零结果，需刷新检索页";
 const shouldReloadWOSSearch = result => result?.ok === false && result.error === staleWOSZeroError;
@@ -10,6 +11,8 @@ const isWOSPage = url => {
 const validRolePage = (url,role) => {
   try {const u=new URL(url);
     return role==="wosTabId" ? isWOSPage(url) :
+      role==="frontTabId" ? ["http:","https:"].includes(u.protocol) && u.hostname==="www.ir.lib.sjtu.edu.cn" &&
+        !u.username && !u.password && !u.pathname.startsWith("/login") :
       role==="importTabId" && ["http:","https:"].includes(u.protocol) && u.hostname==="admin.ir.lib.sjtu.edu.cn" &&
       u.hash.split("?")[0]==="#/collectItem/batchManage";
   } catch {return false;}
@@ -51,6 +54,7 @@ function wosSearchTimeout(diagnostic) {
 function workflowBindingError(url,role,sameSATab) {
   if(sameSATab)return "当前标签页已用于 SA 比对，请保留它，并在独立标签页打开 WOS 或导入管理页后绑定";
   if(validRolePage(url,role))return "";
+  if(role==="frontTabId")return "当前不是已登录的机构库前台（www.ir.lib.sjtu.edu.cn）。请在独立标签页登录前台后再点击“绑定当前前台页”";
   if(role==="wosTabId")return "当前 WOS 网址不受支持或仍在登录入口。请切换到 www.webofscience.com 或 webofscience.clarivate.cn 的 /wos/ 页面，再点击“绑定当前 WOS 页”";
   if(role==="importTabId") {
     try {const u=new URL(url);
@@ -89,7 +93,7 @@ async function dispatchWorkflow(command,pair) {
   if(!Number.isFinite(command.expires) || Date.now()>=command.expires-2500)throw new Error("工作命令已过期，未执行");
   const role=workflowRole(command.action), id=pair[role];
   if(!Number.isInteger(id) || (id===pair.tabId && !(role==="wosTabId" && pair.mode==="wos")))
-    throw new Error(role==="wosTabId"?"请连接或绑定 WOS 标签页":"请绑定数据导入与批次管理标签页");
+    throw new Error(role==="wosTabId"?"请连接或绑定 WOS 标签页":role==="frontTabId"?"请在已登录的机构库前台标签页点击“绑定当前前台页”":"请绑定数据导入与批次管理标签页");
   let tab=await chrome.tabs.get(id);
   if(!validRolePage(tab.url,role))throw new Error("绑定的工作标签页已切换或未登录，请人工返回");
   const workOrigin=new URL(tab.url).origin;
@@ -150,6 +154,22 @@ async function dispatchWorkflow(command,pair) {
       export_submission_protocol:1,download_wait_protocol:1,
       search_submission_protocol:1,result_link_protocol:1,search_navigation_protocol:1,
       result_reader:'shared-diagnostic',read_results_world:'ISOLATED',page}};
+  }
+  if(role==="frontTabId") {
+    if(command.action!=="front_search")throw new Error("未知前台命令");
+    // Read-only: the bound tab is moved only onto the frontend's own search
+    // route, then the mounted component is queried. Nothing is submitted.
+    if(new URL(tab.url).pathname!=="/simpleSearch"){
+      await chrome.tabs.update(id,{url:workOrigin+"/simpleSearch"});
+      const end=Math.min(Date.now()+20000,command.expires-8000);
+      while(Date.now()<end){
+        await new Promise(r=>setTimeout(r,250));
+        tab=await chrome.tabs.get(id);
+        if(tab.status==="complete"&&validRolePage(tab.url,role)&&new URL(tab.url).pathname==="/simpleSearch")break;
+      }
+      if(new URL(tab.url).pathname!=="/simpleSearch")throw new Error("前台未进入检索结果页（可能需要重新登录），未检索");
+    }
+    return execute(runFrontCommand,command);
   }
   if(role==="importTabId") {
     if(command.action==='import_resolve'||command.action==='import_excel_resolve')return execute(resolveLibraryRecord,command);

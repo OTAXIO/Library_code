@@ -414,10 +414,21 @@ class MinimalUITests(unittest.TestCase):
         self.app.render()
         self.root.update_idletasks()
 
-    def test_only_two_tabs_topmost_and_no_runtime_created_by_opening(self):
-        self.assertEqual([self.app.notebook.tab(t, "text") for t in self.app.notebook.tabs()], ["自动认领", "零匹配 · 需导入"])
+    def test_workflow_tabs_topmost_and_no_runtime_created_by_opening(self):
+        self.assertEqual([self.app.notebook.tab(t, "text") for t in self.app.notebook.tabs()],
+                         ["自动认领", "零匹配 · 需导入", "证据核验", "交叉核验"])
         self.assertTrue(self.root.attributes("-topmost"))
         self.assertFalse((self.service.base / "runtime").exists())
+
+    def test_cross_review_defaults_to_no_selection_and_sends_no_command(self):
+        self.app.notebook.select(self.app.pages["cross"])
+        self.app.render()
+        self.assertEqual(self.app.cross_review.owner.get(), "")
+        self.assertEqual(len(self.app.cross_review.owners["values"]),
+                         len(set(self.app.cross_review.owners["values"])))
+        self.assertEqual(str(self.app.start_button["state"]), "disabled")
+        self.app.start()
+        self.app.bridge.call.assert_not_called()
 
     def test_completed_view_is_readonly_and_skipped_retry_explicit(self):
         self.app.scope.set("已完成")

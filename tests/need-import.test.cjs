@@ -6,6 +6,23 @@ before(async()=>{browser=await chromium.launch({headless:true,executablePath:'C:
  const context=await browser.newContext();const fixture=fs.readFileSync(path.join(__dirname,'fixtures/compare.html'),'utf8');
  await context.route('**/*',r=>r.fulfill({status:200,contentType:'text/html',body:fixture}));page=await context.newPage();});
 after(async()=>{await browser?.close();});
+test('cross review sets handler and processed filters, reads the requested page and rejects mixed rows',async()=>{
+ await page.goto('http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list');
+ await page.evaluate(()=>{
+  synthetic.markStatus='已处理'; synthetic.updateUsername='测试员';
+  vm.getData=async function(){
+   if(this.searchForm.markStatus!=='已处理'||this.searchForm.updateUsername!=='测试员'||
+      this.searchForm.saLzkId!==''||this.page.currentPage!==2) throw Error('Wrong scope');
+   this.tableData=[{...synthetic}];this.page.total=11;
+  };
+ });
+ const request={action:'cross_review_page',owner:'测试员',page:2,expires:Date.now()+60000};
+ const answer=await page.evaluate(runSACommand,request);
+ assert.equal(answer.ok,true,JSON.stringify(answer));assert.equal(answer.data.page,2);
+ await page.evaluate(()=>{synthetic.updateUsername='他人'});
+ assert.equal((await page.evaluate(runSACommand,request)).ok,false);
+ assert.equal(await page.evaluate(()=>writeCount),0);
+});
 const command=(action,extra={})=>({action,sa_id:'demo-001',expires:Date.now()+60000,...extra});
 async function zeroRow(changes={}){
  await page.goto('about:blank');await page.goto('http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list');

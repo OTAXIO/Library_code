@@ -46,13 +46,42 @@ class WorkflowService:
 
     @staticmethod
     def visible(roster, mode, owner, scope):
-        if not roster or mode not in ("claim", "import"):
+        if not roster or mode not in ("claim", "import", "evidence"):
             return []
         return [r for r in roster.records if r.owner == owner
-                and (r.matches == 0 if mode == "import" else supported_claim(r))
+                and (mode == "evidence" or (r.matches == 0 if mode == "import" else supported_claim(r)))
                 and (scope == "all" or scope == "done" and r.done
                      or scope == "pending" and not r.done and not r.skipped
                      or scope == "skipped" and not r.done and r.skipped)]
+
+    def review_evidence(self, roster, owner, scope, limit, bridge, stop, progress):
+        from evidence_review import inspect_record, save_report
+        require_owner(owner)
+        if not roster or type(limit) is not int or not 1 <= limit <= 100:
+            raise SafetyStop("请读取名单并指定 1–100 条核验范围。")
+        entries, messages = [], {}
+        records = self.visible(roster, "evidence", owner, scope)[:limit]
+        if not records:
+            raise SafetyStop("当前范围没有可核验记录。")
+        for record in records:
+            if stop.is_set():
+                break
+            roster.assert_unchanged()
+            progress("只读核验 " + record.sa_id)
+            def call(action, payload):
+                roster.assert_unchanged()
+                if stop.is_set() or action not in {"status", "search", "front_search"}:
+                    raise SafetyStop("只读核验已暂停。")
+                return bridge.call(action, payload)
+            try:
+                entry = inspect_record(self.base, record, call)
+            except (SafetyStop, OSError, ValueError, TypeError):
+                entry = {"sa_id": record.sa_id, "判定": "待核", "待核原因": "网页、名单或原文证据未能核实"}
+            entries.append(entry)
+            messages[record.sa_id] = json.dumps(entry, ensure_ascii=False, indent=2)
+        path = save_report(self.base, entries)
+        return TaskResult(roster, messages, f"只读核验 {len(entries)} 条，报告 {path.name}",
+                          cancelled=stop.is_set(), report_path=str(path))
 
     def select(self, roster, mode, owner, limit, scope):
         if not roster:
