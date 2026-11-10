@@ -126,6 +126,7 @@ class CrossReviewPanel(ttk.Frame):
         self.app.set_busy(True)
         def work():
             outcome = "本轮交叉核验结束。"
+            failed = False
             try:
                 review.run(bridge, self.app.stop, lambda value: self.app.events.put(("progress", value)))
                 if self.app.stop.is_set():
@@ -133,7 +134,8 @@ class CrossReviewPanel(ttk.Frame):
             except Exception as exc:
                 from run_diagnostics import safe_text
                 outcome = "复核暂停：" + safe_text(exc, (getattr(bridge, "token", ""),))
-            self.app.events.put(("cross_result", outcome))
+                failed = not self.app.stop.is_set()
+            self.app.events.put(("cross_result", (outcome, failed)))
         threading.Thread(target=work, daemon=True).start()
 
     def confirm(self):

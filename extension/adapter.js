@@ -59,6 +59,9 @@ async function runSACommand(command) {
   try {
     check();
     const scan = command.action === "cross_review_page";
+    if (scan && command.page_size !== undefined &&
+        (!Number.isInteger(command.page_size) || command.page_size < 1 || command.page_size > 1000))
+      stop("复核 page_size 必须是 1–1000 的整数，未操作页面");
     if (![ "cross_review_page", "status", "search", "open_metadata", "open_claim", "inspect_claim", "prepare_claim", "submit_claim", "repair_correspondent", ...reassignmentActions, "link", "complete"].includes(command.action)) stop("不支持的命令");
     if (!scan && (typeof command.sa_id !== "string" || !command.sa_id || command.sa_id.length > 160)) stop("名单 ID 不合法");
     if (command.close_detail !== undefined &&
@@ -97,15 +100,21 @@ async function runSACommand(command) {
           command.page > 10000 || vm.loading || visibleAll(".el-dialog, .el-message-box, .el-drawer").length)
         stop("无法确认复核范围或有打开的操作窗口");
       const filters = {saLzkId: "", markStatus: "已处理", updateUsername: command.owner};
-      await query(filters, command.page);
-      if (vm.page.currentPage !== command.page ||
-          Object.entries(filters).some(([key, value]) => vm.searchForm[key] !== value))
-        stop("复核查询的筛选条件已变化");
-      const rows = vm.tableData.map(snap);
-      if (rows.some(row => row.updateUsername !== command.owner || row.markStatus !== "已处理" || !row.saLzkId))
-        stop("复核查询混入其他处理人或状态");
-      return {ok: true, data: {protocol: 1, owner: command.owner, page: command.page,
-        total: Number(vm.page.total), page_size: Number(vm.page.pageSize), rows}};
+      const originalSize = vm.page.pageSize;
+      try {
+        if (command.page_size !== undefined) vm.page.pageSize = command.page_size;
+        await query(filters, command.page);
+        if (vm.page.currentPage !== command.page ||
+            Object.entries(filters).some(([key, value]) => vm.searchForm[key] !== value))
+          stop("复核查询的筛选条件已变化");
+        const rows = vm.tableData.map(snap);
+        if (rows.some(row => row.updateUsername !== command.owner || row.markStatus !== "已处理" || !row.saLzkId))
+          stop("复核查询混入其他处理人或状态");
+        return {ok: true, data: {protocol: 1, owner: command.owner, page: command.page,
+          total: Number(vm.page.total), page_size: command.page_size ?? Number(vm.page.pageSize), rows}};
+      } finally {
+        if (command.page_size !== undefined) vm.page.pageSize = originalSize;
+      }
     }
     const fresh = async () => {
       await query();

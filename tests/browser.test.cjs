@@ -23,6 +23,70 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
   const execute = value => page.evaluate(runSACommand, value);
   const cases = [];
   const test = (name, fn) => cases.push([name,fn]);
+  test('cross review uses optional page_size and restores it after success or failure',async()=>{
+    for(const failure of ['none','query','scope','snapshot','filters']) {
+      await reset();
+      await page.evaluate(failure=>{
+        synthetic.markStatus='已处理';synthetic.updateUsername='测试员';
+        vm.getData=async function(){
+          window.queryCount=(window.queryCount||0)+1;
+          window.requestSize=this.page.pageSize;
+          if(failure==='query')throw Error('Synthetic query failure');
+          this.tableData=[{...synthetic}];this.page.total=1;
+          if(failure==='scope')this.tableData[0].updateUsername='其他人';
+          if(failure==='snapshot')this.tableData[0].saLzkId=123;
+          if(failure==='filters')this.searchForm.markStatus='待处理';
+        };
+      },failure);
+      const result=await execute(command('cross_review_page',{owner:'测试员',page:1,page_size:188}));
+      assert.equal(result.ok,failure==='none',JSON.stringify(result));
+      if(result.ok)assert.equal(result.data.page_size,188);
+      assert.equal(await page.evaluate(()=>window.requestSize),188);
+      assert.equal(await page.evaluate(()=>vm.page.pageSize),10);
+      assert.equal(await page.evaluate(()=>window.queryCount),1);
+      assert.equal(await page.evaluate(()=>writeCount),0);
+    }
+  });
+  test('cross review rejects invalid page_size before changing the page or querying',async()=>{
+    for(const size of [0,-1,1001,1.5,'50',null,true]) {
+      const before=await page.evaluate(()=>JSON.stringify([vm.searchForm,vm.page,window.queryCount||0]));
+      const result=await execute(command('cross_review_page',{owner:'测试员',page:1,page_size:size}));
+      assert.equal(result.ok,false,JSON.stringify(size));
+      assert.equal(await page.evaluate(()=>JSON.stringify([vm.searchForm,vm.page,window.queryCount||0])),before);
+    }
+  });
+  test('cross review accepts both page_size boundaries and preserves other guards',async()=>{
+    await page.evaluate(()=>{
+      synthetic.markStatus='已处理';synthetic.updateUsername='测试员';
+      const getData=vm.getData;
+      vm.getData=function(){window.requestSize=this.page.pageSize;return getData.call(this);};
+    });
+    for(const size of [1,1000]) {
+      const result=await execute(command('cross_review_page',{owner:'测试员',page:1,page_size:size}));
+      assert.equal(result.ok,true,JSON.stringify(result));
+      assert.equal(result.data.page_size,size);
+      assert.equal(await page.evaluate(()=>window.requestSize),size);
+      assert.equal(await page.evaluate(()=>vm.page.pageSize),10);
+    }
+    const queries=await page.evaluate(()=>window.queryCount);
+    await page.evaluate(()=>document.getElementById('status').style.display='block');
+    assert.equal((await execute(command('cross_review_page',{owner:'测试员',page:1,page_size:1000}))).ok,false);
+    assert.equal(await page.evaluate(()=>window.queryCount),queries);
+    assert.equal(await page.evaluate(()=>vm.page.pageSize),10);
+  });
+  test('cross review without page_size keeps default query size and scope checks',async()=>{
+    await page.evaluate(()=>{
+      synthetic.markStatus='已处理';synthetic.updateUsername='测试员';
+      const getData=vm.getData;
+      vm.getData=function(){window.requestSize=this.page.pageSize;return getData.call(this);};
+    });
+    const result=await execute(command('cross_review_page',{owner:'测试员',page:1}));
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.equal(result.data.page_size,10);
+    assert.equal(await page.evaluate(()=>window.requestSize),10);
+    assert.equal(await page.evaluate(()=>vm.page.pageSize),10);
+    assert.equal(await page.evaluate(()=>window.queryCount),1);
+  });
   test('search returns exact record and plaintext comparison',async()=>{
     const result=await execute(command('search'));
     assert.equal(result.ok,true,JSON.stringify(result));

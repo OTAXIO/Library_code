@@ -30,6 +30,204 @@ def detail(item, right="001", state="已认领", title="Example", journal="Journ
 
 
 class ReviewTests(unittest.TestCase):
+    def test_scan_reads_all_in_two_requests(self):
+        with tempfile.TemporaryDirectory() as folder:
+            review = CrossReview(folder, "复核对象")
+            calls, updates = [], []
+            def call(action, payload):
+                calls.append((action, payload))
+                size = payload.get("page_size", 10)
+                return dict(protocol=1, owner="复核对象", page=1, total=188,
+                            page_size=size, rows=[row(str(i)) for i in range(min(size, 188))])
+            review.scan(call, Event(), updates.append)
+            self.assertEqual(calls, [("cross_review_page", {"owner": "复核对象", "page": 1}),
+                                     ("cross_review_page", {"owner": "复核对象", "page": 1, "page_size": 188})])
+            saved = CrossReview(folder, "复核对象").data
+            self.assertTrue(saved["ready"])
+            self.assertEqual(set(saved["rows"]), {str(i) for i in range(188)})
+            self.assertEqual((saved["scanned"], saved["total"], saved["page_size"]), (188, 188, 188))
+            self.assertIn("一次读取 188 条", updates[-1])
+
+    def test_scan_rejects_old_extension(self):
+        with tempfile.TemporaryDirectory() as folder:
+            review = CrossReview(folder, "复核对象")
+            def call(action, payload):
+                return dict(protocol=1, owner="复核对象", page=1, total=188,
+                            page_size=10, rows=[row(str(i)) for i in range(10)])
+            with self.assertRaisesRegex(SafetyStop, "扩展未更新到 0.4.63.*重载扩展后重新配对"):
+                review.scan(call, Event(), lambda _: None)
+            self.assertFalse(CrossReview(folder, "复核对象").data["ready"])
+
+    def test_scan_cap_collects_drifting_pages_or_stops_after_eight_passes(self):
+        import random
+        for complete in (True, False):
+            with self.subTest(complete=complete), tempfile.TemporaryDirectory() as folder:
+                review = CrossReview(folder, "复核对象")
+                calls, updates = [], []
+                rng = random.Random(42)
+                def call(action, payload):
+                    calls.append(payload)
+                    size = payload.get("page_size", 10)
+                    if size == 10:
+                        ids = list(range(10))
+                    elif size == 120:
+                        ids = list(range(50))
+                    else:
+                        self.assertEqual(size, 50)
+                        count = min(size, 120 - (payload["page"] - 1) * size)
+                        ids = rng.sample(range(120 if complete else 119), count)
+                    return dict(protocol=1, owner="复核对象", page=payload["page"], total=120,
+                                page_size=size, rows=[row(str(i)) for i in ids])
+                if complete:
+                    review.scan(call, Event(), updates.append)
+                    self.assertEqual(set(review.data["rows"]), {str(i) for i in range(120)})
+                    self.assertTrue(review.data["ready"])
+                else:
+                    with self.assertRaisesRegex(SafetyStop, "读 8 遍后仍只收齐 119/120"):
+                        review.scan(call, Event(), updates.append)
+                    self.assertEqual([p["page"] for p in calls[2:]], [1, 2, 3] * 8)
+                    self.assertFalse(CrossReview(folder, "复核对象").data["ready"])
+                self.assertTrue(all(p["page_size"] == 50 for p in calls[2:]))
+                self.assertEqual(review.data["page_size"], 50)
+
+    def test_scan_rejects_invalid_full_receipts(self):
+        for change in ({"total": 5}, {"rows": [row("a", "其他人"), row("b"), row("c"), row("d")]},
+                       {"rows": [row("a"), row("a"), row("c"), row("d")]},
+                       {"rows": [row(""), row("b"), row("c"), row("d")]},
+                       {"rows": []}, {"rows": [row(str(i)) for i in range(5)]}):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as folder:
+                review = CrossReview(folder, "复核对象")
+                def call(action, payload):
+                    size = payload.get("page_size", 2)
+                    result = dict(protocol=1, owner="复核对象", page=1, total=4,
+                                  page_size=size, rows=[row(sid) for sid in "abcd"[:size]])
+                    if "page_size" in payload:
+                        result.update(change)
+                    return result
+                with self.assertRaises(SafetyStop):
+                    review.scan(call, Event(), lambda _: None)
+                self.assertFalse(CrossReview(folder, "复核对象").data["ready"])
+
+    def test_scan_over_1000_uses_requested_size_and_rejects_receipt_changes(self):
+        for change in (None, {"total": 1002}, {"page_size": 10}):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as folder:
+                review = CrossReview(folder, "复核对象")
+                calls = []
+                def call(action, payload):
+                    calls.append(payload)
+                    size = payload.get("page_size", 10)
+                    page = payload["page"]
+                    result = dict(protocol=1, owner="复核对象", page=page, total=1001,
+                                  page_size=size, rows=[row(str(i)) for i in
+                                                       range((page - 1) * size, min(page * size, 1001))])
+                    if page == 2 and change:
+                        result.update(change)
+                    return result
+                if change:
+                    with self.assertRaises(SafetyStop):
+                        review.scan(call, Event(), lambda _: None)
+                    self.assertFalse(review.data["ready"])
+                else:
+                    review.scan(call, Event(), lambda _: None)
+                    self.assertTrue(review.data["ready"])
+                    self.assertEqual(len(review.data["rows"]), 1001)
+                self.assertTrue(all(p["page_size"] == 1000 for p in calls[1:]))
+
+    def test_scan_resume_preserves_results_with_new_total_and_order(self):
+        with tempfile.TemporaryDirectory() as folder:
+            review = CrossReview(folder, "复核对象")
+            entries = {str(i): {"title": "旧题名", "status": "未核验"} for i in range(30)}
+            entries["0"].update(status="通过", issues=[], pending=[], confirmed="保留结果")
+            review.data.update(rows=entries, scanned=30, total=188, page_size=10)
+            review.save()
+            review = CrossReview(folder, "复核对象")
+            ids = [str(i) for i in reversed(range(31))]
+            calls = []
+            def call(action, payload):
+                page = payload["page"]
+                calls.append(payload.copy())
+                size = payload.get("page_size", 10)
+                return dict(protocol=1, owner="复核对象", page=page, total=31, page_size=size,
+                            rows=[row(sid) for sid in ids[:size]])
+            review.scan(call, Event(), lambda _: None)
+            saved = CrossReview(folder, "复核对象").data
+            self.assertEqual(calls, [{"owner": "复核对象", "page": 1},
+                                     {"owner": "复核对象", "page": 1, "page_size": 31}])
+            self.assertTrue(saved["ready"])
+            self.assertEqual(set(saved["rows"]), set(ids))
+            self.assertEqual(saved["rows"]["0"], entries["0"])
+            self.assertEqual((saved["scanned"], saved["total"]), (31, 31))
+
+    def test_scan_rejects_missing_old_queue_ids_after_collection(self):
+        with tempfile.TemporaryDirectory() as folder:
+            review = CrossReview(folder, "复核对象")
+            review.data["rows"]["old"] = {"status": "通过"}
+            review.save()
+            def call(action, payload):
+                return dict(protocol=1, owner="复核对象", page=1, total=1,
+                            page_size=payload.get("page_size", 10), rows=[row("new")])
+            with self.assertRaisesRegex(SafetyStop, "已入队的 1 条不在当前已处理列表"):
+                review.scan(call, Event(), lambda _: None)
+            saved = CrossReview(folder, "复核对象").data
+            self.assertFalse(saved["ready"])
+            self.assertEqual(set(saved["rows"]), {"old", "new"})
+            self.assertEqual(saved["rows"]["old"]["status"], "通过")
+
+    def test_scan_stop_saves_read_pages_and_does_not_read_next_page(self):
+        with tempfile.TemporaryDirectory() as folder:
+            review = CrossReview(folder, "复核对象")
+            stop, calls = Event(), []
+            def call(action, payload):
+                calls.append(payload["page"])
+                stop.set()
+                return dict(protocol=1, owner="复核对象", page=1, total=2, page_size=1, rows=[row("a")])
+            review.scan(call, stop, lambda _: None)
+            saved = CrossReview(folder, "复核对象").data
+            self.assertEqual(calls, [1])
+            self.assertFalse(saved["ready"])
+            self.assertEqual(saved["scanned"], 1)
+            self.assertEqual(set(saved["rows"]), {"a"})
+
+    def test_scan_empty_list_never_reads_page_two(self):
+        with tempfile.TemporaryDirectory() as folder:
+            review = CrossReview(folder, "复核对象")
+            calls = []
+            def call(action, payload):
+                calls.append(payload["page"])
+                return dict(protocol=1, owner="复核对象", page=1, total=0, page_size=10, rows=[])
+            review.scan(call, Event(), lambda _: None)
+            self.assertEqual(calls, [1])
+            self.assertTrue(review.data["ready"])
+            self.assertEqual(review.data["scanned"], 0)
+
+    def test_scan_rejects_more_unique_ids_than_total(self):
+        with tempfile.TemporaryDirectory() as folder:
+            review = CrossReview(folder, "复核对象")
+            # Probe + capped full read, then two drifting fallback passes.
+            batches = iter(("a", "a", "a", "a", "b", "c", "d", "a"))
+            def call(action, payload):
+                return dict(protocol=1, owner="复核对象", page=payload["page"], total=3,
+                            page_size=payload.get("page_size", 1),
+                            rows=[row(next(batches))])
+            with self.assertRaisesRegex(SafetyStop, "ID 数超过分页总数"):
+                review.scan(call, Event(), lambda _: None)
+            self.assertFalse(CrossReview(folder, "复核对象").data["ready"])
+
+    def test_scan_rejects_invalid_page_receipts(self):
+        for changes in ({"protocol": 2}, {"owner": "其他人"}, {"page": 2},
+                        {"total": True}, {"total": -1}, {"total": "1"},
+                        {"page_size": True}, {"page_size": 0}, {"page_size": "1"},
+                        {"rows": []}, {"rows": {}}, {"rows": [row("a"), row("b")]}):
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as folder:
+                review = CrossReview(folder, "复核对象")
+                def call(action, payload):
+                    return {**dict(protocol=1, owner="复核对象", page=1, total=1,
+                                   page_size=1, rows=[row("a")]), **changes}
+                with self.assertRaises(SafetyStop):
+                    review.scan(call, Event(), lambda _: None)
+                self.assertFalse(review.data["ready"])
+                self.assertEqual(review.data["rows"], {})
+
     def test_assess_identity_staff_roles_and_exempt_closure(self):
         self.assertEqual(assess(detail(row("001"), right="002"))[0], ["认领工号不一致"])
         self.assertEqual(assess(detail(row("001"), right="002", title="Other", journal="Other"))[0],
@@ -55,8 +253,9 @@ class ReviewTests(unittest.TestCase):
                     actions.append(action)
                     if action == "cross_review_page":
                         page = payload["page"]
-                        return dict(protocol=1, owner=owner, page=page, total=2, page_size=1,
-                                    rows=[entries[f"00{page}"]])
+                        size = payload.get("page_size", 1)
+                        return dict(protocol=1, owner=owner, page=page, total=2, page_size=size,
+                                    rows=list(entries.values())[:size])
                     sid = payload["sa_id"]
                     if action == "status":
                         return {"row": entries[sid]}
@@ -77,13 +276,14 @@ class ReviewTests(unittest.TestCase):
             self.assertEqual(actions, ["status", "search"])
 
     def test_scan_rejects_mixed_owner_duplicate_and_status_drift(self):
-        for mixed in (True, False):
-            with self.subTest(mixed=mixed), tempfile.TemporaryDirectory() as folder:
+        for batch in ([row("001", "其他人")], [{**row("001"), "markStatus": "待处理"}],
+                      [row("001"), row("001")], [row("")], [row(123)], [None]):
+            with self.subTest(batch=batch), tempfile.TemporaryDirectory() as folder:
                 owner = "复核对象"
                 review = CrossReview(folder, owner)
                 def page(action, payload):
-                    return dict(protocol=1, owner=owner, page=payload["page"], total=2, page_size=1,
-                                rows=[row("001", "其他人" if mixed else owner)])
+                    return dict(protocol=1, owner=owner, page=payload["page"], total=len(batch),
+                                page_size=len(batch), rows=batch)
                 with self.assertRaises(SafetyStop):
                     review.scan(page, Event(), lambda _: None)
                 self.assertFalse(review.data["ready"])
@@ -278,7 +478,7 @@ class FeedbackTests(unittest.TestCase):
         while True:
             kind, value = app.events.get(timeout=5)
             if kind == "cross_result":
-                self.assertEqual(value, "本轮交叉核验结束。")
+                self.assertEqual(value, ("本轮交叉核验结束。", False))
                 break
         app.set_busy(False)
         panel.render()
@@ -305,6 +505,53 @@ class FeedbackTests(unittest.TestCase):
             panel.start()
             thread.return_value.start.assert_called_once()
             self.assertTrue(panel.app.busy)
+
+    def test_run_warning_is_redacted_and_dispatched_on_main_thread_only_for_failure(self):
+        import tkinter as tk
+        from threading import get_ident
+        from app import App
+        from workflow_service import WorkflowService
+        main_thread = get_ident()
+        for outcome in ("failure", "complete", "pause"):
+            with self.subTest(outcome=outcome):
+                root = tk.Tk()
+                root.withdraw()
+                app = App(root, service=WorkflowService(self.base), auto_load=False,
+                          bridge=SimpleNamespace(online=True, token="secret-credential"))
+                try:
+                    panel = app.cross_review
+                    panel.owner.set("复核对象")
+                    panel.review = CrossReview(self.base, "复核对象")
+                    worker_threads, warning_threads = [], []
+                    def run(bridge, stop, progress):
+                        worker_threads.append(get_ident())
+                        if outcome == "failure":
+                            raise SafetyStop("分页不稳定 secret-credential")
+                        if outcome == "pause":
+                            stop.set()
+                    with patch.object(panel.review, "run", side_effect=run), \
+                            patch("cross_review_ui.messages.showwarning",
+                                  side_effect=lambda *a, **k: warning_threads.append(get_ident())) as warning:
+                        panel.start()
+                        event = app.events.get(timeout=5)
+                        self.assertEqual(event[0], "cross_result")
+                        warning.assert_not_called()
+                        app.events.put(event)
+                        root.after_cancel(app.timer)
+                        app.pump()
+                        self.assertNotEqual(worker_threads, [main_thread])
+                        self.assertFalse(app.busy)
+                        if outcome == "failure":
+                            warning.assert_called_once_with("交叉核验已暂停", app.status.get(), parent=root)
+                            self.assertIn("分页不稳定", app.status.get())
+                            self.assertNotIn("secret-credential", app.status.get())
+                            self.assertEqual(warning_threads, [main_thread])
+                        else:
+                            warning.assert_not_called()
+                            self.assertIn("已暂停" if outcome == "pause" else "结束", app.status.get())
+                finally:
+                    root.after_cancel(app.timer)
+                    root.destroy()
 
     def test_panel_confirm_reports_success_only_after_sync(self):
         panel = self.panel()

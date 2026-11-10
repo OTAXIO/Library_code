@@ -16,7 +16,7 @@ from ui_theme import P, install_theme, style_text
 from workflow_service import WorkflowService
 
 BASE = Path(__file__).resolve().parent
-VERSION = "0.4.62"
+VERSION = "0.4.63"
 SA_URL = "http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list"
 SCOPES = {"待处理": "pending", "重试跳过项": "skipped", "已完成": "done"}
 
@@ -345,9 +345,12 @@ class App:
             if kind == "progress":
                 self.status.set(value)
             elif kind == "cross_result":
+                outcome, failed = value
                 self.set_busy(False)
                 self.cross_review.render()
-                self.status.set(value)
+                self.status.set(outcome)
+                if failed:
+                    messages.showwarning("交叉核验已暂停", outcome, parent=self.root)
             elif kind == "result":
                 self.roster, self.last_results = value.roster, value.messages
                 self.set_busy(False)

@@ -12,6 +12,9 @@ from evidence_review import _comparison, _redact, paper_identity, role_suggestio
 from feedback_write import write_feedback
 
 
+SCAN_PASSES = 8
+
+
 def in_scope(row, owner):
     return isinstance(row, dict) and row.get("updateUsername") == owner and row.get("markStatus") == "已处理"
 
@@ -98,38 +101,90 @@ class CrossReview:
 
     def scan(self, call, stop, progress):
         rows = self.data["rows"]
-        page = 1
+        original_ids = set(rows)
         seen = set()
-        total, size = self.data["total"], self.data["page_size"]
-        while not stop.is_set():
-            progress(f"读取已处理列表 · 第 {page} 页")
-            answer = call("cross_review_page", {"owner": self.owner, "page": page})
+        total = None
+        self.data["ready"] = False
+        self.save()
+
+        def read_page(page, requested_size=None, *, allow_cap=False):
+            nonlocal total
+            payload = {"owner": self.owner, "page": page}
+            if requested_size is not None:
+                payload["page_size"] = requested_size
+            answer = call("cross_review_page", payload)
             current_total, current_size = answer.get("total"), answer.get("page_size")
             batch = answer.get("rows")
+            if allow_cap and (type(current_size) is not int or current_size != requested_size):
+                raise SafetyStop("扩展未更新到 0.4.63，请在扩展管理页重载扩展后重新配对")
             if (answer.get("protocol") != 1 or answer.get("owner") != self.owner or answer.get("page") != page
                     or type(current_total) is not int or current_total < 0 or type(current_size) is not int
                     or current_size < 1 or not isinstance(batch, list)
-                    or len(batch) != min(current_size, max(0, current_total - (page - 1) * current_size))
-                    or total is not None and (current_total, current_size) != (total, size)):
+                    or total is not None and current_total != total
+                    or requested_size is not None and current_size != requested_size):
                 raise SafetyStop("分页总数或范围不稳定，复核队列尚未固定。")
-            total, size = current_total, current_size
+            expected = min(current_size, max(0, current_total - (page - 1) * current_size))
+            if (allow_cap and not 0 < len(batch) <= expected
+                    or not allow_cap and len(batch) != expected):
+                raise SafetyStop("分页总数或范围不稳定，复核队列尚未固定。")
+            page_ids = set()
             for row in batch:
                 sid = row.get("saLzkId") if isinstance(row, dict) else None
-                if not in_scope(row, self.owner) or not isinstance(sid, str) or not sid or sid in seen:
+                if not in_scope(row, self.owner) or not isinstance(sid, str) or not sid or sid in page_ids:
                     raise SafetyStop("列表含重复 ID 或超出所选范围，停止核验。")
-                seen.add(sid)
-            page_keys = [row["saLzkId"] for row in batch]
-            offset = (page - 1) * size
-            if offset < self.data["scanned"] and page_keys != list(rows)[offset:offset + size]:
-                raise SafetyStop("继续扫描时原分页已变化，需另建队列。")
+                page_ids.add(sid)
+            total = current_total
+            seen.update(page_ids)
             for row in batch:
                 rows.setdefault(row["saLzkId"], {"title": row.get("titleValue", ""), "status": "未核验"})
-            self.data.update(scanned=max(self.data["scanned"], len(seen)), total=total, page_size=size)
-            self.data["ready"] = len(seen) == total
+            self.data.update(scanned=len(seen), total=total, page_size=current_size)
             self.save()
-            if self.data["ready"]:
+            return len(batch)
+
+        def finish():
+            if len(seen) > total:
+                raise SafetyStop("收集的 ID 数超过分页总数，复核范围已变化，进度已保存。")
+            if len(seen) != total:
+                return False
+            missing = len(original_ids - seen)
+            if missing:
+                raise SafetyStop(f"已入队的 {missing} 条不在当前已处理列表，复核范围已变化。")
+            self.data["ready"] = True
+            self.save()
+            return True
+
+        if stop.is_set():
+            return
+        read_page(1)
+        progress(f"读取已处理列表 · 探测第 1 页 · 已收齐 {len(seen)}/{total}")
+        if stop.is_set():
+            return
+        if total == 0:
+            finish()
+            return
+        cap = 1000
+        if total <= 1000:
+            cap = read_page(1, total, allow_cap=True)
+            progress(f"读取已处理列表 · 一次读取 {cap} 条 · 已收齐 {len(seen)}/{total}")
+            if stop.is_set():
                 return
-            page += 1
+            if cap == total:
+                finish()
+                return
+        pages = (total + cap - 1) // cap
+        for scan_pass in range(1, SCAN_PASSES + 1):
+            for page in range(1, pages + 1):
+                if stop.is_set():
+                    self.save()
+                    return
+                read_page(page, cap)
+                progress(f"读取已处理列表 · 第 {scan_pass} 遍 第 {page}/{pages} 页 · 已收齐 {len(seen)}/{total}")
+                if stop.is_set():
+                    return
+            if finish():
+                return
+        raise SafetyStop(f"网站分页排序不稳定，读 {SCAN_PASSES} 遍后仍只收齐 {len(seen)}/{total} 条，"
+                         "未开始核验，进度已保存。")
 
     def original(self, row):
         path = self.original_path(row["saLzkId"])
