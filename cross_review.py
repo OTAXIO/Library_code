@@ -1,6 +1,5 @@
-"""Independent read-only cross-review queue and feedback export."""
+"""Independent read-only cross-review queue and synchronous local feedback."""
 import hashlib
-import io
 import json
 import os
 import re
@@ -10,6 +9,7 @@ from uuid import uuid4
 from automation import norm
 from core import SafetyStop, is_assigned_owner
 from evidence_review import _comparison, _redact, paper_identity, role_suggestion
+from feedback_write import write_feedback
 
 
 def review_owners(roster):
@@ -77,10 +77,12 @@ def assess(detail, original=None):
 
 
 class CrossReview:
-    def __init__(self, base, owner):
+    def __init__(self, base, owner, *, feedback_path=None):
         if not is_assigned_owner(owner):
             raise SafetyStop("请先选择复核对象。")
         self.owner = owner
+        self.feedback_path = Path(feedback_path) if feedback_path is not None else Path(base) / "复核反馈.xlsx"
+        self.backup_dir = Path(base) / "runtime/backups"
         self.root = Path(base) / "runtime/cross-review"
         self.path = self.root / (hashlib.sha256(owner.encode()).hexdigest() + ".json")
         self.data = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {
@@ -185,30 +187,40 @@ class CrossReview:
                          issues=issues, pending=pending)
             self.save()
 
-    def confirm(self, sid, note):
+    def confirm(self, sid, note, reviewer):
+        if not is_assigned_owner(reviewer) or reviewer == self.owner:
+            raise SafetyStop("请先在主界面负责人下拉框选好自己，校对人不能是被复核人。")
         note = note.strip()
         if not note or len(note) > 1000:
             raise SafetyStop("请填写 1–1000 字的已确认问题。")
         if self.data["rows"][sid]["status"] == "未核验":
             raise SafetyStop("请先读取本条复核证据。")
-        self.data["rows"][sid].update(confirmed=note, status="有问题")
+        self.data["rows"][sid].update(confirmed=note, status="有问题", reviewer=reviewer, feedback_synced=False)
         self.save()
+        self.sync_pending()
 
-    def export(self, path):
-        from openpyxl import Workbook
-        rows = [(sid, entry["confirmed"]) for sid, entry in self.data["rows"].items() if entry.get("confirmed")]
-        if not rows:
-            raise SafetyStop("没有已确认的问题。")
-        book = Workbook()
-        sheet = book.active
-        sheet.append(["Said", "问题备注"])
-        for sid, note in rows:
-            sheet.append([sid, note])
-            for cell in sheet[sheet.max_row]:
-                cell.data_type = "s"
-        buffer = io.BytesIO()
-        book.save(buffer)
-        book.close()
-        with Path(path).open("xb") as output:
-            output.write(buffer.getvalue())
-        return len(rows)
+    def sync_pending(self):
+        errors = []
+        for sid, entry in self.data["rows"].items():
+            if not entry.get("confirmed") or entry.get("feedback_synced") is True:
+                continue
+            # Older queues have no reviewer; never attribute their notes to the loader.
+            entry["feedback_synced"] = False
+            self.save()
+            try:
+                if not entry.get("reviewer"):
+                    raise SafetyStop("历史确认缺少校对人，请在主界面选好自己后重新确认该条。")
+                write_feedback(self.feedback_path, self.backup_dir, sid, entry["confirmed"],
+                               self.owner, entry["reviewer"])
+            except SafetyStop as exc:
+                errors.append(f"{sid}：{exc}")
+                continue
+            entry["feedback_synced"] = True
+            try:
+                self.save()
+            except OSError:
+                # The workbook may already be written; retry must remain idempotent.
+                entry["feedback_synced"] = False
+                raise
+        if errors:
+            raise SafetyStop("确认内容已保留在本地 JSON，以下问题未同步：\n" + "\n".join(errors))
