@@ -905,10 +905,14 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
   test('staff reassignment: two exact wno lookups, one cancel and one claim, other authors retained',async()=>{
     await setupReassignment();
     await page.evaluate(()=>testConfig.authors=[{id:'author-1',order:1,fullname:'Demo',
-      scholarId:null,institutionOrderNums:[],scholarIdentityCategory:'硕士研究生'},
-      {id:'author-2',order:2,fullname:'Coauthor',scholarId:null,institutionOrderNums:[]}]);
+      scholarId:null,institutionOrderNums:[],scholarIdentityCategory:'硕士研究生',email:null},
+      {id:'author-2',order:2,fullname:'Coauthor',scholarId:null,institutionOrderNums:[],abbreviation:null}]);
     const prep=await reassignCommand('prepare_reassignment');
     assert.equal(prep.ok,true,JSON.stringify(prep));
+    // The real command channel delivers objects without their null properties.
+    assert.equal(prep.data.prepared.metadata.author[1].abbreviation,null);
+    prep.data.prepared=JSON.parse(JSON.stringify(prep.data.prepared,(k,v)=>v===null?undefined:v));
+    assert.ok(!('abbreviation' in prep.data.prepared.metadata.author[1]));
     assert.equal(prep.data.prepared.previous_person.wno,'00002');
     assert.equal(prep.data.prepared.person.wno,'00001');
     assert.equal(await page.evaluate(()=>writeCount),0);

@@ -746,10 +746,15 @@ async function runSACommand(command) {
         // (for example a master's student -> PhD student with a different wno).
         // It is a person attribute, not an authorship/affiliation/paper field.
         // All other authors and every other metadata field remain frozen.
-        const metadataKey = m => m && canonical({...m,author:m.author?.map((a,i)=>{
+        // chrome.scripting.executeScript drops null-valued properties of the
+        // command it delivers, while the live page keeps them. An empty field
+        // is the same fact either way, so compare without null properties.
+        const dense = value => Array.isArray(value) ? value.map(dense) : value && typeof value === "object"
+          ? Object.fromEntries(Object.entries(value).filter(([, v]) => v != null).map(([k, v]) => [k, dense(v)])) : value;
+        const metadataKey = m => m && dense(canonical({...m,author:m.author?.map((a,i)=>{
           if(i!==target.index)return a;
           const {scholarIdentityCategory,...rest}=a;return rest;
-        })});
+        })}));
         const verifyChange = expected => {
           const after = authorsSnapshot();
           // Name the part that differs (field paths only, never values), so a
