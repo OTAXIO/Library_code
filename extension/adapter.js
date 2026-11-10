@@ -745,6 +745,8 @@ async function runSACommand(command) {
         // The native claim updates this target's scholar identity category
         // (for example a master's student -> PhD student with a different wno).
         // It is a person attribute, not an authorship/affiliation/paper field.
+        // Cancelling likewise clears this target's historyScholarId, the
+        // site's own record of the previous claimant.
         // All other authors and every other metadata field remain frozen.
         // chrome.scripting.executeScript drops null-valued properties of the
         // command it delivers, while the live page keeps them. An empty field
@@ -753,7 +755,7 @@ async function runSACommand(command) {
           ? Object.fromEntries(Object.entries(value).filter(([, v]) => v != null).map(([k, v]) => [k, dense(v)])) : value;
         const metadataKey = m => m && dense(canonical({...m,author:m.author?.map((a,i)=>{
           if(i!==target.index)return a;
-          const {scholarIdentityCategory,...rest}=a;return rest;
+          const {scholarIdentityCategory,historyScholarId,...rest}=a;return rest;
         })}));
         const verifyChange = expected => {
           const after = authorsSnapshot();

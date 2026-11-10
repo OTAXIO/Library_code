@@ -72,7 +72,7 @@ def plan_one(bridge, record):
         return {**entry, **extra, 'action': 'manual', 'reason': reason}
 
     if found.get('closed_rework_protocol') != 1:
-        return manual('扩展未更新到 0.4.61，未核对作者行')
+        return manual('扩展未更新到 0.4.62，未核对作者行')
     if not (record.done and not record.skipped and claimed_note(record.remark)):
         return manual('名单不是按“已认领”结案')
     if (row.get('markStatus') != '已处理' or row.get('updateUsername') != OWNER
@@ -203,7 +203,7 @@ def main():
     root = tk.Tk()
     root.title(('执行认领返工纠正' if plan else '认领返工 · 只读核对') + f' · {len(ids)} 条')
     root.geometry('560x190')
-    status = tk.StringVar(value='等待现有 SA 比对页的扩展连接（扩展需为 0.4.61）')
+    status = tk.StringVar(value='等待现有 SA 比对页的扩展连接（扩展需为 0.4.62）')
     ttk.Label(root, textvariable=status, wraplength=530).pack(pady=12)
     code = tk.StringVar(root, bridge.token)
     ttk.Entry(root, width=58, state='readonly', textvariable=code).pack()
