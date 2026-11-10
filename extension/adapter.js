@@ -752,11 +752,28 @@ async function runSACommand(command) {
         })});
         const verifyChange = expected => {
           const after = authorsSnapshot();
-          if (!original || !equal(original.authorization, authorization) || original.staff_id !== staffId ||
-              original.item_id !== ids[0] || original.sa_text !== saText ||
-              !equal(personKey(original.person), personKey(prepared.person)) || !equal(original.previous_person, prepared.previous_person) ||
-              !equal(metadataKey(original.metadata), metadataKey(metadata())) || !Array.isArray(original.authors) ||
-              original.authors.length !== after.length) stop("工号、学者或论文快照已变化，停止纠正");
+          // Name the part that differs (field paths only, never values), so a
+          // refusal can be diagnosed from the read-only inspection.
+          const firstDiff = (a, b, path) => {
+            if (JSON.stringify(a) === JSON.stringify(b)) return "";
+            if (a && b && typeof a === "object" && typeof b === "object" && Array.isArray(a) === Array.isArray(b)) {
+              for (const key of [...new Set([...Object.keys(a), ...Object.keys(b)])]) {
+                const found = firstDiff(a[key], b[key], path + "." + key);
+                if (found) return found;
+              }
+            }
+            return path + "(" + (a === undefined ? "原无" : b === undefined ? "现无" : typeof a + "/" + typeof b) + ")";
+          };
+          const changed = !original ? ["缺少准备快照"] : [
+            !equal(original.authorization, authorization) && "授权",
+            (original.staff_id !== staffId || original.item_id !== ids[0] || original.sa_text !== saText) && "工号或平台号",
+            !equal(personKey(original.person), personKey(prepared.person)) && "新工号学者",
+            !equal(original.previous_person, prepared.previous_person) && "原工号学者",
+            !equal(metadataKey(original.metadata), metadataKey(metadata())) &&
+              "论文元数据" + firstDiff(metadataKey(original.metadata), metadataKey(metadata()), ""),
+            (!Array.isArray(original.authors) || original.authors.length !== after.length) && "作者数量",
+          ].filter(Boolean);
+          if (changed.length) stop("工号、学者或论文快照已变化，停止纠正：" + changed.join("；").slice(0, 300));
           for (let i=0;i<after.length;i++) {
             const old = original.authors[i], now = after[i];
             if (i !== target.index) {
