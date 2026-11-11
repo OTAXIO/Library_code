@@ -98,6 +98,7 @@ class CrossReviewPanel(ttk.Frame):
         if self.review:
             for sid, entry in self.review.data["rows"].items():
                 status = ("有问题·未同步" if entry.get("confirmed") and entry.get("feedback_synced") is not True
+                          else "有问题·已写入" if entry.get("auto_confirmed") and entry.get("feedback_synced") is True
                           else entry["status"])
                 self.tree.insert("", "end", iid=sid, values=(sid, entry.get("title", ""), status))
         if selected and self.tree.exists(selected[0]):
@@ -111,16 +112,35 @@ class CrossReviewPanel(ttk.Frame):
         self.details.configure(state="normal")
         self.details.delete("1.0", "end")
         self.details.insert("1.0", json.dumps(entry, ensure_ascii=False, indent=2) if entry else
-                            "输入复核对象并加载后读取网页已处理队列。确认问题备注即同步到复核反馈.xlsx。")
+                            "核验中判为「有问题」的条目会自动写入复核反馈.xlsx；"
+                            "「待核」需人工查看后点「确认问题备注」。")
         self.details.configure(state="disabled")
+
+    def save_reviewer(self, reviewer):
+        self.reviewer.set(reviewer)
+        self.reviewer_path.parent.mkdir(parents=True, exist_ok=True)
+        self.reviewer_path.write_text(json.dumps({"reviewer": reviewer}, ensure_ascii=False),
+                                      encoding="utf-8")
 
     def start(self):
         if self.app.busy or not self.review or self.owner.get() != self.review.owner:
+            return
+        try:
+            reviewer = self.validated_name(self.reviewer.get(), "校对人")
+            if reviewer == self.review.owner:
+                raise SafetyStop("校对人不能是被复核人。")
+        except SafetyStop as exc:
+            messages.showwarning("尚未开始", str(exc), parent=self)
             return
         bridge = self.app.bridge
         if not bridge or not bridge.online:
             messages.showwarning("尚未开始", "请连接 SA 比对页。", parent=self)
             return
+        preference_error = None
+        try:
+            self.save_reviewer(reviewer)
+        except OSError as exc:
+            preference_error = exc
         review = self.review
         self.app.stop.clear()
         self.app.set_busy(True)
@@ -128,13 +148,16 @@ class CrossReviewPanel(ttk.Frame):
             outcome = "本轮交叉核验结束。"
             failed = False
             try:
-                review.run(bridge, self.app.stop, lambda value: self.app.events.put(("progress", value)))
+                review.run(bridge, self.app.stop, lambda value: self.app.events.put(("progress", value)),
+                           reviewer=reviewer)
                 if self.app.stop.is_set():
                     outcome = "复核已暂停，已完成的进度已保存。"
             except Exception as exc:
                 from run_diagnostics import safe_text
                 outcome = "复核暂停：" + safe_text(exc, (getattr(bridge, "token", ""),))
                 failed = not self.app.stop.is_set()
+            if preference_error is not None:
+                outcome += f"；校对人保存失败：{preference_error}"
             self.app.events.put(("cross_result", (outcome, failed)))
         threading.Thread(target=work, daemon=True).start()
 
@@ -147,11 +170,8 @@ class CrossReviewPanel(ttk.Frame):
             reviewer = self.validated_name(self.reviewer.get(), "校对人")
             if reviewer == self.review.owner:
                 raise SafetyStop("校对人不能是被复核人。")
-            self.reviewer.set(reviewer)
             try:
-                self.reviewer_path.parent.mkdir(parents=True, exist_ok=True)
-                self.reviewer_path.write_text(json.dumps({"reviewer": reviewer}, ensure_ascii=False),
-                                              encoding="utf-8")
+                self.save_reviewer(reviewer)
             except OSError as exc:
                 preference_error = exc
             self.review.confirm(selected[0], self.note.get(), reviewer)

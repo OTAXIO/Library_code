@@ -11,6 +11,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill
 
 from core import SafetyStop, UNASSIGNED_OWNER
+from bridge import BrowserRejected
 from cross_review import CrossReview, assess
 
 
@@ -29,7 +30,156 @@ def detail(item, right="001", state="已认领", title="Example", journal="Journ
             )]}
 
 
+def clean_detail(**changes):
+    result = detail(row("001", **changes))
+    for field in result["comparison"]:
+        if field["label"] == "DOI":
+            field["sa"] = ""
+        if field["label"] == "作者信息":
+            field["library"] = field["sa"]
+    result["comparison"].append(dict(label="作者单位", sa="", library="Shanghai Jiao Tong University"))
+    return result
+
+
+def set_field(result, label, left, right):
+    result["comparison"] = [field for field in result["comparison"] if field["label"] != label]
+    result["comparison"].append(dict(label=label, sa=left, library=right))
+
+
 class ReviewTests(unittest.TestCase):
+    def test_title_alone_passes_and_normalized_identifiers_match(self):
+        self.assertEqual(assess(clean_detail()), ([], []))
+        for label, left, right in (("题名", "EXAMPLE： Paper", "example: paper"),
+                                   ("DOI", "https://doi.org/10.1234/EXAMPLE", "10.1234/example"),
+                                   ("WOS记录号", "000123456789012", "WOS:000123456789012")):
+            with self.subTest(label=label):
+                result = clean_detail()
+                set_field(result, "题名", "Example", "Other")
+                set_field(result, label, left, right)
+                self.assertEqual(assess(result), ([], []))
+
+    def test_identity_pending_does_not_hide_claim_issue(self):
+        result = clean_detail()
+        set_field(result, "题名", "Example", "Other")
+        result["claim_identity"]["library_staff_id"] = "002"
+        self.assertEqual(assess(result), (["认领工号不一致"], ["题名不同且无共同 DOI/WOS，待核是否同一篇"]))
+
+    def test_identifier_conflicts_and_invalid_formats_are_pending(self):
+        for label, left, right, message in (
+            ("DOI", "10.1234/a", "10.1234/b", "DOI 或 WOS 号两边不一致，待核是否同一篇"),
+            ("WOS记录号", "000123456789012", "000123456789013", "DOI 或 WOS 号两边不一致，待核是否同一篇"),
+            ("DOI", "invalid", "", "文献标识格式待核"),
+            ("WOS记录号", "invalid", "", "文献标识格式待核"),
+        ):
+            with self.subTest(label=label, left=left):
+                result = clean_detail()
+                set_field(result, label, left, right)
+                self.assertEqual(assess(result), ([], [message]))
+
+    def test_year_pending_does_not_hide_claim_issue(self):
+        result = clean_detail()
+        set_field(result, "年份", "2024", "2025")
+        result["claim_identity"]["library_staff_id"] = "002"
+        self.assertEqual(assess(result), (["认领工号不一致"], ["发表年份不一致"]))
+
+    def test_unclaimed_closure_rules(self):
+        for remark, issues, pending in (
+            ("", ["未认领，但已处理"], []),
+            ("已认领，完成", ["未认领，但已处理"], []),
+            ("非交大", [], []),
+            ("需导入", [], ["未认领，按备注“需导入”结案，待核"]),
+            ("其他" * 30, [], ["未认领，按备注“" + "其他" * 20 + "”结案，待核"]),
+        ):
+            with self.subTest(remark=remark):
+                result = clean_detail(remark=remark)
+                result["claim_identity"].update(state="未认领", library_staff_id="")
+                set_field(result, "作者单位", "", "Other University")
+                self.assertEqual(assess(result), (issues, pending))
+
+    def test_invalid_claim_structure_and_staff_remain_pending(self):
+        for identity in (None, [], "bad", {}, {"state": "未知"},
+                         dict(sa_staff_id="001", library_staff_id="bad", state="已认领")):
+            with self.subTest(identity=identity):
+                result = clean_detail()
+                result["claim_identity"] = identity
+                self.assertIn("认领或结案依据待核", assess(result)[1])
+        for left in (None, "", "x", "1" * 41, "００１", "002"):
+            with self.subTest(left=left):
+                result = clean_detail()
+                result["claim_identity"]["sa_staff_id"] = left
+                self.assertIn("SA 工号无法确认", assess(result)[1])
+
+    def test_affiliations_and_first_unit_are_pending(self):
+        result = clean_detail()
+        set_field(result, "作者单位", "", "Other University")
+        self.assertEqual(assess(result), ([], ["本库作者单位未见交大，待核是否交大文献"]))
+        for unit in ("SHANGHAI JIAO TONG", "Shanghai Jiaotong", "SJTU", "上海交通大学", "上海交大"):
+            with self.subTest(unit=unit):
+                set_field(result, "作者单位", "", unit)
+                self.assertEqual(assess(result), ([], []))
+                result["row"]["remark"] = "非交大"
+                self.assertEqual(assess(result), ([], ["备注非交大，但本库作者单位含交大"]))
+                result["row"]["remark"] = ""
+        set_field(result, "交大是否第一单位", "是", "否")
+        self.assertEqual(assess(result), ([], ["交大是否第一单位两边不一致"]))
+
+    def test_role_differences_are_optional_hints(self):
+        result = clean_detail()
+        set_field(result, "作者信息", "是否第一作者：是 是否通讯作者：是", "是否第一作者：否 是否通讯作者：否")
+        self.assertEqual(assess(result), ([], ["第一作者标记两边不一致", "通讯作者标记两边不一致"]))
+        set_field(result, "作者信息", "unknown", "是否第一作者：否 是否通讯作者：否")
+        self.assertEqual(assess(result), ([], []))
+
+    def test_verified_original_keeps_role_issues_and_pending(self):
+        result = clean_detail()
+        original = dict(staff_id="001", author_count=2, author_index=2, first_authors=[1],
+                        corresponding=[1], mark_source="全文")
+        self.assertEqual(assess(result, original), (["误标第一作者", "误标通讯作者"], []))
+        original.update(author_index=1)
+        set_field(result, "作者信息", "", "是否第一作者：否 是否通讯作者：否")
+        self.assertEqual(assess(result, original), (["第一作者未修改", "是通讯未修改"], []))
+        original.update(first_authors=[], corresponding=[])
+        self.assertEqual(assess(result, original), ([], ["第一作者或共同一作待核", "通讯作者待核"]))
+
+    def test_run_versions_skip_decided_and_confirmed_entries(self):
+        with tempfile.TemporaryDirectory() as folder:
+            review = CrossReview(folder, "复核对象")
+            entries = {}
+            for status in ("通过", "有问题", "待核"):
+                entries["new" + status] = dict(status=status, rule=2)
+                entries["old" + status] = dict(status=status)
+                entries["confirmed" + status] = dict(status=status, confirmed="人工意见")
+            entries["multi"] = dict(status="未核验")
+            review.data.update(ready=True, rows=entries)
+            confirmed = {sid: entry.copy() for sid, entry in entries.items() if "confirmed" in entry}
+            calls, updates = [], []
+            def call(action, payload):
+                sid = payload["sa_id"]
+                calls.append((action, sid))
+                result = clean_detail(remark="网页备注")
+                result["row"]["saLzkId"] = sid
+                if sid == "multi":
+                    result["row"]["matchCount"] = 0
+                return {"row": result["row"]} if action == "status" else result
+            review.run(SimpleNamespace(call=call), Event(), updates.append)
+            self.assertEqual(calls, [(action, "old" + status) for status in ("通过", "有问题", "待核")
+                                     for action in ("status", "search")] + [("status", "multi")])
+            saved = CrossReview(folder, "复核对象").data["rows"]
+            for status in ("通过", "有问题", "待核"):
+                self.assertEqual(saved["old" + status]["status"], "通过")
+                self.assertEqual(saved["old" + status]["rule"], 2)
+                self.assertEqual(saved["old" + status]["remark"], "网页备注")
+            for sid, entry in confirmed.items():
+                self.assertEqual(saved[sid], entry)
+            self.assertEqual(saved["multi"]["pending"], ["当前匹配数非 1，需核验结案依据"])
+            self.assertEqual(saved["multi"]["rule"], 2)
+            self.assertEqual(saved["multi"]["remark"], "网页备注")
+            self.assertEqual(updates, ["只读复核 2/10 old通过", "只读复核 5/10 old有问题",
+                                       "只读复核 8/10 old待核", "只读复核 10/10 multi"])
+            calls.clear()
+            CrossReview(folder, "复核对象").run(SimpleNamespace(call=call), Event(), updates.append)
+            self.assertEqual(calls, [])
+
     def test_scan_reads_all_in_two_requests(self):
         with tempfile.TemporaryDirectory() as folder:
             review = CrossReview(folder, "复核对象")
@@ -294,12 +444,215 @@ class ReviewTests(unittest.TestCase):
                 def call(self, action, payload):
                     assert action == "status"
                     return {"row": {**row("001"), "markStatus": "待处理"}}
-            with self.assertRaises(SafetyStop):
-                review.run(Bridge(), Event(), lambda _: None)
+            review.run(Bridge(), Event(), lambda _: None)
             self.assertEqual(CrossReview(folder, "复核对象").data["rows"]["001"]["status"], "待核")
 
 
 HEADERS = ("Said", "问题备注", "负责人", "校对人")
+
+
+class RunRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.review = CrossReview(self.temp.name, "复核对象")
+        self.review.data.update(ready=True, rows={str(i): {"status": "未核验"} for i in range(10)})
+        self.calls = []
+        self.failures = {}
+        self.details = {}
+        self.bridge = SimpleNamespace(call=self.call)
+
+    def call(self, action, payload):
+        sid = payload["sa_id"]
+        self.calls.append((action, sid))
+        if (action, sid) in self.failures:
+            raise self.failures[action, sid]
+        result = self.details.get(sid)
+        if result is None:
+            result = clean_detail()
+            result["row"]["saLzkId"] = sid
+        if action == "status":
+            return {"row": row(sid)}
+        self.assertEqual(payload, {"sa_id": sid, "close_detail": True})
+        return result
+
+    def run_review(self, reviewer=None):
+        self.review.run(self.bridge, Event(), lambda _: None, reviewer=reviewer)
+
+    def test_status_and_search_rejections_continue_and_retry_after_reload(self):
+        for action, sid in (("status", "0"), ("search", "1")):
+            self.failures[action, sid] = BrowserRejected(action, "【已暂停】" + "原因" * 110)
+        self.run_review()
+        for sid in ("0", "1"):
+            entry = self.review.data["rows"][sid]
+            self.assertTrue(entry["rejected"])
+            self.assertEqual(entry["status"], "待核")
+            self.assertEqual(entry["rule"], 2)
+            self.assertEqual(entry["pending"], ["网页读取被拒绝：" + "原因" * 100])
+        self.assertEqual(self.review.data["rows"]["9"]["status"], "通过")
+        self.review = CrossReview(self.temp.name, "复核对象")
+        self.failures.clear()
+        self.calls.clear()
+        self.run_review()
+        self.assertEqual(self.calls, [(action, sid) for sid in ("0", "1") for action in ("status", "search")])
+        for sid in ("0", "1"):
+            self.assertNotIn("rejected", self.review.data["rows"][sid])
+
+    def test_five_rejections_stop_but_success_resets_streak(self):
+        for sid in map(str, range(10)):
+            self.failures["search", sid] = BrowserRejected("search", "请登录")
+        with self.assertRaisesRegex(SafetyStop, "连续 5 条被网页拒绝，可能页面或登录异常，已暂停"):
+            self.run_review()
+        saved = CrossReview(self.temp.name, "复核对象").data["rows"]
+        self.assertTrue(all(saved[str(i)]["rejected"] for i in range(5)))
+        self.assertEqual(saved["5"]["status"], "未核验")
+        self.failures.pop(("search", "4"))
+        self.failures.pop(("search", "9"))
+        self.run_review()
+        self.assertEqual(self.review.data["rows"]["9"]["status"], "通过")
+
+    def test_unknown_failures_and_write_issued_rejections_stop_unchanged(self):
+        for error in (SafetyStop("命令超时"), OSError("读取失败"),
+                      BrowserRejected("search", "【已发出写入，禁止自动重试】结果不明")):
+            with self.subTest(error=error):
+                self.failures["search", "1"] = error
+                with self.assertRaises(type(error)) as caught:
+                    self.run_review()
+                self.assertIs(caught.exception, error)
+                saved = CrossReview(self.temp.name, "复核对象").data["rows"]
+                self.assertEqual(saved["0"]["status"], "通过")
+                self.assertEqual(saved["2"]["status"], "未核验")
+
+    def test_scope_and_detail_row_changes_continue_but_unreleased_stops(self):
+        original = self.call
+        def changed(action, payload):
+            result = original(action, payload)
+            if action == "status" and payload["sa_id"] == "0":
+                result["row"]["updateUsername"] = "其他人"
+            if action == "search" and payload["sa_id"] == "1":
+                result["row"]["remark"] = "变化"
+            return result
+        self.bridge.call = changed
+        self.run_review()
+        for sid in ("0", "1"):
+            self.assertEqual(self.review.data["rows"][sid]["pending"], ["网页处理人或状态已变化"])
+            self.assertEqual(self.review.data["rows"][sid]["rule"], 2)
+        self.assertEqual(self.review.data["rows"]["9"]["status"], "通过")
+        for released in (False, None, 1, "true"):
+            with self.subTest(detail_released=released):
+                self.review.data["rows"]["1"] = {"status": "未核验"}
+                self.details["1"] = {**detail(row("1")), "detail_released": released}
+                with self.assertRaisesRegex(SafetyStop, "未关闭"):
+                    self.run_review()
+
+    def test_assess_safety_stop_is_pending_and_continues(self):
+        actual = assess
+        def check(result, original):
+            if result["row"]["saLzkId"] == "0":
+                raise SafetyStop("网页对比详情不完整")
+            return actual(result, original)
+        with patch("cross_review.assess", side_effect=check):
+            self.run_review()
+        self.assertIn("网页对比详情不完整", self.review.data["rows"]["0"]["pending"][0])
+        self.assertEqual(self.review.data["rows"]["9"]["status"], "通过")
+
+    def test_invalid_reviewer_never_reads_web(self):
+        self.review.data["ready"] = False  # Validation must precede the initial scan too.
+        for name in ("", "复核对象", UNASSIGNED_OWNER, "人" * 41, " 空格 ", 3):
+            with self.subTest(name=name), self.assertRaisesRegex(SafetyStop, "校对人"):
+                self.run_review(name)
+        self.assertEqual(self.calls, [])
+
+    def test_no_reviewer_only_assesses_without_writing(self):
+        self.details["0"] = detail(row("0"), right="002")
+        with patch("cross_review.write_feedback") as write:
+            self.run_review()
+        write.assert_not_called()
+        self.assertEqual(self.review.data["rows"]["0"]["status"], "有问题")
+        self.assertNotIn("confirmed", self.review.data["rows"]["0"])
+
+    def test_auto_writes_before_next_web_read_and_replaces_old_auto_note(self):
+        make_feedback(self.review.feedback_path, [("0", "旧问题", "复核对象", "原校对员")])
+        self.review.data["rows"]["0"].update(status="有问题", rule=1, auto_confirmed=True,
+                                             confirmed="旧问题", reviewer="原校对员", feedback_synced=True)
+        self.failures["status", "1"] = SafetyStop("后续读取超时")
+        with patch("cross_review.assess", return_value=(["问题一", "问题二"], [])):
+            with self.assertRaisesRegex(SafetyStop, "后续读取超时"):
+                self.run_review("校对员")
+        saved = CrossReview(self.temp.name, "复核对象").data["rows"]["0"]
+        self.assertEqual(saved["confirmed"], "问题一；问题二")
+        self.assertTrue(saved["auto_confirmed"])
+        self.assertTrue(saved["feedback_synced"])
+        book = load_workbook(self.review.feedback_path)
+        try:
+            self.assertEqual(list(book.worksheets[0].values),
+                             [HEADERS, ("0", "问题一；问题二", "复核对象", "校对员")])
+        finally:
+            book.close()
+
+    def test_feedback_header_and_owner_conflicts_do_not_stop_review(self):
+        for headers, rows in ((HEADERS[::-1], []), (HEADERS, [("0", "已有", "其他人", "校对员")])):
+            with self.subTest(headers=headers, rows=rows):
+                make_feedback(self.review.feedback_path, rows, headers)
+                self.review.data["rows"] = {str(i): {"status": "未核验"} for i in range(10)}
+                self.details["0"] = detail(row("0"), right="002")
+                with self.assertRaisesRegex(SafetyStop, "以下问题未同步"):
+                    self.run_review("校对员")
+                self.assertFalse(self.review.data["rows"]["0"]["feedback_synced"])
+                self.assertEqual(self.review.data["rows"]["9"]["status"], "通过")
+
+    def test_auto_feedback_writes_only_issues_and_retries_failed_sync(self):
+        path = self.review.feedback_path
+        make_feedback(path)
+        self.details["0"] = detail(row("0"), right="002")
+        self.details["1"] = detail(row("1"))  # Role differences only need review.
+        lock = path.with_name("~$复核反馈.xlsx")
+        lock.touch()
+        with self.assertRaisesRegex(SafetyStop, "以下问题未同步.*\n0："):
+            self.run_review("校对员")
+        saved = CrossReview(self.temp.name, "复核对象").data["rows"]
+        self.assertEqual(saved["9"]["status"], "通过")
+        self.assertTrue(saved["0"]["auto_confirmed"])
+        self.assertFalse(saved["0"]["feedback_synced"])
+        self.assertNotIn("confirmed", saved["1"])
+        lock.unlink()
+        self.review = CrossReview(self.temp.name, "复核对象")
+        self.calls.clear()
+        self.run_review("校对员")
+        self.assertEqual(self.calls, [])
+        self.assertTrue(self.review.data["rows"]["0"]["feedback_synced"])
+        book = load_workbook(path)
+        try:
+            sheet = book.worksheets[0]
+            self.assertEqual(list(sheet.values), [HEADERS, ("0", "认领工号不一致", "复核对象", "校对员")])
+            self.assertEqual(sheet["A2"].data_type, "s")
+        finally:
+            book.close()
+
+    def test_rule_upgrade_reassesses_auto_confirmation_preserving_workbook(self):
+        make_feedback(self.review.feedback_path, [("0", "旧问题", "复核对象", "原校对员")])
+        entry = self.review.data["rows"]["0"]
+        entry.update(status="有问题", rule=1, confirmed="旧问题", auto_confirmed=True,
+                     reviewer="原校对员", feedback_synced=False)
+        manual = self.review.data["rows"]["1"]
+        manual.update(confirmed="人工问题", reviewer="校对员", feedback_synced=True)
+        before = self.review.feedback_path.read_bytes()
+        self.run_review("校对员")
+        self.assertNotIn("confirmed", entry)
+        self.assertNotIn("auto_confirmed", entry)
+        self.assertIn("上一版规则曾自动判为有问题，表格里的行请人工处理", entry["pending"])
+        self.assertEqual(entry["status"], "待核")
+        self.assertEqual(manual["confirmed"], "人工问题")
+        self.assertNotIn(("status", "1"), self.calls)
+        self.assertEqual(self.review.feedback_path.read_bytes(), before)
+
+    def test_manual_confirm_removes_auto_marker(self):
+        make_feedback(self.review.feedback_path)
+        entry = self.review.data["rows"]["0"]
+        entry.update(status="有问题", auto_confirmed=True, confirmed="自动问题")
+        self.review.confirm("0", "人工问题", "校对员")
+        self.assertNotIn("auto_confirmed", entry)
+        self.assertEqual(entry["confirmed"], "人工问题")
 
 
 def make_feedback(path, rows=(), headers=HEADERS):
@@ -374,6 +727,48 @@ class FeedbackTests(unittest.TestCase):
         panel.confirm()
         self.assertEqual(self.values()[1], ("001", "手动确认", "复核对象", "手动校对员"))
         self.assertTrue(self.persisted()["001"]["feedback_synced"])
+
+    def test_panel_displays_passed_status(self):
+        self.review.data["rows"]["001"].update(status="通过", rule=2, issues=[], pending=[])
+        panel = self.panel()
+        panel.review = self.review
+        panel.render()
+        self.assertEqual(panel.tree.item("001", "values")[2], "通过")
+
+    def test_panel_auto_confirmation_sync_status(self):
+        panel = self.panel()
+        panel.review = self.review
+        for synced, expected in ((True, "有问题·已写入"), (False, "有问题·未同步")):
+            self.review.data["rows"]["001"].update(status="有问题", confirmed="自动问题",
+                                                  auto_confirmed=True, feedback_synced=synced)
+            panel.render()
+            self.assertEqual(panel.tree.item("001", "values")[2], expected)
+
+    def test_start_validates_saves_and_passes_reviewer(self):
+        from queue import Queue
+        panel = self.panel()
+        panel.review = self.review
+        panel.app.bridge = SimpleNamespace(online=True)
+        panel.app.stop = Event()
+        panel.app.events = Queue()
+        panel.app.set_busy = lambda busy: setattr(panel.app, "busy", busy)
+        for name in ("", "复核对象", UNASSIGNED_OWNER, "人" * 41):
+            panel.reviewer.set(name)
+            with patch("cross_review_ui.threading.Thread") as thread, \
+                    patch("cross_review_ui.messages.showwarning") as warning:
+                panel.start()
+                thread.assert_not_called()
+                warning.assert_called_once()
+                self.assertFalse(panel.app.busy)
+        panel.reviewer.set("  手动校对员  ")
+        def thread(**kwargs):
+            return SimpleNamespace(start=kwargs["target"])
+        with patch("cross_review_ui.threading.Thread", side_effect=thread), \
+                patch.object(self.review, "run") as run:
+            panel.start()
+        self.assertEqual(run.call_args.kwargs, {"reviewer": "手动校对员"})
+        self.assertEqual(json.loads(panel.reviewer_path.read_text(encoding="utf-8")),
+                         {"reviewer": "手动校对员"})
 
     def test_panel_invalid_owner_never_loads(self):
         panel = self.panel()
@@ -471,6 +866,7 @@ class FeedbackTests(unittest.TestCase):
         app.notebook.select(app.pages["cross"])
         panel = app.cross_review
         panel.owner.set("复核对象")
+        panel.reviewer.set("手动校对员")
         with patch("core.fixed_roster_path", return_value=self.path.with_name("list.xlsx")):
             panel.load_button.invoke()
         self.assertEqual(str(app.start_button["state"]), "normal")
@@ -521,9 +917,10 @@ class FeedbackTests(unittest.TestCase):
                 try:
                     panel = app.cross_review
                     panel.owner.set("复核对象")
+                    panel.reviewer.set("手动校对员")
                     panel.review = CrossReview(self.base, "复核对象")
                     worker_threads, warning_threads = [], []
-                    def run(bridge, stop, progress):
+                    def run(bridge, stop, progress, reviewer=None):
                         worker_threads.append(get_ident())
                         if outcome == "failure":
                             raise SafetyStop("分页不稳定 secret-credential")
