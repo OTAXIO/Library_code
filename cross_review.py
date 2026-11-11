@@ -3,18 +3,22 @@ import hashlib
 import json
 import os
 import re
+import unicodedata
+from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
 
 from automation import norm
 from bridge import BrowserRejected
 from core import SafetyStop, is_assigned_owner
-from evidence_review import _comparison, _redact, doi, wos, role_suggestion
-from feedback_write import write_feedback
+from evidence_review import _comparison, _redact, role_suggestion
+from feedback_write import FeedbackModified, remove_feedback, write_feedback
 
 
 SCAN_PASSES = 8
-RULE_VERSION = 2
+RULE_VERSION = 3
+TRANSIENT_WAIT_SECONDS = 15
+TRANSIENT_RETRIES = 4
 MAX_CONSECUTIVE_REJECTIONS = 5
 SJTU_NAMES = ("shanghai jiao tong", "shanghai jiaotong", "sjtu", "上海交通大学", "上海交大")
 
@@ -23,37 +27,53 @@ def in_scope(row, owner):
     return isinstance(row, dict) and row.get("updateUsername") == owner and row.get("markStatus") == "已处理"
 
 
+def title_key(text):
+    return "".join(char for char in unicodedata.normalize("NFKC", text or "").casefold() if char.isalnum())
+
+
+def doi_key(text):
+    text = "".join(unicodedata.normalize("NFKC", text or "").casefold().split())
+    match = re.search(r"10\.\d{4,9}/\S+", text)
+    return match[0].rstrip(".,;") if match else ""
+
+
+def accession_key(text):
+    text = "".join((text or "").split()).upper()
+    if text in ("", "—", "-", "无", "NULL"):
+        return ""
+    return "WOS:" + text if re.fullmatch(r"[0-9]{15}", text) else text
+
+
 def assess(detail, original=None):
     fields = {v["label"]: v for v in _comparison(detail)}
     def differs(label):
         value = fields.get(label, {})
         left, right = norm(value.get("sa")), norm(value.get("library"))
         return bool(left and right and left != right)
-    if differs("题名") and any(differs(label) for label in ("期刊", "刊名")):
-        return ["两边不是同一篇论文"], []
     issues, pending = [], []
-    title = fields.get("题名", {})
-    same_paper = bool(norm(title.get("sa")) and norm(title.get("sa")) == norm(title.get("library")))
-    for label, normalize in (("DOI", doi), ("WOS记录号", wos)):
+    def pair(label, normalize):
         value = fields.get(label, {})
-        try:
-            left, right = (normalize(value.get(side, "")) for side in ("sa", "library"))
-        except SafetyStop:
-            if "文献标识格式待核" not in pending:
-                pending.append("文献标识格式待核")
-            continue
-        if left and right:
-            if left == right:
-                same_paper = True
-            elif "DOI 或 WOS 号两边不一致，待核是否同一篇" not in pending:
-                pending.append("DOI 或 WOS 号两边不一致，待核是否同一篇")
-    if not same_paper:
+        return tuple(normalize(value.get(side, "")) for side in ("sa", "library"))
+    def equal(values):
+        return bool(all(values) and values[0] == values[1])
+    def different(values):
+        return bool(all(values) and values[0] != values[1])
+    titles = pair("题名", title_key)
+    dois = pair("DOI", doi_key)
+    accessions = pair("WOS记录号", accession_key)
+    if equal(titles) or equal(dois) or equal(accessions):
+        if equal(titles) and not equal(dois) and not equal(accessions) and different(dois):
+            pending.append("题名相同但 DOI 不同，待核版本")
+    elif different(titles) and (different(dois) or any(
+            different(pair(label, title_key)) for label in ("期刊", "刊名"))):
+        return ["两边不是同一篇论文"], []
+    else:
         pending.append("题名不同且无共同 DOI/WOS，待核是否同一篇")
     for label in ("发表年月", "年份", "出版年"):
         value = fields.get(label, {})
         years = [re.search(r"\b(?:19|20)\d{2}\b", value.get(side, "")) for side in ("sa", "library")]
-        if all(years) and years[0][0] != years[1][0]:
-            pending.append("发表年份不一致")
+        if all(years) and (gap := abs(int(years[0][0]) - int(years[1][0]))) >= 2:
+            pending.append(f"发表年份相差 {gap} 年")
             break
     row = detail.get("row")
     row = row if isinstance(row, dict) else {}
@@ -278,6 +298,43 @@ class CrossReview:
         if not is_assigned_owner(reviewer) or len(reviewer) > 40 or reviewer == self.owner:
             raise SafetyStop("请输入 1–40 字的校对人，校对人不能是被复核人。")
 
+    def _offline_detail(self, sid, entry):
+        locator = entry.get("原文证据定位")
+        keys = ("saLzkId", "itemId", "titleValue", "doiValue", "wosValue", "gh")
+        if (entry.get("rule") == RULE_VERSION or entry.get("rejected")
+                or not isinstance(entry.get("comparison"), list)
+                or not isinstance(entry.get("claim_identity"), dict) or "remark" not in entry
+                or not isinstance(locator, dict) or not all(key in locator for key in keys)
+                or locator.get("saLzkId") != sid or not locator.get("gh")):
+            return None
+        detail = {"comparison": entry["comparison"], "claim_identity": entry["claim_identity"],
+                  "row": {**locator, "remark": entry["remark"]}}
+        try:
+            _comparison(detail)
+        except SafetyStop:
+            return None
+        return detail
+
+    def _read_with_retry(self, call, sid, entry, stop, progress):
+        for attempt in range(TRANSIENT_RETRIES + 1):
+            # A timeout may follow a successful status read. Commit evidence only
+            # once the entire read succeeds, leaving interrupted entries untouched.
+            evidence = deepcopy(entry)
+            try:
+                result = self._inspect(call, sid, evidence)
+            except BrowserRejected as exc:
+                if "已发出写入" in str(exc) or not any(
+                        word in str(exc) for word in ("仍在加载", "查询记录超时")):
+                    raise
+                if attempt == TRANSIENT_RETRIES:
+                    raise SafetyStop("网页持续卡在加载中，请刷新 SA 比对页后重新开始，进度已保存") from exc
+                progress(f"网页仍在加载，等待 {TRANSIENT_WAIT_SECONDS} 秒后重试 {sid}（{attempt+1}/{TRANSIENT_RETRIES}）")
+                if stop.wait(TRANSIENT_WAIT_SECONDS):
+                    return None
+            else:
+                entry.update(evidence)
+                return result
+
     def run(self, bridge, stop, progress, reviewer=None):
         if reviewer is not None:
             self.validate_reviewer(reviewer)
@@ -292,6 +349,8 @@ class CrossReview:
         n = len(self.data["rows"])
         consecutive_rejections = 0
         sync_errors = {}
+        needs_sync = reviewer is not None or any(
+            entry.get("auto_confirmed") for entry in self.data["rows"].values())
         for i, (sid, entry) in enumerate(self.data["rows"].items(), 1):
             if stop.is_set():
                 break
@@ -300,9 +359,14 @@ class CrossReview:
             if (not entry.get("rejected") and entry["status"] in ("通过", "有问题", "待核")
                     and entry.get("rule") == RULE_VERSION):
                 continue
-            progress(f"只读复核 {i}/{n} {sid}")
+            offline = self._offline_detail(sid, entry)
+            progress(f"按新规则重判 {i}/{n} {sid}" if offline else f"只读复核 {i}/{n} {sid}")
             try:
-                issues, pending = self._inspect(call, sid, entry)
+                result = (assess(offline, self.original(offline["row"])) if offline else
+                          self._read_with_retry(call, sid, entry, stop, progress))
+                if result is None:
+                    return
+                issues, pending = result
             except BrowserRejected as exc:
                 if "已发出写入" in str(exc):
                     raise
@@ -312,10 +376,14 @@ class CrossReview:
             else:
                 entry.pop("rejected", None)
                 consecutive_rejections = 0
-            if entry.get("auto_confirmed") and not issues:
-                entry.pop("confirmed", None)
-                entry.pop("auto_confirmed", None)
-                pending.append("上一版规则曾自动判为有问题，表格里的行请人工处理")
+            if entry.get("auto_confirmed") and not entry.get("rejected"):
+                needs_sync = True
+                if issues:
+                    entry.update(confirmed="；".join(issues), feedback_synced=False)
+                    entry.pop("feedback_remove_pending", None)
+                else:
+                    # Keep the exact old four-column values until removal succeeds.
+                    entry["feedback_remove_pending"] = True
             entry.update(status="有问题" if issues else "待核" if pending else "通过",
                          issues=issues, pending=pending, rule=RULE_VERSION)
             if reviewer is not None and issues:
@@ -324,12 +392,12 @@ class CrossReview:
             self.save()
             if consecutive_rejections >= MAX_CONSECUTIVE_REJECTIONS:
                 raise SafetyStop("连续 5 条被网页拒绝，可能页面或登录异常，已暂停")
-            if reviewer is not None and issues:
+            if entry.get("auto_confirmed") and not entry.get("rejected"):
                 try:
                     self._sync_entry(sid, entry)
                 except SafetyStop as exc:
                     sync_errors[sid] = str(exc)
-        if reviewer is not None:
+        if needs_sync:
             self.sync_pending(errors=sync_errors)
 
     def confirm(self, sid, note, reviewer):
@@ -341,10 +409,14 @@ class CrossReview:
             raise SafetyStop("请先读取本条复核证据。")
         self.data["rows"][sid].update(confirmed=note, status="有问题", reviewer=reviewer, feedback_synced=False)
         self.data["rows"][sid].pop("auto_confirmed", None)
+        self.data["rows"][sid].pop("feedback_remove_pending", None)
         self.save()
         self.sync_pending()
 
     def _sync_entry(self, sid, entry):
+        if entry.get("feedback_remove_pending") and entry.get("auto_confirmed"):
+            self._remove_entry_feedback(sid, entry)
+            return
         # Older queues have no reviewer; never attribute their notes to the loader.
         entry["feedback_synced"] = False
         self.save()
@@ -360,11 +432,30 @@ class CrossReview:
             entry["feedback_synced"] = False
             raise
 
+    def _remove_entry_feedback(self, sid, entry):
+        self.save()
+        try:
+            remove_feedback(self.feedback_path, self.backup_dir, sid, entry["confirmed"],
+                            self.owner, entry.get("reviewer"))
+        except FeedbackModified as exc:
+            pending = entry.setdefault("pending", [])
+            if str(exc) not in pending:
+                pending.append(str(exc))
+            entry["status"] = "待核"
+        else:
+            entry["status"] = "待核" if entry.get("pending") else "通过"
+        # Human edits are terminal: stop automatic deletion/upsert for this row.
+        # Failures such as an Excel lock escape above, retaining retry metadata.
+        for key in ("confirmed", "auto_confirmed", "reviewer", "feedback_synced", "feedback_remove_pending"):
+            entry.pop(key, None)
+        self.save()
+
     def sync_pending(self, *, errors=None):
         # A run supplies failures already attempted so each entry is tried once.
         errors = {} if errors is None else errors.copy()
         for sid, entry in self.data["rows"].items():
-            if not entry.get("confirmed") or entry.get("feedback_synced") is True or sid in errors:
+            if (sid in errors or not entry.get("confirmed")
+                    or entry.get("feedback_synced") is True and not entry.get("feedback_remove_pending")):
                 continue
             try:
                 self._sync_entry(sid, entry)

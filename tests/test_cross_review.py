@@ -64,23 +64,23 @@ class ReviewTests(unittest.TestCase):
         result["claim_identity"]["library_staff_id"] = "002"
         self.assertEqual(assess(result), (["认领工号不一致"], ["题名不同且无共同 DOI/WOS，待核是否同一篇"]))
 
-    def test_identifier_conflicts_and_invalid_formats_are_pending(self):
+    def test_title_only_doi_conflict_is_pending_other_identifier_noise_is_ignored(self):
         for label, left, right, message in (
-            ("DOI", "10.1234/a", "10.1234/b", "DOI 或 WOS 号两边不一致，待核是否同一篇"),
-            ("WOS记录号", "000123456789012", "000123456789013", "DOI 或 WOS 号两边不一致，待核是否同一篇"),
-            ("DOI", "invalid", "", "文献标识格式待核"),
-            ("WOS记录号", "invalid", "", "文献标识格式待核"),
+            ("DOI", "10.1234/a", "10.1234/b", "题名相同但 DOI 不同，待核版本"),
+            ("WOS记录号", "000123456789012", "000123456789013", None),
+            ("DOI", "invalid", "", None),
+            ("WOS记录号", "invalid", "", None),
         ):
             with self.subTest(label=label, left=left):
                 result = clean_detail()
                 set_field(result, label, left, right)
-                self.assertEqual(assess(result), ([], [message]))
+                self.assertEqual(assess(result), ([], [message] if message else []))
 
     def test_year_pending_does_not_hide_claim_issue(self):
         result = clean_detail()
-        set_field(result, "年份", "2024", "2025")
+        set_field(result, "年份", "2023", "2025")
         result["claim_identity"]["library_staff_id"] = "002"
-        self.assertEqual(assess(result), (["认领工号不一致"], ["发表年份不一致"]))
+        self.assertEqual(assess(result), (["认领工号不一致"], ["发表年份相差 2 年"]))
 
     def test_unclaimed_closure_rules(self):
         for remark, issues, pending in (
@@ -146,7 +146,7 @@ class ReviewTests(unittest.TestCase):
             review = CrossReview(folder, "复核对象")
             entries = {}
             for status in ("通过", "有问题", "待核"):
-                entries["new" + status] = dict(status=status, rule=2)
+                entries["new" + status] = dict(status=status, rule=3)
                 entries["old" + status] = dict(status=status)
                 entries["confirmed" + status] = dict(status=status, confirmed="人工意见")
             entries["multi"] = dict(status="未核验")
@@ -167,12 +167,12 @@ class ReviewTests(unittest.TestCase):
             saved = CrossReview(folder, "复核对象").data["rows"]
             for status in ("通过", "有问题", "待核"):
                 self.assertEqual(saved["old" + status]["status"], "通过")
-                self.assertEqual(saved["old" + status]["rule"], 2)
+                self.assertEqual(saved["old" + status]["rule"], 3)
                 self.assertEqual(saved["old" + status]["remark"], "网页备注")
             for sid, entry in confirmed.items():
                 self.assertEqual(saved[sid], entry)
             self.assertEqual(saved["multi"]["pending"], ["当前匹配数非 1，需核验结案依据"])
-            self.assertEqual(saved["multi"]["rule"], 2)
+            self.assertEqual(saved["multi"]["rule"], 3)
             self.assertEqual(saved["multi"]["remark"], "网页备注")
             self.assertEqual(updates, ["只读复核 2/10 old通过", "只读复核 5/10 old有问题",
                                        "只读复核 8/10 old待核", "只读复核 10/10 multi"])
@@ -381,7 +381,7 @@ class ReviewTests(unittest.TestCase):
     def test_assess_identity_staff_roles_and_exempt_closure(self):
         self.assertEqual(assess(detail(row("001"), right="002"))[0], ["认领工号不一致"])
         self.assertEqual(assess(detail(row("001"), right="002", title="Other", journal="Other"))[0],
-                         ["两边不是同一篇论文"])
+                         ["认领工号不一致"])
         self.assertEqual(assess(detail(row("001")))[0], [])
         self.assertEqual(assess(detail(row("001", reason="作者不一致", remark="非交大"),
                                        right="", state="未认领"))[0], [])
@@ -487,7 +487,7 @@ class RunRecoveryTests(unittest.TestCase):
             entry = self.review.data["rows"][sid]
             self.assertTrue(entry["rejected"])
             self.assertEqual(entry["status"], "待核")
-            self.assertEqual(entry["rule"], 2)
+            self.assertEqual(entry["rule"], 3)
             self.assertEqual(entry["pending"], ["网页读取被拒绝：" + "原因" * 100])
         self.assertEqual(self.review.data["rows"]["9"]["status"], "通过")
         self.review = CrossReview(self.temp.name, "复核对象")
@@ -536,7 +536,7 @@ class RunRecoveryTests(unittest.TestCase):
         self.run_review()
         for sid in ("0", "1"):
             self.assertEqual(self.review.data["rows"][sid]["pending"], ["网页处理人或状态已变化"])
-            self.assertEqual(self.review.data["rows"][sid]["rule"], 2)
+            self.assertEqual(self.review.data["rows"][sid]["rule"], 3)
         self.assertEqual(self.review.data["rows"]["9"]["status"], "通过")
         for released in (False, None, 1, "true"):
             with self.subTest(detail_released=released):
@@ -629,22 +629,25 @@ class RunRecoveryTests(unittest.TestCase):
         finally:
             book.close()
 
-    def test_rule_upgrade_reassesses_auto_confirmation_preserving_workbook(self):
+    def test_rule_upgrade_removes_old_auto_row_preserving_manual_confirmation(self):
         make_feedback(self.review.feedback_path, [("0", "旧问题", "复核对象", "原校对员")])
         entry = self.review.data["rows"]["0"]
         entry.update(status="有问题", rule=1, confirmed="旧问题", auto_confirmed=True,
                      reviewer="原校对员", feedback_synced=False)
         manual = self.review.data["rows"]["1"]
         manual.update(confirmed="人工问题", reviewer="校对员", feedback_synced=True)
-        before = self.review.feedback_path.read_bytes()
         self.run_review("校对员")
         self.assertNotIn("confirmed", entry)
         self.assertNotIn("auto_confirmed", entry)
-        self.assertIn("上一版规则曾自动判为有问题，表格里的行请人工处理", entry["pending"])
-        self.assertEqual(entry["status"], "待核")
+        self.assertEqual(entry["pending"], [])
+        self.assertEqual(entry["status"], "通过")
         self.assertEqual(manual["confirmed"], "人工问题")
         self.assertNotIn(("status", "1"), self.calls)
-        self.assertEqual(self.review.feedback_path.read_bytes(), before)
+        book = load_workbook(self.review.feedback_path)
+        try:
+            self.assertEqual(list(book.worksheets[0].values), [HEADERS])
+        finally:
+            book.close()
 
     def test_manual_confirm_removes_auto_marker(self):
         make_feedback(self.review.feedback_path)

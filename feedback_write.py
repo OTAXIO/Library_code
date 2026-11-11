@@ -27,7 +27,20 @@ def _snapshot(book):
     ]
 
 
+class FeedbackModified(SafetyStop):
+    """The automatic row no longer matches the saved confirmation."""
+
+
 def write_feedback(path, backup_dir, sid, note, owner, reviewer):
+    _change_feedback(path, backup_dir, sid, note, owner, reviewer, remove=False)
+
+
+def remove_feedback(path, backup_dir, sid, note, owner, reviewer):
+    """Delete only an exact automatic row; a missing Said is already removed."""
+    _change_feedback(path, backup_dir, sid, note, owner, reviewer, remove=True)
+
+
+def _change_feedback(path, backup_dir, sid, note, owner, reviewer, *, remove):
     if not is_assigned_owner(reviewer) or reviewer == owner:
         raise SafetyStop("请先在主界面负责人下拉框选好自己，校对人不能是被复核人。")
     path, backup_dir = Path(path), Path(backup_dir)
@@ -57,15 +70,29 @@ def write_feedback(path, backup_dir, sid, note, owner, reviewer):
                         raise SafetyStop(f"复核反馈.xlsx 中 Said {key} 出现多行，请先处理重复行。")
                     seen.add(key)
                     if key == sid:
-                        if row[2].value != owner:
+                        if not remove and row[2].value != owner:
                             raise SafetyStop(f"复核反馈.xlsx 中 Said {sid} 的负责人不同，已停止写入。")
                         target = row[0].row
-                target = target or sheet.max_row + 1
-                for column, value in enumerate((sid, note, owner, reviewer), 1):
-                    cell = sheet.cell(target, column, value)
-                    cell.data_type = "s"
-                    cell.number_format = "@"
-                expected = _snapshot(book)
+                if remove:
+                    if target is None:
+                        return
+                    if tuple(cell.value for cell in sheet[target]) != (sid, note, owner, reviewer):
+                        raise FeedbackModified("反馈表里该行已被人工修改，请人工处理")
+                    # Derive the expected cells before mutating: every surviving
+                    # cell (including styles, formulas and other sheets) must match.
+                    expected = _snapshot(book)
+                    title, rows = expected[0]
+                    expected[0] = (title, rows[:target-1] + rows[target:])
+                    sheet.delete_rows(target)
+                    if _snapshot(book) != expected:
+                        raise SafetyStop("删除反馈行后的其余单元格校验失败，原文件未修改。")
+                else:
+                    target = target or sheet.max_row + 1
+                    for column, value in enumerate((sid, note, owner, reviewer), 1):
+                        cell = sheet.cell(target, column, value)
+                        cell.data_type = "s"
+                        cell.number_format = "@"
+                    expected = _snapshot(book)
                 descriptor, name = tempfile.mkstemp(prefix=".feedback-", suffix=".xlsx", dir=path.parent)
                 os.close(descriptor)
                 temporary = Path(name)
