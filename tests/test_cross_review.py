@@ -717,6 +717,23 @@ class FeedbackTests(unittest.TestCase):
         panel.owner.set("复核对象")
         return panel
 
+    def test_standalone_cross_review_defaults_to_no_selection_and_sends_no_command(self):
+        import tkinter as tk
+        from unittest.mock import Mock
+        from tests.cross_review_host import CrossReviewTestApp
+        from workflow_service import WorkflowService
+        root = tk.Tk()
+        root.withdraw()
+        app = CrossReviewTestApp(root, service=WorkflowService(self.base),
+                                 auto_load=False, bridge=Mock(online=True))
+        self.addCleanup(app.close)
+        app.render()
+        self.assertEqual(app.cross_review.owner.get(), '')
+        self.assertEqual(app.cross_review.reviewer.get(), '')
+        self.assertEqual(str(app.start_button['state']), 'disabled')
+        app.start()
+        app.bridge.call.assert_not_called()
+
     def test_panel_without_roster_loads_trims_and_confirms(self):
         self.review.save()
         panel = self.panel()
@@ -844,7 +861,7 @@ class FeedbackTests(unittest.TestCase):
 
     def test_app_without_roster_can_start_run_and_confirm(self):
         import tkinter as tk
-        from app import App
+        from tests.cross_review_host import CrossReviewTestApp as App
         from workflow_service import WorkflowService
         root = tk.Tk()
         root.withdraw()
@@ -908,7 +925,7 @@ class FeedbackTests(unittest.TestCase):
     def test_run_warning_is_redacted_and_dispatched_on_main_thread_only_for_failure(self):
         import tkinter as tk
         from threading import get_ident
-        from app import App
+        from tests.cross_review_host import CrossReviewTestApp as App
         from workflow_service import WorkflowService
         main_thread = get_ident()
         for outcome in ("failure", "complete", "pause"):

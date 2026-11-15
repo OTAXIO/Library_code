@@ -1,0 +1,32 @@
+﻿<script>
+// The native claimDetail is shared with papers; only the patent list/drawer differs.
+window.patentClaims = {};
+window.synthetic = {saPatentId:'20261026bdee1568c229', zlmc:'基于GPU的SM2 数字签名与验签快速实现方法及系统',
+ zlh:'ZL202110613751.0',sqh:'CN 113221193 B',gh:'00001',qr:77,queryType:1,matchCount:2,
+ itemId:',2075091759108653058,1772851722047053825',zlmcSame:false,zlhSame:true,sqhSame:true,
+ claimStatus:false,markStatus:'待处理',markType:1,reason:'匹配数据未认领',remark:'',updateUsername:'测试员'};
+vm.$options.name='saPatentCompare';
+vm.searchForm={saPatentId:'',matchCount:null,claimStatus:'',markStatus:'',zlmc:'',zlh:'',sqh:'',gh:'',qr:'',reason:'',markType:null,updateUsername:'',createTimeRange:[],updateTimeRange:[]};
+vm.reasons=['匹配数据未认领','匹配数据认领人不一致','未匹配到数据'];
+detail.currentSaPatentId='';detail.currentItemId='';detail.currentMatchCount=0;
+detail.leftData={};detail.matchedItemCards=[];
+detail.show=function(row){
+ this.currentSaPatentId=row.saPatentId;this.currentCompareRow=copy(row);this.currentMatchCount=row.matchCount;
+ this.dialogVisible=true;this.dialogLoading=false;
+ this.leftData={id:row.saPatentId,xm:'测试员',gh:'00001               ',zlmc:row.zlmc,zlh:row.zlh,sqh:row.sqh,
+   inventor:'邱卫东;测试员',sqdw:'上海交通大学',qr:77,sfjdwdydw:1,scbj:'N'};
+ this.matchedItemCards=row.itemId.split(',').filter(Boolean).map(id=>{
+  const claimed=patentClaims[id]?.[1]==='scholar-001';
+  const card={itemId:id,title:row.zlmc,applicationNumber:'CN202110613751.0',authorization:'CN113221193B',
+    publicationNumber:'CN113221193A',inventor:'1.邱卫东; 2.测试员',patentHolder:'[1]. 上海交通大学',loading:true,
+    claimStatusHtml:'<span class="claim-info__status">'+(claimed?'已认领':'未认领')+'</span><button data-action="claim" data-item-id="'+id+'">认领</button>'+
+      (claimed?'<span class="claim-info__label">姓名</span><span class="claim-info__value">测试员</span><span class="claim-info__label">工号</span><span class="claim-info__value">00001</span>':'')};
+  setTimeout(()=>card.loading=false,25);return card;
+ });
+};
+detail.handleClaim=function(id){
+ if(!this.matchedItemCards.some(c=>c.itemId===id))throw Error('Must select one patent item');
+ window.openedPatentItem=id;window.claimedUsers=patentClaims[id]??(patentClaims[id]={});claimWindow.show(id);
+};
+detail.$refs.compareStatusDialog=statusModal;
+</script>

@@ -28,14 +28,12 @@ body { width: 100%; margin: 0; padding: 14px; background: var(--canvas); color: 
 .eyebrow { font-size: 9px; font-weight: 650; letter-spacing: 1.65px; color: var(--accent); }
 h1 { font-size: 20px; font-weight: 650; line-height: 1.3; letter-spacing: -.45px; margin: 3px 0 0; }
 h2 { font-size: 13px; line-height: 1.4; font-weight: 600; margin: 0; }
-h3 { font-size: 12px; line-height: 1.4; font-weight: 600; margin: 0 0 5px; }
 p { margin: 0; }
 .intro { margin: 8px 0 12px; color: var(--muted); font-size: 12px; }
 main { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 main > * { flex: 0 0 auto; min-width: 0; }
 .card { border: 1px solid var(--line); border-radius: 17px; background: var(--surface); }
-.pairing, .front { padding: 13px; }
-.front .full-width { margin-top: 8px; }
+.pairing { padding: 13px; }
 .section-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .pill { flex-shrink: 0; padding: 3px 7px; border-radius: 6px; color: var(--accent); background: var(--accent-soft); font-size: 10px; }
 .hint { color: var(--muted); font-size: 11px; line-height: 1.7; margin: 10px 0 14px; }
@@ -51,29 +49,13 @@ button { appearance: none; display: inline-flex; align-items: center; justify-co
 .button-arrow { flex: 0 0 auto; }
 button:hover { background: var(--inset); border-color: #c8c2bd; }
 button:active { background: #dfdcd8; }
-button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 button:disabled { background: var(--inset); border-color: var(--line); color: #a29a9b; cursor: default; }
 .primary { color: #fff; background: var(--accent); border-color: var(--accent); }
 .primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 .primary:active { background: #792131; }
 .pair-actions { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; }
 .pair-actions .primary { justify-content: space-between; padding-inline: 14px; }
-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 13px; cursor: pointer; list-style: none; font-size: 12px; font-weight: 550; border-radius: 16px; }
-summary::-webkit-details-marker { display: none; }
-summary:hover { background: #eae8e54d; }
-.summary-trailing { display: inline-flex; flex-shrink: 0; align-items: center; gap: 10px; }
-.optional { color: var(--muted); font-size: 10px; font-weight: 400; }
-.chevron { font-size: 21px; color: var(--muted); line-height: .8; transition: transform .15s; }
-details[open] .chevron { transform: rotate(90deg); }
-details[open] .optional { display: none; }
-.workflow-content { padding: 0 13px 13px; }
-.workflow-content .hint { margin: 0 0 12px; }
-.workflow-divider { height: 1px; background: var(--line); margin: 14px 0; }
-.import-binding { margin-top: 8px; }
-.full-width { width: 100%; justify-content: space-between; }
-.two-columns { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 8px; margin-top: 8px; }
-.two-columns button { padding-inline: 5px; font-size: 11px; }
-.caption { color: var(--muted); font-size: 10px; line-height: 1.7; margin-top: 11px; }
 .utilities { display: flex; justify-content: center; }
 .utility { font-size: 11px; background: transparent; border-color: transparent; padding: 5px; gap: 6px; }
 .utility svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linejoin: round; stroke-linecap: round; flex-shrink: 0; }

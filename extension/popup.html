@@ -16,7 +16,7 @@
       <h1>论文助手</h1>
     </div>
   </header>
-  <p class="intro">自动认领 / 零匹配前台查重。在这里连接网页，在桌面开始任务。</p>
+  <p class="intro">自动认领。在这里连接网页，在桌面开始任务。</p>
   <main>
     <section class="card pairing" aria-labelledby="pairing-title">
       <div class="section-heading">
@@ -38,31 +38,6 @@
       <h2 id="status-title"><span class="status-dot" aria-hidden="true"></span>连接状态</h2>
       <p id="status" role="status">请先粘贴桌面助手中的配对码，连接当前工作页。</p>
     </section>
-    <section class="card front" aria-labelledby="front-title">
-      <div class="section-heading">
-        <h2 id="front-title">2. 零匹配：绑定前台检索页</h2>
-        <span class="pill">只读检索</span>
-      </div>
-      <p class="hint">另开标签页登录 www.ir.lib.sjtu.edu.cn 前台，在该页点击下方按钮。零匹配先在前台查本库，查到才关联认领，查不到才标“需导入”。</p>
-      <button id="front" class="secondary full-width">绑定当前前台页</button>
-    </section>
-    <details class="card workflow">
-      <summary>
-        <span>3. 原自动导入：绑定后台导入页</span>
-        <span class="summary-trailing"><span class="optional">展开</span><span class="chevron" aria-hidden="true">›</span></span>
-      </summary>
-      <div class="workflow-content">
-        <h3>WOS 文献页（仅 WOS 模式需要）</h3>
-        <p class="hint">Crossref＋OpenAlex 的 Excel 模式不需要 WOS。使用原 WOS 模式时，在已登录文献页点击：</p>
-        <button id="wos" class="secondary full-width">绑定当前 WOS 页</button>
-        <div class="workflow-divider" aria-hidden="true"></div>
-        <h3>后台导入页</h3>
-        <p class="hint">另开「数据管理 → 数据导入与批次管理」，在该页扩展中点击：</p>
-        <button id="open-import" class="secondary full-width"><span class="button-label">打开数据导入与批次管理</span><span class="button-arrow" aria-hidden="true">↗</span></button>
-        <button id="import" class="secondary full-width import-binding">绑定当前导入页</button>
-        <p class="caption">SA 与后台导入页保持打开。在桌面选择导入方式；Excel 模式获取 Crossref＋OpenAlex 元数据，核验后入库、批注并结案。原 WOS 模式另外保留 WOS 页。</p>
-      </div>
-    </details>
     <div class="utilities">
       <button id="inspect" class="utility">
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m13 13 4 4M14.5 8.5a6 6 0 1 1-12 0 6 6 0 0 1 12 0Z"/></svg>
@@ -71,7 +46,7 @@
     </div>
     <textarea id="diagnostics" rows="6" readonly hidden aria-label="只读控件诊断"></textarea>
   </main>
-  <footer>支持 WOS .com / clarivate.cn。下载权限仅用于本次 TXT，不读取历史下载、账号或登录令牌；不下载 PDF。</footer>
+  <footer>保持 SA 比对页打开，在桌面选择负责人和范围后开始认领。</footer>
   <script src="popup.js"></script>
 </body>
 </html>

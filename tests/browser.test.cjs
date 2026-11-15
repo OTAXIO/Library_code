@@ -4,6 +4,7 @@ const path = require('node:path');
 const {chromium} = require('playwright');
 const {runSACommand} = require('../extension/adapter.js');
 const fixture = fs.readFileSync(path.join(__dirname, 'fixtures/compare.html'), 'utf8');
+const patentFixture = fixture + fs.readFileSync(path.join(__dirname, 'fixtures/patent.html'), 'utf8');
 const windowsEdge = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const launchOptions = {headless: true};
 if (process.env.SA_TEST_BROWSER) launchOptions.executablePath = process.env.SA_TEST_BROWSER;
@@ -13,7 +14,7 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
   const browser = await chromium.launch(launchOptions);
   const context = await browser.newContext();
   // Every HTTP request is intercepted. This suite never contacts production.
-  await context.route('**/*', route => route.fulfill({status:200,contentType:'text/html',body:fixture}));
+  await context.route('**/*', route => route.fulfill({status:200,contentType:'text/html',body:route.request().url().includes('patent-fixture')?patentFixture:fixture}));
   const page = await context.newPage();
   const reset = async () => {
     await page.goto('http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list');
@@ -1067,6 +1068,72 @@ else if (fs.existsSync(windowsEdge)) launchOptions.executablePath = windowsEdge;
     await page.evaluate(()=>testConfig.claim='已认领');
     assert.equal((await execute(command('search'))).ok,false);
     assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  const patentCommand = (action, extra={}) => command(action,{sa_id:'20261026bdee1568c229',...extra});
+  const patentReset = async () => page.goto('http://admin.ir.lib.sjtu.edu.cn/patent-fixture#/saPatentCompare/list');
+  test('patent status and search return native identity, trimmed left and complete cards',async()=>{
+    await patentReset();
+    const status=await execute(patentCommand('status'));
+    assert.equal(status.ok,true,JSON.stringify(status));assert.equal(status.data.page_kind,'patent');
+    assert.equal(status.data.row.saPatentId,'20261026bdee1568c229');assert.equal(status.data.row.zlh,'ZL202110613751.0');
+    const read=await execute(patentCommand('search',{close_detail:true}));
+    assert.equal(read.ok,true,JSON.stringify(read));assert.equal(read.data.left.gh,'00001');
+    assert.equal(read.data.cards.length,2);assert.equal(read.data.cards[0].claimed,false);
+    assert.equal(read.data.cards[0].authorization,'CN113221193B');assert.equal(read.data.detail_released,true);
+    assert.equal(await page.evaluate(()=>detail.dialogVisible),false);
+  });
+  test('patent claim uses one handleClaim item and closes only after both native claims',async()=>{
+    await patentReset();
+    for (const item_id of ['2075091759108653058','1772851722047053825']) {
+      const read=await execute(patentCommand('search',{close_detail:true}));assert.equal(read.ok,true,JSON.stringify(read));
+      const payload={item_id,expected:read.data.row,sa_text:'测试员(00001)',staff_id:'00001',roster_staff_id:'00001'};
+      const prepared=await execute(patentCommand('prepare_claim',payload));assert.equal(prepared.ok,true,JSON.stringify(prepared));
+      assert.equal(await page.evaluate(()=>window.openedPatentItem),item_id);
+      assert.equal(prepared.data.prepared.item_id,item_id);
+      const result=await execute(patentCommand('submit_claim',{...payload,prepared:prepared.data.prepared,author_index:0,confirmed:true}));
+      assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.data.claimed,true);
+      if(item_id==='2075091759108653058') {
+        const next=await execute(patentCommand('search',{close_detail:true}));
+        const closed=await execute(patentCommand('complete',{expected:next.data.row,owner:'测试员',reviewed:true,note:'已认领'}));
+        assert.equal(closed.ok,false);assert.equal(await page.evaluate(()=>synthetic.markStatus),'待处理');
+      }
+    }
+    const read=await execute(patentCommand('search',{close_detail:true}));
+    assert.ok(read.data.cards.every(c=>c.claimed && c.staff_id==='00001' && c.name==='测试员'));
+    const closed=await execute(patentCommand('complete',{expected:read.data.row,owner:'测试员',reviewed:true,note:'已认领'}));
+    assert.equal(closed.ok,true,JSON.stringify(closed));assert.equal(closed.data.row.remark,'已认领');
+  });
+  test('patent invalid or missing item_id and paper-only commands stop without writing',async()=>{
+    await patentReset();const read=await execute(patentCommand('search',{close_detail:true}));
+    for(const item_id of [undefined,'999','2075091759108653058,1772851722047053825']) {
+      for(const action of ['inspect_claim','prepare_claim','submit_claim']) {
+        const result=await execute(patentCommand(action,{expected:read.data.row,item_id}));assert.equal(result.ok,false);
+      }
+    }
+    for(const action of ['link','open_claim','open_metadata','repair_correspondent','cross_review_page','prepare_reassignment'])
+      assert.equal((await execute(patentCommand(action))).ok,false);
+    assert.equal(await page.evaluate(()=>writeCount),0);
+  });
+  test('patent plain labelled claim HTML preserves exact staff and rejects duplicate identity',async()=>{
+    await patentReset();
+    await page.evaluate(()=>{
+      const show=detail.show;detail.show=function(row){show.call(this,row);
+        this.matchedItemCards[0].claimStatusHtml='<b>已认领</b><button data-action="claim">认领</button><div>姓名 测试员 工号 00001</div>';
+      };
+    });
+    const read=await execute(patentCommand('search',{close_detail:true}));
+    assert.equal(read.ok,true,JSON.stringify(read));assert.equal(read.data.cards[0].claimed,true);
+    assert.equal(read.data.cards[0].name,'测试员');assert.equal(read.data.cards[0].staff_id,'00001');
+    await page.evaluate(()=>{const show=detail.show;detail.show=function(row){show.call(this,row);this.matchedItemCards[0].claimStatusHtml+='姓名 测试员 工号 00002';};});
+    assert.equal((await execute(patentCommand('search',{close_detail:true}))).ok,false);
+  });
+  test('patent zero-match supports only need-import closure and rejects foreign staff',async()=>{
+    await patentReset();await page.evaluate(()=>{synthetic.matchCount=0;synthetic.itemId='';});
+    const read=await execute(patentCommand('status'));
+    for(const note of ['已认领','已入库','非交大'])
+      assert.equal((await execute(patentCommand('complete',{expected:read.data.row,owner:'测试员',reviewed:true,note}))).ok,false);
+    const result=await execute(patentCommand('complete',{expected:read.data.row,owner:'测试员',reviewed:true,note:'需导入'}));
+    assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.data.row.remark,'需导入');
   });
   try {
     const selected=process.env.SA_TEST_CASE?cases.filter(([name])=>name.includes(process.env.SA_TEST_CASE)):cases;

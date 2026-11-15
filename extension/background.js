@@ -19,7 +19,7 @@ async function withIdleConnection(operation) {
 const trustedPopup = sender => sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL("popup.html");
 const validPage = url => {
   try { const u = new URL(url); return ["http:", "https:"].includes(u.protocol) &&
-    u.hostname === "admin.ir.lib.sjtu.edu.cn" && u.hash.split("?")[0] === "#/dataCompare/list"; }
+    u.hostname === "admin.ir.lib.sjtu.edu.cn" && ["#/dataCompare/list", "#/saPatentCompare/list"].includes(u.hash.split("?")[0]); }
   catch { return false; }
 };
 async function request(route, body, token) {
@@ -132,6 +132,9 @@ async function pollBridge(senderTab, fromAlarm=false) {
           if (!primaryValid(tab.url)) throw new Error("页面已切换，停止执行");
           if (pair.mode==="wos" && !command.action.startsWith("wos_"))
             throw new Error("当前是 WOS 下载连接。后台操作请在桌面重新配对 SA 页面");
+          if (new URL(tab.url).hash.split("?")[0] === "#/saPatentCompare/list" &&
+              !["status", "search", "inspect_claim", "prepare_claim", "submit_claim", "complete"].includes(command.action))
+            throw new Error("专利页不支持此命令");
           if (workflowRole(command.action)) result = await dispatchWorkflow(command, pair);
           else {
             // MAIN-world page methods wait on page timers. A background SA tab

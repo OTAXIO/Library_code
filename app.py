@@ -1,4 +1,4 @@
-"""Two-task UI (claim, zero-match 需导入); all browser actions use the paired extension."""
+"""Paper and patent claims using the paired extension."""
 from __future__ import annotations
 
 import queue
@@ -16,7 +16,7 @@ from ui_theme import P, install_theme, style_text
 from workflow_service import WorkflowService
 
 BASE = Path(__file__).resolve().parent
-VERSION = "0.4.63"
+VERSION = "0.4.64"
 SA_URL = "http://admin.ir.lib.sjtu.edu.cn/#/dataCompare/list"
 SCOPES = {"待处理": "pending", "重试跳过项": "skipped", "已完成": "done"}
 
@@ -26,6 +26,9 @@ class App:
         self.root = root
         self.service = service or WorkflowService(BASE)
         self.bridge, self.roster = bridge, None
+        self.rosters = {"claim": None, "patent": None}
+        self.patent_error = ""
+        self.active_mode = "claim"
         self.busy, self.closed = False, False
         self.stop, self.events = threading.Event(), queue.Queue()
         self.last_results = {}
@@ -36,7 +39,7 @@ class App:
         self.connection = tk.StringVar(value="浏览器未连接")
         self.counts = tk.StringVar()
         install_theme(root)
-        root.title(f"机构知识库 · 自动认领 / 零匹配需导入 {VERSION}")
+        root.title(f"机构知识库 · 认领 {VERSION}")
         root.geometry("760x540")
         root.minsize(660, 430)
         root.attributes("-topmost", True)
@@ -56,8 +59,6 @@ class App:
         ttk.Label(header, text="机构知识库", style="Title.TLabel").pack(side="left")
         self.pair_button = ttk.Button(header, text="连接浏览器", command=self.pair)
         self.pair_button.pack(side="right")
-        self.review_button = ttk.Button(header, text="手动核验名单", command=self.open_manual_review)
-        self.review_button.pack(side="right", padx=8)
         ttk.Label(header, textvariable=self.connection, style="Muted.TLabel").pack(side="right", padx=10)
         controls = ttk.Frame(frame)
         controls.grid(row=1, column=0, sticky="ew", pady=(0, 8))
@@ -78,9 +79,8 @@ class App:
         self.notebook.grid(row=2, column=0, sticky="nsew")
         self.pages, self.trees, self.details = {}, {}, {}
         explanations = {
-            "claim": ("自动认领", "单匹配任务：核对人员编号与署名 → 认领 → 网页批注 → 回写名单。"),
-            "import": ("零匹配 · 需导入", "零匹配任务：只读核对网页匹配数仍为 0 → 网页备注“需导入”并设为已处理 → 名单备注“需导入”、是否识别 1。不入库、不认领。"),
-            "evidence": ("证据核验", "读取两侧证据并查找馆藏候选。结果显示在条目详情，报告保存在 runtime/evidence-reviews。"),
+            "claim": ("论著认领", "单匹配 → 核对并认领（无法认领则跳过并写原因）；零匹配 → 网页备注“需导入”并结项；两条及以上匹配 → 跳过并在名单备注说明，不结项。"),
+            "patent": ("专利认领", "1–2 个匹配条目逐项认领；零匹配标注需导入；≥3 条仅名单跳过。请在 SA 专利比对页（http://admin.ir.lib.sjtu.edu.cn/#/saPatentCompare/list）配对。论著在比对结果页配对。"),
         }
         for mode, (title, explanation) in explanations.items():
             page = ttk.Frame(self.notebook, padding=(2, 4))
@@ -94,7 +94,7 @@ class App:
             table = ttk.Frame(page)
             table.grid(row=1, column=0, sticky="nsew")
             tree = ttk.Treeview(table, columns=("id", "title", "status"), show="headings", height=6)
-            for key, label, width in (("id", "名单 ID", 180), ("title", "论文题名", 360), ("status", "状态", 85)):
+            for key, label, width in (("id", "名单 ID", 180), ("title", "专利名称" if mode == "patent" else "论文题名", 360), ("status", "状态", 85)):
                 tree.heading(key, text=label)
                 tree.column(key, width=width, minwidth=70, stretch=key == "title")
             for tag, background, foreground in (("pending", P.amber_soft, P.amber),
@@ -104,22 +104,18 @@ class App:
             scroll = ttk.Scrollbar(table, orient="vertical", command=tree.yview)
             scroll.pack(side="right", fill="y")
             tree.configure(yscrollcommand=scroll.set)
-            detail = tk.Text(page, height=8 if mode == "evidence" else 3, wrap="word")
+            detail = tk.Text(page, height=3, wrap="word")
             style_text(detail)
             detail.grid(row=2, column=0, sticky="ew", pady=(8, 0))
             detail.configure(state="disabled")
             self.trees[mode], self.details[mode] = tree, detail
             tree.bind("<<TreeviewSelect>>", lambda _, selected=mode: self.show_selected(selected))
-        from cross_review_ui import CrossReviewPanel
-        self.cross_review = CrossReviewPanel(self.notebook, self)
-        self.pages["cross"] = self.cross_review
-        self.notebook.add(self.cross_review, text="交叉核验")
         self.notebook.bind("<<NotebookTabChanged>>", lambda _: self.render())
         bottom = ttk.Frame(frame)
         bottom.grid(row=3, column=0, sticky="ew", pady=(10, 6))
         actions = ttk.Frame(bottom)
         actions.pack(fill="x")
-        self.start_button = ttk.Button(actions, text="开始自动认领", style="Primary.TButton", command=self.start)
+        self.start_button = ttk.Button(actions, text="开始认领", style="Primary.TButton", command=self.start)
         self.start_button.pack(side="left")
         self.pause_button = ttk.Button(actions, text="暂停", command=self.pause, state="disabled")
         self.pause_button.pack(side="left", padx=8)
@@ -135,36 +131,44 @@ class App:
         return next((mode for mode, page in self.pages.items() if str(page) == self.notebook.select()), "claim")
 
     def configure_actions(self):
-        self.cross_review.controls()
-        cross = self.mode() == "cross"
+        patent = self.mode() == "patent"
+        unavailable = patent and not self.rosters.get("patent")
         for widget in (self.owner_box, self.scope_box):
-            widget.configure(state="disabled" if self.busy or cross else "readonly")
-        if cross:
-            self.limit_box.configure(state="disabled")
-            self.start_button.configure(text="开始核验", state="normal" if self.cross_review.review and
-                                        not self.busy else "disabled")
-            self.skip_button.configure(state="disabled")
-            self.review_button.configure(state="disabled")
-            return
-        evidence = self.mode() == "evidence"
-        disabled = self.busy or (not evidence and self.scope.get() == "已完成")
-        retry = self.scope.get() == '重试跳过项' and not evidence
-        self.start_button.configure(text="开始只读核验" if evidence else '重新检查全部跳过项' if retry else
-            "开始标注需导入" if self.mode() == "import" else "开始自动认领",
-            state="disabled" if disabled else "normal")
-        self.limit_box.configure(state="disabled" if self.busy or retry else "normal")
-        owned = is_assigned_owner(self.owner.get())
+            widget.configure(state="disabled" if self.busy or unavailable else "readonly")
+        retry = self.scope.get() == "重试跳过项"
+        self.start_button.configure(text="开始专利认领" if patent else "开始认领", state="disabled" if
+                                    self.busy or unavailable or self.scope.get() == "已完成" else "normal")
+        self.limit_box.configure(state="disabled" if self.busy or unavailable or retry else "normal")
         selected = self.trees[self.mode()].selection()
-        can_skip = not evidence and not self.busy and self.scope.get() == "待处理" and owned and len(selected) == 1
+        can_skip = (not unavailable and not self.busy and self.scope.get() == "待处理"
+                    and is_assigned_owner(self.owner.get()) and len(selected) == 1)
         self.skip_button.configure(state="normal" if can_skip else "disabled")
-        self.review_button.configure(state="normal" if not self.busy and self.roster and owned else "disabled")
+
+    @staticmethod
+    def service_mode(mode):
+        return "paper" if mode == "claim" else mode
 
     def reload_roster(self):
         if self.busy:
             return
         try:
-            self.roster = self.service.load()
-            owners = sorted({r.owner for r in self.roster.records if is_assigned_owner(r.owner)})
+            try:
+                self.rosters["claim"] = self.service.load()
+            except (SafetyStop, OSError) as exc:
+                self.rosters["claim"] = None
+                self.status.set(str(exc))
+            try:
+                self.rosters["patent"] = self.service.load(kind="patent")
+                self.patent_error = ""
+            except (SafetyStop, OSError) as exc:
+                self.rosters["patent"] = None
+                self.patent_error = str(exc)
+            # A patent status-column migration may change the shared workbook.
+            if self.rosters["claim"] and self.rosters["patent"] and self.rosters["claim"].path == self.rosters["patent"].path:
+                self.rosters["claim"] = self.service.read_current()
+            self.active_mode = self.mode()
+            self.roster = self.rosters[self.mode()]
+            owners = sorted({r.owner for roster in self.rosters.values() if roster for r in roster.records if is_assigned_owner(r.owner)})
             self.owner_box["values"] = owners
             if self.owner.get() not in owners:
                 self.owner.set(owners[0] if len(owners) == 1 else "")
@@ -178,11 +182,16 @@ class App:
     def render(self):
         if self.closed:
             return
+        if self.active_mode != self.mode():
+            self.rosters[self.active_mode] = self.roster
+            self.active_mode = self.mode()
+            self.roster = self.rosters.get(self.active_mode, self.roster)
+        self.rosters[self.active_mode] = self.roster
         scope = SCOPES.get(self.scope.get(), "pending")
         for mode, tree in self.trees.items():
             selection = tree.selection()
             tree.delete(*tree.get_children())
-            for r in self.service.visible(self.roster, mode, self.owner.get(), scope):
+            for r in self.service.visible(self.rosters.get(mode), self.service_mode(mode), self.owner.get(), scope):
                 tag = "done" if r.done else "skipped" if r.skipped else "pending"
                 tree.insert("", "end", iid=r.sa_id, values=(r.sa_id, r.title,
                     {"done": "已完成", "skipped": "已跳过", "pending": "待处理"}[tag]), tags=(tag,))
@@ -190,11 +199,7 @@ class App:
                 tree.selection_set(selection[0])
             self.show_selected(mode)
         mode = self.mode()
-        if mode == "cross":
-            self.counts.set("交叉核验 · 独立复核进度")
-            self.configure_actions()
-            return
-        rows = self.service.visible(self.roster, mode, self.owner.get(), "all")
+        rows = self.service.visible(self.roster, self.service_mode(mode), self.owner.get(), "all")
         self.counts.set(f"待处理 {sum(not r.done and not r.skipped for r in rows)}  ·  "
                         f"已跳过 {sum(r.skipped and not r.done for r in rows)}  ·  已完成 {sum(r.done for r in rows)}")
         self.configure_actions()
@@ -202,8 +207,11 @@ class App:
     def show_selected(self, mode):
         tree, detail = self.trees[mode], self.details[mode]
         selection = tree.selection()
-        record = next((r for r in self.roster.records if selection and r.sa_id == selection[0]), None) if self.roster else None
+        roster = self.rosters.get(mode)
+        record = next((r for r in roster.records if selection and r.sa_id == selection[0]), None) if roster else None
         text = "选择记录可查看原因和批注。已完成任务不会再次执行。"
+        if mode == "patent" and not roster:
+            text = self.patent_error or "未找到专利名单（需要包含 sa_patent表ID 表头的工作表或 patent.xlsx）"
         if record:
             text = f"{record.title}\n待处理原因：{record.reason or '无'}  ·  数据来源：{record.source or '未记录'}\n备注：{record.remark or '空'}"
             if record.sa_id in self.last_results:
@@ -222,14 +230,15 @@ class App:
             selected = self.trees[mode].selection()
             if len(selected) != 1:
                 raise SafetyStop("请先在列表中只选中一条待处理数据。")
-            record = self.service.select_skip(self.roster, mode, owner, scope, selected[0])
+            record = self.service.select_skip(self.roster, self.service_mode(mode), owner, scope, selected[0])
             if not messages.askyesno("跳过所选数据", f"仅跳过这一条？\n\n{record.title}\n名单 ID：{record.sa_id}\n\n"
                 "是否识别将写为 2；备注为空时写“手动跳过”，已有备注保留。不认领、不在网页结案。\n"
                 "普通批次会跳过它；以后可在“重试跳过项”中处理。", parent=self.root):
                 return
             self.set_busy(True)
-            result = self.service.skip_selected(self.roster, mode, owner, scope, record.sa_id, self.bridge)
+            result = self.service.skip_selected(self.roster, self.service_mode(mode), owner, scope, record.sa_id, self.bridge)
             self.roster = result.roster
+            self.rosters[self.mode()] = self.roster
             self.last_results.update(result.messages)
             self.status.set(result.summary)
         except (SafetyStop, OSError) as exc:
@@ -277,6 +286,7 @@ class App:
             self.set_busy(True)
             result = self.service.review_selected(self.roster, self.owner.get(), sa_id, state, self.bridge)
             self.roster = result.roster
+            self.rosters[self.mode()] = self.roster
             self.last_results.update(result.messages)
             self.status.set(result.summary)
             return result
@@ -285,36 +295,30 @@ class App:
             self.render()
 
     def start(self):
+        if self.mode() == "patent" and not self.rosters.get("patent"):
+            return
         if self.busy:
             return
-        if self.mode() == "cross":
-            self.cross_review.start()
-            return
         try:
-            mode, scope = self.mode(), SCOPES[self.scope.get()]
-            if (scope != 'skipped' or mode == "evidence") and not self.limit.get().strip().isdigit():
+            mode, scope = self.service_mode(self.mode()), SCOPES[self.scope.get()]
+            if scope != 'skipped' and not self.limit.get().strip().isdigit():
                 raise SafetyStop("本轮条数须为 1–100 的整数。")
-            records = None if mode == "evidence" else self.service.select(self.roster, mode, self.owner.get(),
-                100 if scope=='skipped' else int(self.limit.get()), scope)
-            if not self.bridge or not self.bridge.online:
-                raise SafetyStop("请先连接浏览器：在 SA 比对结果页扩展中配对。")
+            records = self.service.select(self.roster, mode, self.owner.get(),
+                100 if scope == 'skipped' else int(self.limit.get()), scope)
+            if (any(r.matches < 3 for r in records) if mode == "patent" else self.service.needs_browser(records)) and (not self.bridge or not self.bridge.online):
+                raise SafetyStop("请先连接浏览器：在 SA 专利比对页扩展中配对。" if mode == "patent" else
+                                 "请先连接浏览器：在 SA 比对结果页扩展中配对。")
         except (SafetyStop, KeyError) as exc:
             messages.showwarning("尚未开始", str(exc), parent=self.root)
             return
         self.stop.clear()
         self.set_busy(True)
-        limit = int(self.limit.get()) if mode == "evidence" else None
-        self.status.set("开始只读核验。" if mode == "evidence" else
-                        f"开始{'标注需导入' if mode == 'import' else '认领'} {len(records)} 条，运行中请勿手动操作工作页。")
+        self.status.set(f"开始认领 {len(records)} 条，运行中请勿手动操作工作页。")
         roster, bridge, owner = self.roster, self.bridge, self.owner.get()
         def work():
             try:
                 progress = lambda text: self.events.put(("progress", text))
-                if mode == "evidence":
-                    result = self.service.review_evidence(roster, owner, scope, limit, bridge, self.stop, progress)
-                else:
-                    result = self.service.run(roster, records, mode, scope, bridge, self.stop, progress,
-                                              need_import=mode == "import", owner=owner)
+                result = self.service.run(roster, records, mode, scope, bridge, self.stop, progress, owner=owner)
                 self.events.put(("result", result))
             except Exception as exc:
                 from run_diagnostics import safe_text
@@ -353,13 +357,15 @@ class App:
                     messages.showwarning("交叉核验已暂停", outcome, parent=self.root)
             elif kind == "result":
                 self.roster, self.last_results = value.roster, value.messages
+                self.rosters[self.active_mode] = self.roster
                 self.set_busy(False)
                 self.render()
                 self.status.set(value.summary)
             elif kind == "error":
                 # Read only: recover fingerprints after a partially saved transaction.
                 try:
-                    self.roster = self.service.read_current()
+                    self.roster = self.service.read_current(kind="patent") if self.active_mode == "patent" else self.service.read_current()
+                    self.rosters[self.active_mode] = self.roster
                 except (SafetyStop, OSError):
                     self.roster = None
                 self.set_busy(False)
@@ -389,9 +395,9 @@ class App:
         window.geometry("460x295")
         frame = ttk.Frame(window, padding=16)
         frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="1. 在 SA 比对结果页打开扩展，粘贴配对码并连接。\n"
-                  "2. 保持该比对页打开。认领和零匹配“需导入”标注都只需要这一页，\n"
-                  "   不需要 WOS 或后台导入页。", wraplength=425).pack(anchor="w", pady=(0, 12))
+        ttk.Label(frame, text="1. 论著在 SA 比对结果页、专利在 SA 专利比对页打开扩展并配对。\n"
+                  "2. 保持该比对页打开，在桌面选择负责人和范围后开始认领。\n"
+                  "   任务结果将在桌面列表中显示。", wraplength=425).pack(anchor="w", pady=(0, 12))
         token = tk.StringVar(value=self.bridge.token)
         token_entry = ttk.Entry(frame, textvariable=token, state="readonly")
         token_entry.pack(fill="x")

@@ -283,7 +283,7 @@ def record_data_sources(roster, records=(), source="WOS", backup_dir=None):
     """
     source = _validated_source(source)
     records = list(records)
-    if roster.path.name.lower() != "list.xlsx" or not roster.sheet_name:
+    if roster.path.name.lower() not in (("list.xlsx", "patent.xlsx") if roster.kind == "patent" else ("list.xlsx",)) or not roster.sheet_name:
         raise SafetyStop("只允许回写当前 code/list.xlsx。")
     if len({record.row for record in records}) != len(records) or any(record not in roster.records for record in records):
         raise SafetyStop("数据来源目标行重复或不属于当前名单，请重新读取。")
@@ -323,7 +323,7 @@ def record_data_sources(roster, records=(), source="WOS", backup_dir=None):
                 output.comment = original.comment
                 for entry in original.infolist():
                     output.writestr(copy.copy(entry), changed if entry.filename == member else original.read(entry))
-            verified = read_roster(temporary)
+            verified = _read_written(temporary, roster)
             if verified.source_column != destination:
                 raise SafetyStop("数据来源列回读失败，原名单未修改。")
             from dataclasses import replace
@@ -364,7 +364,7 @@ def record_data_sources(roster, records=(), source="WOS", backup_dir=None):
 def _mark_values(roster, updates, backup_dir=None, notes=None, *, preserve_notes=False):
     """Atomically write one or more workflow states after full-file verification."""
     path = roster.path
-    if path.name.lower() != "list.xlsx" or not roster.completion_column:
+    if path.name.lower() not in (("list.xlsx", "patent.xlsx") if roster.kind == "patent" else ("list.xlsx",)) or not roster.completion_column:
         raise SafetyStop("只允许回写当前 list.xlsx 的完成备注列。")
     updates = list(updates)
     notes = dict(notes or {})
@@ -414,7 +414,7 @@ def _mark_values(roster, updates, backup_dir=None, notes=None, *, preserve_notes
                 output.comment = source.comment
                 for entry in source.infolist():
                     output.writestr(copy.copy(entry), changed if entry.filename == member else source.read(entry))
-            verified = read_roster(temporary)
+            verified = _read_written(temporary, roster)
             target_values = {record.row: (record, value) for record, value in updates}
             for row_number, (record, value) in target_values.items():
                 expected = [r for r in verified.records if r.row == row_number and r.sa_id == record.sa_id]
@@ -481,7 +481,7 @@ def migrate_status_column(roster):
     if roster.status_separate:
         return roster
     path=roster.path
-    if path.name.lower()!='list.xlsx' or not roster.sheet_name:
+    if path.name.lower() not in (("list.xlsx", "patent.xlsx") if roster.kind == "patent" else ("list.xlsx",)) or not roster.sheet_name:
         raise SafetyStop('只允许迁移 code/list.xlsx 的状态列。')
     destination=roster.header_column_count+1
     temporary=None
@@ -505,7 +505,7 @@ def migrate_status_column(roster):
                 output.comment=original.comment
                 for entry in original.infolist():
                     output.writestr(copy.copy(entry),changed if entry.filename==member else original.read(entry))
-            verified=read_roster(temporary)
+            verified=_read_written(temporary, roster)
             from dataclasses import replace
             intended=[replace(record,remark='') if record.done or record.skipped else record
                       for record in roster.records]
@@ -529,7 +529,7 @@ def migrate_status_column(roster):
                 os.fsync(stream.fileno())
             _commit_verified(temporary, roster, verified.sha256)
             temporary=None
-            return read_roster(path)
+            return _read_written(path, roster)
     except PermissionError as exc:
         raise SafetyStop('名单被占用或无写入权限，是否识别列尚未迁移。') from exc
     finally:
@@ -592,6 +592,11 @@ def cleanup_skipped_notes(roster, clear_records, short_notes, backup_dir=None):
                         {**short_notes, **{sa_id: '' for sa_id in clear_ids}})
 
 
+def _read_written(path, roster):
+    # Preserve the paper reader contract, including existing race-condition hooks.
+    return read_roster(path, kind="patent", _exact=True) if roster.kind == "patent" else read_roster(path)
+
+
 def reconcile_processed(roster, record, remote_row, owner=None):
     """Mirror an already-processed backend row; never change backend state here.
 
@@ -603,7 +608,7 @@ def reconcile_processed(roster, record, remote_row, owner=None):
         raise SafetyStop("自动核验只允许处理所选负责人名单中的记录。")
     if record.done:
         raise SafetyStop("本地名单已经完成，请重新读取后跳过。")
-    if not isinstance(remote_row, dict) or remote_row.get("saLzkId") != record.sa_id:
+    if not isinstance(remote_row, dict) or remote_row.get("saPatentId" if getattr(roster, "kind", "paper") == "patent" else "saLzkId") != record.sa_id:
         raise SafetyStop("后台结果与名单 ID 不完全一致，禁止同步完成标记。")
     status = remote_row.get("markStatus")
     if status not in ("待处理", "已处理"):

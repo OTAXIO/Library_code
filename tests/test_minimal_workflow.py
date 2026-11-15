@@ -416,15 +416,22 @@ class MinimalUITests(unittest.TestCase):
 
     def test_workflow_tabs_topmost_and_no_runtime_created_by_opening(self):
         self.assertEqual([self.app.notebook.tab(t, "text") for t in self.app.notebook.tabs()],
-                         ["自动认领", "零匹配 · 需导入", "证据核验", "交叉核验"])
+                         ["论著认领", "专利认领"])
         self.assertTrue(self.root.attributes("-topmost"))
         self.assertFalse((self.service.base / "runtime").exists())
 
-    def test_cross_review_defaults_to_no_selection_and_sends_no_command(self):
-        self.app.notebook.select(self.app.pages["cross"])
+    def test_paper_page_lists_zero_single_and_multiple_matches(self):
+        self.app.roster.records.append(replace(self.app.roster.records[0], row=9, sa_id='multi', matches=2))
         self.app.render()
-        self.assertEqual(self.app.cross_review.owner.get(), "")
-        self.assertEqual(self.app.cross_review.reviewer.get(), "")
+        self.assertEqual(self.app.trees['claim'].get_children(),
+                         ('claim-pending', 'zero-pending', 'role-issue', 'multi'))
+        self.assertEqual(set(self.app.pages), {'claim', 'patent'})
+        self.assertFalse(hasattr(self.app, 'review_button'))
+
+    def test_patent_placeholder_is_empty_disabled_and_sends_no_command(self):
+        self.app.notebook.select(self.app.pages["patent"])
+        self.app.render()
+        self.assertEqual(self.app.trees["patent"].get_children(), ())
         self.assertEqual(str(self.app.start_button["state"]), "disabled")
         self.app.start()
         self.app.bridge.call.assert_not_called()
@@ -437,16 +444,15 @@ class MinimalUITests(unittest.TestCase):
         self.assertEqual(str(self.app.skip_button["state"]), "disabled")
         self.app.scope.set("重试跳过项")
         self.app.render()
-        self.assertEqual(self.app.trees["claim"].get_children(), ("claim-skip",))
-        self.assertEqual(self.app.trees["import"].get_children(), ("zero-skip",))
+        self.assertEqual(self.app.trees["claim"].get_children(), ("claim-skip", "zero-skip"))
         self.assertEqual(str(self.app.skip_button["state"]), "disabled")
 
     def test_busy_locks_controls_and_close_requests_safe_pause(self):
         self.app.set_busy(True)
         self.assertEqual(str(self.app.owner_box["state"]), "disabled")
         self.assertEqual(str(self.app.skip_button["state"]), "disabled")
-        self.assertEqual(str(self.app.review_button["state"]), "disabled")
-        self.assertEqual(self.app.notebook.tab(self.app.pages["import"], "state"), "disabled")
+        self.assertFalse(hasattr(self.app, "review_button"))
+        self.assertEqual(self.app.notebook.tab(self.app.pages["patent"], "state"), "disabled")
         with patch("app.messages.showwarning"):
             self.app.close()
         self.assertTrue(self.app.stop.is_set())
@@ -515,7 +521,7 @@ class MinimalUITests(unittest.TestCase):
         self.app.set_busy(False)
         self.app.owner.set('（未分配）')
         self.app.render()
-        self.assertEqual(str(self.app.review_button['state']), 'disabled')
+        self.assertFalse(hasattr(self.app, 'review_button'))
         with patch('app.messages.showwarning'):
             self.app.open_manual_review()
         self.assertFalse(hasattr(self.app, 'review_dialog'))
@@ -533,7 +539,7 @@ class MinimalUITests(unittest.TestCase):
         self.app.roster = self.service.load()
         self.app.bridge = SimpleNamespace(pending=None, online=False, call=Mock(), close=Mock())
         self.app.render()
-        self.app.review_button.invoke()
+        self.app.open_manual_review()
         dialog = self.app.review_dialog
         dialog.tree.selection_set('2')
         self.root.update()
@@ -594,10 +600,10 @@ class MinimalUITests(unittest.TestCase):
             run.assert_not_called()
             self.assertFalse(self.app.busy)
 
-    def test_zero_match_tab_dispatches_need_import_for_selected_owner(self):
-        self.app.notebook.select(self.app.pages["import"])
+    def test_paper_tab_dispatches_all_matches_for_selected_owner(self):
+        self.app.notebook.select(self.app.pages["claim"])
         self.app.render()
-        self.assertIn("需导入", self.app.start_button["text"])
+        self.assertEqual("开始认领", self.app.start_button["text"])
         self.assertEqual(str(self.app.limit_box["state"]), "normal")
         done = TaskResult(self.app.roster, {"zero-pending": "网页及名单已标注需导入"}, "标注需导入 1")
         with patch.object(self.service, "run", return_value=done) as run:
@@ -607,8 +613,9 @@ class MinimalUITests(unittest.TestCase):
                 self.root.update()
                 time.sleep(.01)
         self.assertEqual(run.call_count, 1)
-        self.assertEqual([r.sa_id for r in run.call_args.args[1]], ["zero-pending"])
-        self.assertEqual(run.call_args.kwargs, {"need_import": True, "owner": "谭勋策"})
+        self.assertEqual([r.sa_id for r in run.call_args.args[1]], ["claim-pending", "zero-pending", "role-issue"])
+        self.assertEqual(run.call_args.args[2], "paper")
+        self.assertEqual(run.call_args.kwargs, {"owner": "谭勋策"})
         self.assertFalse(self.app.busy)
 
     def test_claim_tab_dispatches_claim_for_selected_owner_only(self):
@@ -622,7 +629,7 @@ class MinimalUITests(unittest.TestCase):
                 self.root.update()
                 time.sleep(.01)
         self.assertEqual([r.sa_id for r in run.call_args.args[1]], ["other-owner"])
-        self.assertEqual(run.call_args.kwargs, {"need_import": False, "owner": "其他人"})
+        self.assertEqual(run.call_args.kwargs, {"owner": "其他人"})
 
     def test_small_window_keeps_actions_and_selected_detail_visible(self):
         self.root.attributes("-alpha", 0)

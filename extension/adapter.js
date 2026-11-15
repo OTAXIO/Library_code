@@ -7,10 +7,15 @@ async function runSACommand(command) {
   let releaseReadOnlyPicker = null;
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const stop = message => { throw new Error(message); };
+  const pageKind = location.hash.split("?")[0] === "#/saPatentCompare/list" ? "patent" : "paper";
+  const patent = pageKind === "patent";
+  const pageFields = patent ? {id:"saPatentId", component:"saPatentCompare", current:"currentSaPatentId"} :
+    {id:"saLzkId", component:"dataCompare", current:"currentSaLzkId"};
+  const itemIds = row => String(row.itemId || "").split(",").map(x=>x.trim()).filter(Boolean);
   const check = () => {
     const u = new URL(location.href);
     if (u.hostname !== "admin.ir.lib.sjtu.edu.cn" || !["http:", "https:"].includes(u.protocol) ||
-        u.hash.split("?")[0] !== "#/dataCompare/list") stop("已离开比对结果页或登录失效，请人工返回并重新核验");
+        u.hash.split("?")[0] !== (patent ? "#/saPatentCompare/list" : "#/dataCompare/list")) stop("已离开比对结果页或登录失效，请人工返回并重新核验");
     if (!Number.isFinite(command.expires) || Date.now() >= command.expires - 2500)
       stop("操作时限已到，停止后续动作；请核验已发出请求的结果");
   };
@@ -38,17 +43,17 @@ async function runSACommand(command) {
   const equal = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
   // The desktop selects and verifies the roster owner; the page cannot see it.
   const assignedOwner = owner => typeof owner === "string" && !!owner && owner === owner.trim() && owner !== "（未分配）";
-  const keys = ["id", "saLzkId", "itemId", "matchCount", "markStatus", "reason", "title", "titleValue",
-    "doi", "doiValue", "wos", "wosValue", "claimStatus", "gh", "qr", "updateTime", "updateUsername", "remark"];
+  const keys = ["id", pageFields.id, "itemId", "matchCount", "markStatus", "reason", "title", "titleValue",
+    "doi", "doiValue", "wos", "wosValue", "claimStatus", "gh", "qr", "updateTime", "updateUsername", "remark", ...(patent ? ["zlmc", "zlh", "sqh", "markType", "zlmcSame", "zlhSame", "sqhSame"] : [])];
   const snap = row => {
-    for (const key of ["id", "saLzkId", "itemId", "gh"]) {
+    for (const key of ["id", pageFields.id, "itemId", "gh"]) {
       if (row[key] != null && typeof row[key] !== "string") stop("网页编号不是文本，可能已丢失精度；停止写入");
     }
     if (!["待处理", "已处理"].includes(row.markStatus)) stop("未知标记状态，需人工处理");
     if (!Number.isInteger(Number(row.matchCount)) || Number(row.matchCount) < 0) stop("匹配数量格式异常");
     const result = {};
     for (const key of keys) {
-      const value = row[key] ?? "";
+      const value = patent && key === "gh" ? String(row[key] ?? "").trim() : row[key] ?? "";
       if (!["string", "boolean", "number"].includes(typeof value)) stop("网页字段类型发生变化，停止操作");
       result[key] = value;
     }
@@ -58,6 +63,8 @@ async function runSACommand(command) {
   const reassignmentActions = ["prepare_reassignment", "inspect_reassignment", "cancel_reassignment", "submit_reassignment"];
   try {
     check();
+    if (patent && !["status", "search", "inspect_claim", "prepare_claim", "submit_claim", "complete"].includes(command.action))
+      stop("专利页不支持此命令");
     const scan = command.action === "cross_review_page";
     if (scan && command.page_size !== undefined &&
         (!Number.isInteger(command.page_size) || command.page_size < 1 || command.page_size > 1000))
@@ -72,7 +79,7 @@ async function runSACommand(command) {
     const visit = vm => {
       if (!vm || visited.has(vm)) return;
       visited.add(vm);
-      if (vm.$options?.name === "dataCompare") found.add(vm);
+      if (vm.$options?.name === pageFields.component) found.add(vm);
       for (const child of vm.$children || []) visit(child);
     };
     roots.forEach(visit);
@@ -81,9 +88,13 @@ async function runSACommand(command) {
     if (!vm.searchForm || !Array.isArray(vm.tableData) || !vm.page || typeof vm.getData !== "function") stop("页面结构不兼容");
     const query = async (filters = {}, page = 1) => {
       check();
-      const defaults = {saLzkId: command.sa_id, matchCount: null, claimStatus: "", markStatus: "",
+      const defaults = {[pageFields.id]: command.sa_id, matchCount: null, claimStatus: "", markStatus: "",
         titleValue: "", doiValue: "", wosValue: "", qr: "", gh: "", reason: "", markType: null,
         updateUsername: "", createTimeRange: [], updateTimeRange: []};
+      if (patent) {
+        delete defaults.titleValue; delete defaults.doiValue; delete defaults.wosValue;
+        Object.assign(defaults, {zlmc:"", zlh:"", sqh:""});
+      }
       if (Object.keys(vm.searchForm).sort().join() !== Object.keys(defaults).sort().join()) stop("检索字段发生变化，需更新适配器");
       Object.assign(vm.searchForm, defaults, filters);
       vm.page.currentPage = page;
@@ -120,7 +131,7 @@ async function runSACommand(command) {
       await query();
       if (Number(vm.page.total) !== 1 || vm.tableData.length !== 1) stop("名单 ID 未返回唯一结果，停止自动操作");
       const row = vm.tableData[0];
-      if (row.saLzkId !== command.sa_id) stop("网页结果与名单 ID 不完全相同");
+      if (row[pageFields.id] !== command.sa_id) stop("网页结果与名单 ID 不完全相同");
       snap(row);
       return row;
     };
@@ -138,7 +149,7 @@ async function runSACommand(command) {
           child?.drawer === true || child?.dialogVisible === true || child?.dialogModalVisible === true);
         if (windows.length !== 1 || windows[0] !== panel || !panel?.isConnected ||
             !panel.matches(".el-drawer") || !ui.$el?.contains?.(panel) || ui.visible !== true ||
-            detail.dialogVisible !== true || detail.currentSaLzkId !== command.sa_id ||
+            detail.dialogVisible !== true || detail[pageFields.current] !== command.sa_id ||
             detail.dialogLoading || childOpen || vm.$refs?.compareStatusDialog?.dialogVisible)
           stop("网页有未关闭的窗口，请人工处理后再预检");
       };
@@ -146,7 +157,7 @@ async function runSACommand(command) {
       if (vm.loading) stop("列表仍在加载，请等待后重查");
       const row = snap(await fresh());
       guardSurface();
-      return {ok: true, data: {row, non_sjtu_completion_protocol: 1, import_completion_protocol: 1,
+      return {ok: true, data: {row, page_kind: pageKind, non_sjtu_completion_protocol: 1, import_completion_protocol: 1,
         metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 2,
         publisher_journal_protocol: 2, publisher_correspondent_protocol: 2,
         native_claim_response_protocol:typeof vm.$http?.request==='function'?1:0,
@@ -263,7 +274,7 @@ async function runSACommand(command) {
         equal(previousClaim.__saReassignment, command.authorization);
       const ownedPreviousRead = command.action === "search" &&
         typeof previousClaim.__saAssistant === "string" && previousClaim.__saAssistant &&
-        previousClaim.__saAssistant === drawer.currentSaLzkId &&
+        previousClaim.__saAssistant === drawer[pageFields.current] &&
         previousClaim.tableData?.id === previousClaim.ids;
       if (previousClaim.__saAssistant !== command.sa_id && !ownedPreviousRead && !recoveryRead || previousClaim.loading ||
           previousClaim.tableData?.metadata?.author?.some(author => author.data))
@@ -302,9 +313,9 @@ async function runSACommand(command) {
     }
     const closeReadOnlyDetail = () => {
       if (drawer.dialogLoading) stop("详情仍在加载，请等待后重查");
-      const id = drawer.currentSaLzkId;
+      const id = drawer[pageFields.current];
       return closeDrawer(detailSurface, "dialogVisible", "关闭只读详情", () => {
-        if (drawer.currentSaLzkId !== id && drawer.currentSaLzkId !== "")
+        if (drawer[pageFields.current] !== id && drawer[pageFields.current] !== "")
           stop("关闭期间详情目标已变化，请重新定位");
       });
     };
@@ -323,22 +334,28 @@ async function runSACommand(command) {
       if (drawer.dialogLoading) stop("详情仍在加载，请等待后重查");
       // Re-reading the same record needs a fresh request, not a close/reopen
       // cycle that can race the previous `closed` callback and clear new data.
-      if (drawer.currentSaLzkId !== command.sa_id) await closeReadOnlyDetail();
+      if (drawer[pageFields.current] !== command.sa_id) await closeReadOnlyDetail();
     } else if (visible(detailSurface.wrapper) || visible(detailSurface.panel)) {
       await closeReadOnlyDetail(); // A user-initiated close may still be animating.
     }
     if (vm.loading) stop("列表仍在加载，请等待后重查");
     let row = await fresh();
     const before = snap(row);
+    if (patent) row = {...row, gh: before.gh};
+    if (patent && ["inspect_claim", "prepare_claim", "submit_claim"].includes(command.action) &&
+        (!/^[0-9]{1,40}$/.test(command.item_id || "") || !itemIds(row).includes(command.item_id) ||
+         itemIds(row).length !== Number(row.matchCount) || new Set(itemIds(row)).size !== itemIds(row).length))
+      stop("专利认领必须指定属于该行的单个 item_id");
     if (command.action !== "search") {
       if (!command.expected || Object.keys(command.expected).sort().join() !== [...keys].sort().join() ||
           !keys.every(key => before[key] === command.expected[key]))
         stop("网页数据在核验后已变化。请只读重查并再次核验，不能覆盖新数据");
     }
+    let patentDetail = null;
     const showDetail = async () => {
       check();
       safeWindows();
-      if (drawer.dialogVisible && drawer.currentSaLzkId !== command.sa_id)
+      if (drawer.dialogVisible && drawer[pageFields.current] !== command.sa_id)
         stop("查询期间详情目标已变化，请重新定位");
       vm.showItemId(row);
       await vm.$nextTick();
@@ -357,7 +374,55 @@ async function runSACommand(command) {
           !!detailSurface.ui.$el?.querySelector?.(".el-drawer"), "渲染只读详情", 5000);
       detailSurface = drawerSurface(drawer, "只读详情");
       safeWindows();
-      if (drawer.currentSaLzkId !== command.sa_id) stop("详情 ID 不一致");
+      if (drawer[pageFields.current] !== command.sa_id) stop("详情 ID 不一致");
+      if (patent) {
+        await wait(() => Array.isArray(drawer.matchedItemCards) && drawer.matchedItemCards.every(c=>c.loading === false), "读取专利匹配卡片");
+        const left = drawer.leftData;
+        if (!left || left.id !== command.sa_id || typeof left.gh !== "string" ||
+            left.gh.trim() !== row.gh || typeof left.xm !== "string" || !left.xm.trim() || /[()（）]/.test(left.xm))
+          stop("专利 SA 姓名或完整工号与行不一致");
+        const ids = itemIds(row);
+        if (ids.length !== Number(row.matchCount) || new Set(ids).size !== ids.length ||
+            drawer.matchedItemCards.length !== ids.length) stop("专利匹配卡片数量与行不一致");
+        const cards = drawer.matchedItemCards.map(c => {
+          if (typeof c.itemId !== "string" || !ids.includes(c.itemId)) stop("专利卡片平台号与行不一致");
+          const template = document.createElement("template");
+          template.innerHTML = String(c.claimStatusHtml ?? "");
+          const content = template.content;
+          const states = [...content.querySelectorAll(".claim-info__status")].map(x=>x.textContent.trim());
+          const labels = [...content.querySelectorAll(".claim-info__label")].map(x=>x.textContent.trim());
+          const values = [...content.querySelectorAll(".claim-info__value")].map(x=>x.textContent.trim());
+          // Patent cards also occur as plain labelled HTML. Remove action
+          // buttons and accept only one explicit state and one name/staff pair.
+          // Partial/changed structured cards never fall back to text guessing.
+          if (!states.length && !labels.length && !values.length) {
+            content.querySelectorAll("button, script, style").forEach(x=>x.remove());
+            const text = content.textContent.trim();
+            states.push(...(text.match(/认领不一致|未认领|已认领/g) || []));
+            if (states.length === 1 && states[0] !== "未认领") {
+              const identities = [...text.matchAll(/姓名\s*[：:]?\s*(.*?)\s*工号\s*[：:]?\s*([0-9]{1,40})(?![0-9])/g)];
+              if (identities.length !== 1 || (text.match(/姓名/g)||[]).length !== 1 || (text.match(/工号/g)||[]).length !== 1)
+                stop("专利认领卡片姓名工号不完整");
+              labels.push("姓名", "工号"); values.push(identities[0][1].trim(), identities[0][2]);
+            }
+          }
+          if (states.length !== 1 || !["已认领","未认领","认领不一致"].includes(states[0])) stop("专利卡片认领状态未唯一确认");
+          let name="", staff="";
+          if (states[0] !== "未认领") {
+            if (!equal(labels,["姓名","工号"]) || values.length !== 2 || !values[0] || !/^[0-9]{1,40}$/.test(values[1]))
+              stop("专利认领卡片姓名工号不完整");
+            [name,staff]=values;
+          }
+          return Object.fromEntries([...[["itemId",c.itemId]],
+            ...["title","applicationNumber","authorization","publicationNumber","inventor","patentHolder"].map(k=>[k,plain(c[k])]),
+            ["claimed",states[0]==="已认领"],["name",name],["staff_id",staff],["claim_text",plain(c.claimStatusHtml)]]);
+        });
+        if (new Set(cards.map(c=>c.itemId)).size !== ids.length) stop("专利卡片平台号重复");
+        patentDetail = {left:{...left,gh:left.gh.trim()}, cards};
+        const selected = cards.find(c=>c.itemId === command.item_id);
+        return [{label:"认领状态",sa:`${left.xm.trim()}(${left.gh.trim()})`,
+          library:selected?.claimed && selected.staff_id === row.gh ? "已认领" : "未认领"}];
+      }
       // The current site replaced the two stored arrays with computed
       // compareRows and filters out rows whose BOTH sides are empty. Keep the
       // legacy contract, but never mistake a missing component for blank data.
@@ -441,9 +506,9 @@ async function runSACommand(command) {
         // A rejected comparison can still leave its detail open. Release only
         // this record, using the same guards as a successful queue read.
         if (command.close_detail === true && drawer.dialogVisible &&
-            drawer.currentSaLzkId === command.sa_id) await closeReadOnlyDetail();
+            drawer[pageFields.current] === command.sa_id) await closeReadOnlyDetail();
       }
-      return {ok: true, data: {row: before, comparison, import_completion_protocol: 1,
+      return {ok: true, data: {row: before, comparison, page_kind: pageKind, ...(patent ? patentDetail : {}), import_completion_protocol: 1,
         metadata_completion_protocol: 4, metadata_detail_protocol: 1, publisher_metadata_protocol: 2, publisher_journal_protocol: 2,
         staff_claim_protocol: 1, claim_identity: claimIdentity, closed_rework_protocol: 1, publisher_correspondent_protocol: 2,
         native_claim_response_protocol:typeof vm.$http?.request==='function'?1:0,
@@ -514,7 +579,7 @@ async function runSACommand(command) {
       expected.correspondent = expected.author.filter(a => a.correspondent === true ||
         a.ownCorrespondent === true || a.commonCorrespondent === true).map(a => a.fullname);
       await vm.$nextTick();
-      if (!equal(form.ruleForm, expectedForm) || drawer.currentSaLzkId !== command.sa_id ||
+      if (!equal(form.ruleForm, expectedForm) || drawer[pageFields.current] !== command.sa_id ||
           !equal(drawer.itemData.metadata, original) || visibleAll(".el-dialog, .el-message-box").length)
         stop("保存前表单或原文献发生变化，未提交");
       submitted = true;
@@ -585,8 +650,8 @@ async function runSACommand(command) {
         row.updateUsername === command.owner && typeof row.remark === "string" && claimNote(row.remark);
       if (!inspecting && row.markStatus !== "待处理" && !closedReassignment)
         stop("该记录已处理，不自动认领");
-      const ids = String(row.itemId || "").replace(/^,/, "").split(",").filter(Boolean);
-      if (Number(row.matchCount) !== 1 || ids.length !== 1) stop("自动认领需要唯一匹配条目");
+      const ids = patent ? [command.item_id] : String(row.itemId || "").replace(/^,/, "").split(",").filter(Boolean);
+      if (!patent && (Number(row.matchCount) !== 1 || ids.length !== 1)) stop("自动认领需要唯一匹配条目");
       const comparison = await showDetail();
       const fields = comparison.filter(field => field.label === "认领状态");
       if (fields.length !== 1) stop("未找到唯一的认领状态字段");
@@ -596,6 +661,7 @@ async function runSACommand(command) {
       const staffId = (groups[0][1] || groups[0][2] || "").trim();
       if (!/^[0-9]{1,40}$/.test(staffId)) stop("SA 括号编号不是完整数字文本");
       if (command.sa_text !== saText || command.staff_id !== staffId) stop("SA 提交编号或姓名在读取后发生变化，请重新定位");
+      if (patent && command.roster_staff_id !== staffId) stop("专利名单完整工号未确认");
       if ((row.gh && row.gh !== staffId) || (command.roster_staff_id && command.roster_staff_id !== staffId))
         stop("SA 括号编号与名单/网页工号不一致，请人工核对");
       const authorization = command.authorization;
@@ -609,12 +675,12 @@ async function runSACommand(command) {
       if (!claim || !["getItemDetail", "handleSelect", "handleClaim", "getShows"].every(key => typeof claim[key] === "function"))
         stop("作者认领页面结构已变化，请更新扩展");
       const oldTable = claim.tableData;
-      drawer.handleClaim();
+      if (patent) drawer.handleClaim(ids[0]); else drawer.handleClaim();
       await wait(() => claim.drawer && !claim.loading && claim.tableData !== oldTable, "打开作者认领页");
       const guard = () => {
         check();
         if (!claim.drawer || claim.ids !== ids[0] || claim.tableData?.id !== ids[0] || claim.auth !== true ||
-            drawer.currentSaLzkId !== command.sa_id || !Array.isArray(claim.tableData?.metadata?.author))
+            drawer[pageFields.current] !== command.sa_id || !Array.isArray(claim.tableData?.metadata?.author))
           stop("认领页面目标、权限或作者数据不一致");
       };
       guard();
@@ -936,6 +1002,33 @@ async function runSACommand(command) {
       if (command.action === "open_metadata") drawer.editItem(ids[0]);
       else drawer.handleClaim();
       return {ok: true, data: {row: before, manual: true}};
+    }
+    if (patent) {
+      const note = command.note;
+      if (command.action !== "complete" || !command.reviewed || !assignedOwner(command.owner) ||
+          !["已认领", "需导入"].includes(note) || row.markStatus !== "待处理" || row.remark && row.remark !== note)
+        stop("专利结案状态或备注不符合要求");
+      if (note === "需导入") {
+        if (Number(row.matchCount) !== 0 || itemIds(row).length) stop("仅零匹配专利可标注需导入");
+      } else {
+        await showDetail();
+        if (![1,2].includes(Number(row.matchCount)) || !patentDetail.cards.every(c=>c.claimed && c.staff_id===row.gh))
+          stop("尚未确认全部专利条目认领给目标工号");
+        await closeReadOnlyDetail();
+      }
+      row = await fresh();
+      if (!equal(snap(row), before)) stop("专利结案前行已改变");
+      const modal = vm.$refs?.compareStatusDialog || drawer.$refs?.compareStatusDialog;
+      if (!modal || typeof modal.show !== "function" || typeof modal.handleConfirm !== "function") stop("状态弹窗结构不兼容");
+      modal.show(row); await vm.$nextTick();
+      if (!modal.dialogVisible || modal.currentRow?.[pageFields.id] !== command.sa_id || modal.currentRow.markStatus !== "待处理")
+        stop("专利状态弹窗目标不一致");
+      modal.editForm.remark = note; await vm.$nextTick(); check(); submitted=true;
+      modal.handleConfirm();
+      await wait(()=>!modal.dialogVisible && !vm.loading,"提交专利状态");
+      const after=snap(await fresh());
+      if (after.markStatus!=="已处理" || after.remark!==note) stop("专利结案回读不一致");
+      return {ok:true,data:{row:after,verified:true,page_kind:pageKind}};
     }
     const presetNotes = ["已认领", "DOI和WOSID SA未提交", "通讯作者修正"];
     const note = typeof command.note === "string" ? command.note.trim() : "";

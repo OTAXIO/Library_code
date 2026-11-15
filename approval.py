@@ -113,9 +113,9 @@ def claim_completion_note(record, comparison, claimed=False):
     raise SafetyStop("当前待处理原因不属于可自动认领结案的范围。")
 
 
-def verify_claim_result(record, result, person, author):
+def verify_claim_result(record, result, person, author, *, id_field="saLzkId"):
     """A successful transport response alone is not a verified author claim."""
-    if (result.get("row", {}).get("saLzkId") != record.sa_id or result.get("verified") is not True
+    if (result.get("row", {}).get(id_field) != record.sa_id or result.get("verified") is not True
             or result.get("claimed") is not True or result.get("staff_id") != person["wno"]
             or result.get("scholar_id") != person["id"] or result.get("author") != author["fullname"]
             or result.get("order") != author["order"]):

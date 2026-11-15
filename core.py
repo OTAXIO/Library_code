@@ -100,6 +100,7 @@ class Roster:
     header_column_count: int = 0
     remark_column: int = 0
     status_separate: bool = False
+    kind: str = "paper"
 
     def assert_unchanged(self):
         if self.path.stat().st_mtime_ns != self.mtime_ns or file_hash(self.path) != self.sha256:
@@ -134,9 +135,36 @@ def remark_column(labels):
     raise SafetyStop("无法唯一确认完成标记列。应有一个“备注”列，或首列为备注、第二列为负责人。请人工检查，不能猜测写入位置。")
 
 
-def read_roster(path):
+PATENT_HEADERS = dict(HEADERS, sa_id="sa_patent表ID", title="专利名称", doi="申请(专利)号", wos="授权号")
+PATENT_ALIASES = {"matches": ("匹配到的条目数量", "匹配条目数"),
+                  "reason": ("标记为待处理原因", "待处理原因")}
+
+def _header_key(value):
+    return re.sub(r"\s+", "", text(value)).replace("（", "(").replace("）", ")").casefold()
+
+def read_roster(path, kind="paper", *, _exact=False):
     from openpyxl import load_workbook
+    if kind not in ("paper", "patent"):
+        raise SafetyStop("未知名单类型。")
     path = Path(path).resolve()
+    if kind == "patent" and not _exact:
+        candidates = [path] if path.name not in ("list.xlsx", "patent.xlsx") else [path.parent / "list.xlsx", path.parent / "patent.xlsx"]
+        found = []
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            workbook = load_workbook(candidate, read_only=True)
+            try:
+                for sheet in workbook:
+                    if _header_key("sa_patent表ID") in [_header_key(c.value) for c in next(sheet.iter_rows(min_row=1, max_row=1), ())]:
+                        found.append(candidate)
+            finally:
+                workbook.close()
+        if not found:
+            raise SafetyStop("未找到专利名单（需要包含 sa_patent表ID 表头的工作表或 patent.xlsx）")
+        if len(found) != 1:
+            raise SafetyStop("专利名单不唯一：list.xlsx 与 patent.xlsx 或多个工作表含 sa_patent表ID 表头。")
+        path = found[0]
     stamp, checksum = path.stat().st_mtime_ns, file_hash(path)
     book = load_workbook(path, read_only=True, data_only=False)
     try:
@@ -144,10 +172,10 @@ def read_roster(path):
         for sheet in book:
             row = next(sheet.iter_rows(min_row=1, max_row=1), ())
             labels = [text(c.value) for c in row]
-            if "sa_lzk表ID" in labels:
+            if ((_header_key("sa_patent表ID") in [_header_key(x) for x in labels]) if kind == "patent" else "sa_lzk表ID" in labels):
                 choices.append((sheet, labels))
         if len(choices) != 1:
-            raise SafetyStop("应恰好有一个包含 sa_lzk表ID 表头的工作表。")
+            raise SafetyStop(f"应恰好有一个包含 {PATENT_HEADERS['sa_id'] if kind == 'patent' else HEADERS['sa_id']} 表头的工作表。")
         sheet, labels = choices[0]
         done_column = completion_column(labels)
         note_column = remark_column(labels)
@@ -158,14 +186,17 @@ def read_roster(path):
         source_column = source_columns[0] if source_columns else None
         header_column_count = max((i + 1 for i, label in enumerate(labels) if label), default=0)
         mapping = {}
-        for key, label in HEADERS.items():
-            if labels.count(label) != 1:
+        for key, label in (PATENT_HEADERS if kind == "patent" else HEADERS).items():
+            aliases = PATENT_ALIASES.get(key, (label,)) if kind == "patent" else (label,)
+            columns = [i for i, value in enumerate(labels) if (_header_key(value) in {_header_key(x) for x in aliases} if kind == "patent" else value == label)]
+            if len(columns) != 1:
                 raise SafetyStop(f"缺少或重复必要表头：{label}")
-            mapping[key] = labels.index(label)
+            mapping[key] = columns[0]
         query_cols = [i for i, label in enumerate(labels) if label.startswith("查询方式")]
-        if len(query_cols) != 1:
+        if len(query_cols) != 1 and not (kind == "patent" and not query_cols):
             raise SafetyStop("无法唯一识别查询方式列。")
-        mapping["query"] = query_cols[0]
+        if query_cols:
+            mapping["query"] = query_cols[0]
         records, seen = [], set()
         # OOXML's dimension is optional. A sparse row can end before the status
         # column even when the header declares it; explicitly pad to the schema.
@@ -199,6 +230,7 @@ def read_roster(path):
                 if key in ("sa_id", "staff_id", "item_ids") and cell.value is not None and not isinstance(cell.value, str):
                     raise SafetyStop(f"第 {number} 行 {labels[index]} 不是文本，可能丢失前导零或长编号精度。")
                 values[key] = text(cell.value)
+            values.setdefault("query", "")
             sa_id = values["sa_id"]
             if not sa_id or len(sa_id) > 160 or re.search(r"[\x00-\x1f]", sa_id):
                 raise SafetyStop(f"第 {number} 行名单 ID 无效。")
@@ -223,7 +255,7 @@ def read_roster(path):
         book.close()
     result = Roster(path, checksum, records, stamp, sheet.title, done_column + 1,
                     (source_column + 1) if source_column is not None else 0,
-                    header_column_count, note_column + 1, separate)
+                    header_column_count, note_column + 1, separate, kind)
     result.assert_unchanged()
     return result
 

@@ -115,9 +115,16 @@ def run_need_import_batch(roster, records, bridge, owner, cancel=lambda: False,
             note("需导入协议检查", "已暂停", record.sa_id)
             break
         row = fresh.get("row")
+        if getattr(roster, "kind", "paper") == "patent" and fresh.get("page_kind") != "patent":
+            halted, reason = True, "绑定页类型不符：请切换到 SA 专利比对页并重新配对。"
+            break
         legacy_unknown = PENDING_NOTE in record.remark
         try:
-            verify_sa(record, row)
+            if roster.kind == "patent":
+                from patent_claim import verify_patent_row
+                verify_patent_row(record, row)
+            else:
+                verify_sa(record, row)
             count = match_count(row)
         except SafetyStop:
             skipped[record.sa_id] = PENDING_NOTE if legacy_unknown else "名单与网页不一致"
@@ -153,7 +160,7 @@ def run_need_import_batch(roster, records, bridge, owner, cancel=lambda: False,
         try:
             guard()
             if store is None:
-                store = WorkflowStore(current.path.parent / "runtime" / "need-import")
+                store = WorkflowStore(current.path.parent / "runtime" / ("patent-claims/need-import" if roster.kind == "patent" else "need-import"))
             reserved = store.reserve(record, intent)
         except _Interrupted as exc:
             halted, reason = not exc.cancelled, str(exc)
@@ -188,7 +195,7 @@ def run_need_import_batch(roster, records, bridge, owner, cancel=lambda: False,
             break
         verified = result.get("row") if isinstance(result, dict) else None
         if (not isinstance(result, dict) or result.get("verified") is not True or not isinstance(verified, dict)
-                or verified.get("saLzkId") != record.sa_id or verified.get("markStatus") != "已处理"
+                or verified.get("saPatentId" if roster.kind == "patent" else "saLzkId") != record.sa_id or verified.get("markStatus") != "已处理"
                 or verified.get("remark") != NOTE):
             skipped[record.sa_id] = PENDING_NOTE
             halted, reason = True, "需导入结案回执未确认，已暂停；禁止重复提交，请先核验网页。"

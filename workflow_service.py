@@ -38,18 +38,20 @@ class WorkflowService:
         self.base = Path(base)
         self.operation_log = operation_log or OperationLog(self.base / "log.txt")
 
-    def read_current(self):
-        return read_roster(fixed_roster_path(self.base))
+    def read_current(self, kind="paper"):
+        return read_roster(self.base / "list.xlsx" if kind == "patent" else fixed_roster_path(self.base), kind=kind)
 
-    def load(self):
-        return migrate_status_column(self.read_current())
+    def load(self, kind="paper"):
+        return migrate_status_column(self.read_current(kind))
 
     @staticmethod
     def visible(roster, mode, owner, scope):
-        if not roster or mode not in ("claim", "import", "evidence"):
+        if not roster or mode not in ("paper", "patent", "claim", "import", "evidence"):
+            return []
+        if mode == "patent" and getattr(roster, "kind", "paper") != "patent":
             return []
         return [r for r in roster.records if r.owner == owner
-                and (mode == "evidence" or (r.matches == 0 if mode == "import" else supported_claim(r)))
+                and (mode in ("paper", "patent", "evidence") or (r.matches == 0 if mode == "import" else supported_claim(r)))
                 and (scope == "all" or scope == "done" and r.done
                      or scope == "pending" and not r.done and not r.skipped
                      or scope == "skipped" and not r.done and r.skipped)]
@@ -91,13 +93,13 @@ class WorkflowService:
         require_owner(owner)
         if scope!='skipped' and (type(limit) is not int or not 1 <= limit <= 100):
             raise SafetyStop("本轮条数须为 1–100 的整数。")
-        if mode not in ("claim", "import") or scope not in ("pending", "skipped"):
+        if mode not in ("paper", "patent", "claim", "import") or scope not in ("pending", "skipped"):
             raise SafetyStop("已完成仅供查看；请选择待处理或重试跳过项。")
         roster.assert_unchanged()
         visible=self.visible(roster,mode,owner,scope)
         records=visible if scope=='skipped' else visible[:limit]
         if not records:
-            raise SafetyStop("当前范围没有可执行的" + ("零匹配" if mode == "import" else "单匹配认领") + "任务。")
+            raise SafetyStop("当前范围没有可执行的论著认领任务。")
         return records
 
     def select_manual(self, roster, owner, scope, sa_id):
@@ -120,7 +122,7 @@ class WorkflowService:
     def skip_selected(self, roster, mode, owner, scope, sa_id, bridge=None):
         """Persist numeric 2 and a visible reason for one owned row. No browser commands."""
         record = self.select_skip(roster, mode, owner, scope, sa_id)
-        if not roster.status_separate or roster.path.resolve() != fixed_roster_path(self.base).resolve():
+        if not roster.status_separate or roster.path.resolve() != (self.base / roster.path.name if roster.kind == "patent" else fixed_roster_path(self.base)).resolve() or roster.path.name not in ("list.xlsx", "patent.xlsx"):
             raise SafetyStop("请重读当前 code/list.xlsx，确认末尾独立的是否识别列后再跳过。")
         if bridge is not None and getattr(bridge, "pending", None):
             raise SafetyStop("浏览器命令仍在执行，未跳过；请等待当前操作结束。")
@@ -139,7 +141,7 @@ class WorkflowService:
         """Human override of a single local flag; keep all original intent journals."""
         from manual_review import STATES, select_review, state_of, write_review
         record = select_review(roster, owner, sa_id)
-        if roster.path.resolve() != fixed_roster_path(self.base).resolve():
+        if roster.path.resolve() != (self.base / roster.path.name if roster.kind == "patent" else fixed_roster_path(self.base)).resolve() or roster.path.name not in ("list.xlsx", "patent.xlsx"):
             raise SafetyStop('手动核验只允许保存当前 code/list.xlsx。')
         if bridge is not None and getattr(bridge, 'pending', None):
             raise SafetyStop('浏览器命令仍待回读，请等待结束后再手动核验。')
@@ -230,8 +232,129 @@ class WorkflowService:
                 result.summary += "\n诊断：runtime/run-reports/" + diagnostic.path.name
         return result
 
+    @staticmethod
+    def needs_browser(records):
+        return any(r.matches == 0 or supported_claim(r) for r in records)
+
+    def _run_paper(self, roster, records, scope, bridge, stop, progress, owner):
+        from need_import import run_need_import_batch
+        from roster_annotations import annotate_roster, format_owned_status, review_reason
+
+        owners = {r.owner for r in records}
+        owner = owner if owner is not None else next(iter(owners)) if len(owners) == 1 else None
+        if not owner or any(r.owner != owner for r in records):
+            raise SafetyStop("运行队列须只包含所选负责人的记录，未开始。")
+        if records != self.select(roster, "paper", owner, len(records), scope):
+            raise SafetyStop("运行队列与当前名单范围不一致，未开始。")
+        if self.needs_browser(records) and (not bridge or not bridge.online):
+            raise SafetyStop("浏览器未连接，请在 SA 比对结果页扩展中配对。")
+        if self.needs_browser(records):
+            first = next(r for r in records if r.matches == 0 or supported_claim(r))
+            status = bridge.call("status", {"sa_id": first.sa_id})
+            if status.get("page_kind") != "paper":
+                raise SafetyStop("绑定页类型不符：请切换到 SA 比对结果页重新配对。")
+        local = [r for r in records if r.matches >= 2 or r.matches == 1 and not supported_claim(r)]
+        messages, reasons = {}, {}
+        multi = nonclaim = claimed = synced = imported = other = 0
+        halted = cancelled = False
+        reason = ""
+        for r in local:
+            if stop.is_set():
+                break
+            note = f"匹配到 {r.matches} 条，未结项" if r.matches >= 2 else "非认领任务：" + str(r.reason or "")[:40]
+            messages[r.sa_id] = ("已是跳过状态，保持不动；" if r.skipped else "") + note
+            if not r.skipped:
+                reasons[r.sa_id] = r.remark or note
+            if r.matches >= 2:
+                multi += 1
+            else:
+                nonclaim += 1
+        if reasons and not stop.is_set():
+            roster.assert_unchanged()
+            chosen = [r for r in local if r.sa_id in reasons]
+            roster = mark_skipped_many(roster, chosen, reasons=reasons).roster
+            for r in chosen:
+                self.operation_log.record("论著分流（仅名单跳过）", "已跳过", r.sa_id)
+        elif stop.is_set():
+            messages.clear()
+            multi = nonclaim = 0
+
+        def audit(action, outcome, sa_id):
+            self.operation_log.record(action, outcome, sa_id)
+
+        # Keep original order within each sub-batch, refreshing rows after every write.
+        groups = ([r.sa_id for r in records if supported_claim(r)],
+                  [r.sa_id for r in records if r.matches == 0])
+        for index, ids in enumerate(groups):
+            if halted or cancelled or stop.is_set():
+                break
+            if not ids:
+                continue
+            roster.assert_unchanged()
+            by_id = {r.sa_id: r for r in roster.records}
+            selected = [by_id[sid] for sid in ids]
+            if index == 0:
+                result = run_claim_batch(roster, selected, bridge, cancel=stop.is_set,
+                    progress=progress, audit=audit, limit=len(selected), retry_skipped=scope == "skipped", owner=owner)
+                claimed += len(result.completed_ids)
+                complete_text = "已认领并完成网页批注及名单回写"
+            else:
+                result = run_need_import_batch(roster, selected, bridge, owner, cancel=stop.is_set,
+                    progress=progress, audit=audit, retry_skipped=scope == "skipped")
+                imported += len(result.completed_ids)
+                complete_text = "网页及名单已标注需导入"
+            roster = result.roster
+            batch_messages = {sid: complete_text for sid in result.completed_ids}
+            batch_messages.update({sid: "后台原已处理，仅同步名单" for sid in result.synced_ids})
+            batch_messages.update(result.skipped)
+            messages.update(batch_messages)
+            synced += len(result.synced_ids)
+            other += len(result.skipped)
+            halted = bool(result.halted)
+            cancelled = bool(getattr(result, "cancelled", False))
+            reason = getattr(result, "reason", "") or ""
+            if scope == "skipped" and not halted and not cancelled:
+                by_id = {r.sa_id: r for r in roster.records}
+                unresolved = {sid: review_reason(msg) for sid, msg in batch_messages.items()
+                              if sid in by_id and by_id[sid].skipped and not by_id[sid].done and review_reason(msg)}
+                if unresolved:
+                    roster = annotate_roster(roster, unresolved=unresolved).roster
+                resolved = {sid for sid in batch_messages if sid in by_id and by_id[sid].done}
+                if resolved:
+                    roster = annotate_roster(roster, resolved_ids=resolved).roster
+            roster = format_owned_status(roster, ids=batch_messages).roster
+        cancelled = cancelled or stop.is_set()
+        tail = reason or ("已暂停；后续子批未执行，请核验网页。" if halted else
+                          "已按请求暂停；后续子批未执行。" if cancelled else "本轮结束。")
+        if (halted or cancelled) and reason:
+            tail += "；已暂停，后续子批未执行。"
+        summary = (f"认领 {claimed} · 原已处理 {synced} · 需导入 {imported} · 多条匹配跳过 {multi} · "
+                   f"非认领跳过 {nonclaim} · 其他跳过 {other}。" + tail)
+        if scope == "skipped" and local and not cancelled:
+            summary += "已跳过的多条匹配/非认领记录保持不动。"
+        return TaskResult(roster, messages, summary, halted=halted, reason=reason, cancelled=cancelled)
+
     def _run(self, roster, records, mode, scope, bridge, stop, progress, *, manual_export=False,
              metadata_import=False, need_import=False, owner=None):
+        if mode == "patent":
+            from patent_claim import run_patent_batch
+            if manual_export or metadata_import or need_import:
+                raise SafetyStop("专利认领不能混用导入模式。")
+            owners = {r.owner for r in records}
+            owner = owner if owner is not None else next(iter(owners)) if len(owners) == 1 else None
+            if records != self.select(roster, mode, owner, len(records), scope):
+                raise SafetyStop("运行队列与当前名单范围不一致。")
+            if any(r.matches < 3 for r in records) and (not bridge or not bridge.online):
+                raise SafetyStop("请在 SA 专利比对页配对。")
+            result = run_patent_batch(roster, records, bridge, owner, stop.is_set, progress,
+                self.operation_log.record, scope == "skipped")
+            return TaskResult(result.roster, result.skipped,
+                f"专利：完成 {len(result.completed_ids)}，同步 {len(result.synced_ids)}，跳过 {len(result.skipped)}。" + result.reason,
+                halted=result.halted, reason=result.reason, cancelled=result.cancelled)
+        if mode == "paper":
+            if manual_export or metadata_import or need_import:
+                raise SafetyStop("论著认领不能混用导入模式。")
+            return self._run_paper(roster, records, scope, bridge, stop, progress, owner)
         if type(metadata_import) is not bool or metadata_import and (mode != "import" or manual_export):
             raise SafetyStop("跨来源 Excel 模式仅用于零匹配导入，不能与 WOS 手动模式混用。")
         if type(manual_export) is not bool or manual_export and (mode != "import" or len(records) != 1):
